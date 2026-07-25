@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Вход — {{ brand.page_title }}</title>
+  <meta name="description" content="{{ brand.meta_description }}">
+  <style nonce="{{ csp_nonce(request) }}">
+    *{box-sizing:border-box}
+    :root{
+      --ink:#ecfbff;
+      --muted:#b9ddea;
+      --line:rgba(188,237,255,.25);
+      --cyan:#44daf1;
+      --cyan2:#77ecff;
+    }
+    body{
+      margin:0;
+      min-height:100vh;
+      font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      color:var(--ink);
+      background:#061724;
+    }
+    .page{
+      position:relative;
+      min-height:100vh;
+      display:grid;
+      grid-template-columns:minmax(320px,1fr) minmax(380px,520px);
+      gap:42px;
+      align-items:center;
+      padding:7vh 10vw;
+      overflow:hidden;
+    }
+    .page::before{
+      content:"";
+      position:absolute;
+      inset:0;
+      background:url('{{ brand.login_background }}') center/cover no-repeat;
+      filter:saturate(1.15) contrast(1.03);
+      transform:scale(1.02);
+    }
+    .page::after{
+      content:"";
+      position:absolute;
+      inset:0;
+      background:
+        radial-gradient(circle at 24% 15%,rgba(141,223,255,.34),transparent 28%),
+        radial-gradient(circle at 82% 42%,rgba(86,211,239,.18),transparent 24%),
+        linear-gradient(110deg,rgba(3,26,43,.53),rgba(5,45,68,.37) 48%,rgba(2,20,32,.74));
+    }
+    .brand,.card{position:relative;z-index:1}
+    .brand{max-width:540px;text-shadow:0 2px 18px rgba(0,0,0,.28)}
+    .logo{display:flex;align-items:center;gap:18px;margin-bottom:50px}
+    .mark{
+      width:70px;height:70px;border:4px solid rgba(236,251,255,.92);
+      border-bottom-color:transparent;border-radius:50%;position:relative;
+      box-shadow:0 0 34px rgba(80,220,247,.24);
+    }
+    .mark::after{
+      content:"";position:absolute;left:11px;right:12px;bottom:13px;height:15px;
+      border-bottom:4px solid rgba(236,251,255,.92);border-radius:50%;
+      transform:rotate(12deg);
+    }
+    .logo-title{font-size:36px;line-height:1;font-weight:800;letter-spacing:3px}
+    .logo-sub{margin-top:8px;font-size:11px;font-weight:800;letter-spacing:6px;color:#d8f5ff}
+    .lead{font-size:24px;line-height:1.35;font-weight:700;margin:0 0 10px}
+    .lead span{display:block;color:#c2eaf5;font-weight:500}
+    .features{display:flex;gap:38px;margin-top:58px}
+    .feature{text-align:center;color:#d4f4fc;font-size:14px;font-weight:700}
+    .feature-icon{
+      width:46px;height:46px;margin:0 auto 12px;border:1px solid var(--line);
+      border-radius:14px;display:grid;place-items:center;
+      background:rgba(108,221,247,.12);box-shadow:inset 0 1px 0 rgba(255,255,255,.18);
+    }
+    .feature svg{width:24px;height:24px;stroke:#c9f7ff}
+    .card{
+      width:100%;max-width:440px;justify-self:end;padding:34px 36px 32px;border-radius:22px;
+      background:linear-gradient(180deg,rgba(34,103,132,.54),rgba(16,63,91,.38));
+      border:1px solid rgba(205,245,255,.25);
+      box-shadow:0 28px 75px rgba(0,14,24,.45), inset 0 1px 0 rgba(255,255,255,.18);
+      backdrop-filter:blur(18px);
+    }
+    h1{font-size:28px;text-align:center;margin:0 0 14px;color:#f1fdff}
+    .muted{margin:0 auto 26px;text-align:center;max-width:310px;color:var(--muted);line-height:1.48}
+    label{display:block;margin:15px 0 8px;font-size:14px;font-weight:800;color:#d9f7ff}
+    input{
+      width:100%;height:48px;padding:0 15px;border-radius:8px;border:1px solid rgba(192,238,255,.25);
+      color:#f2fdff;background:rgba(6,35,54,.36);outline:none;font-size:15px;
+      box-shadow:inset 0 1px 10px rgba(0,0,0,.16);
+    }
+    input::placeholder{color:#9bc6d4}
+    input:focus{border-color:rgba(115,235,255,.76);box-shadow:0 0 0 3px rgba(68,218,241,.18)}
+    .btn{
+      width:100%;height:50px;margin-top:24px;border:0;border-radius:8px;cursor:pointer;
+      color:#063041;font-weight:800;font-size:15px;
+      background:linear-gradient(180deg,var(--cyan2),var(--cyan));
+      box-shadow:0 14px 30px rgba(42,211,237,.24);
+    }
+    .btn:hover{filter:brightness(1.04)}
+    .err{
+      margin:0 0 16px;padding:12px 14px;border-radius:10px;color:#ffe9e9;
+      background:rgba(142,32,44,.42);border:1px solid rgba(255,144,154,.38);
+    }
+    .hint{
+      margin:24px auto 0;max-width:320px;text-align:center;color:#cae8f2;font-size:14px;line-height:1.45;
+    }
+    @media(max-width:980px){
+      .page{grid-template-columns:1fr;gap:28px;padding:38px 24px}
+      .brand{text-align:center;margin:auto}
+      .logo,.features{justify-content:center}
+      .card{justify-self:center}
+    }
+    @media(max-width:560px){
+      .page{padding:24px 16px}
+      .logo{margin-bottom:28px}.logo-title{font-size:28px}.logo-sub{letter-spacing:4px}
+      .lead{font-size:20px}.features{gap:14px;margin-top:34px}
+      .feature{font-size:12px}.card{padding:26px 20px}
+    }
+
+    /* Codex login left-side cleanup: keep center logo/background intact */
+    .logo,
+    .mark,
+    .logo-title,
+    .logo-sub{display:none!important}
+    .brand{transform:translateY(-62px);max-width:520px}
+    .lead{margin:0 0 0;font-size:25px;line-height:1.32}
+    .features{margin-top:54px;gap:46px}
+    .feature-icon{width:50px;height:50px;border-radius:14px}
+    @media(max-width:980px){.brand{transform:none}.features{margin-top:34px;gap:24px}}
+
+    /* Codex login left text micro-adjustment */
+    .brand{transform:translateY(-100px)!important}
+    .lead span{padding-left:38px}
+    @media(max-width:980px){.brand{transform:none!important}.lead span{padding-left:0}}
+
+    /* Codex login second line shift */
+    .lead span{padding-left:76px!important}
+    @media(max-width:980px){.lead span{padding-left:0!important}}
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="brand" aria-label="{{ brand.product_name }}">
+      <p class="lead">Надёжные платёжные решения <span>для вашего бизнеса</span></p>
+      <div class="features" aria-label="Преимущества">
+        <div class="feature">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M12 3l7 3v5c0 4.6-2.9 8.3-7 10-4.1-1.7-7-5.4-7-10V6l7-3z"/><path d="M9 12l2 2 4-5"/></svg>
+          </div>
+          Безопасность
+        </div>
+        <div class="feature">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><path d="M4 17l5-5 4 4 7-8"/><path d="M14 8h6v6"/></svg>
+          </div>
+          Стабильность
+        </div>
+        <div class="feature">
+          <div class="feature-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke-width="1.8"><rect x="5" y="5" width="14" height="14" rx="2"/><path d="M9 9h6v6H9z"/><path d="M3 9h2M3 15h2M19 9h2M19 15h2M9 3v2M15 3v2M9 19v2M15 19v2"/></svg>
+          </div>
+          Технологичность
+        </div>
+      </div>
+    </section>
+    <form class="card" method="post" action="{{ login_action }}">{{ csrf_input(request) }}
+      <h1>Вход на площадку</h1>
+      <p class="muted">Введите email, пароль и 2FA-код, если он подключён в кабинете.</p>
+      {% if expected_realm %}<p class="muted">Контур входа: {{ expected_realm }}.</p>{% endif %}
+      {% if error %}<div class="err">{{ error }}</div>{% endif %}
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" required autocomplete="username" placeholder="example@mail.com">
+      <label for="password">Пароль</label>
+      <input id="password" name="password" type="password" required autocomplete="current-password" placeholder="Введите пароль">
+      <label for="otp">2FA код</label>
+      <input id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="6 цифр из приложения">
+      <button class="btn" type="submit">Войти</button>
+      <div class="hint">Доступ не отображается на странице входа. Свяжитесь с администратором сервиса для получения данных.</div>
+    </form>
+  </main>
+</body>
+</html>

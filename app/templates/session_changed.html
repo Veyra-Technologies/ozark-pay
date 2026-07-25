@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Сессия изменена — {{ brand.page_title }}</title>
+<style nonce="{{ csp_nonce(request) }}">
+*{box-sizing:border-box}body{font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;margin:0;min-height:100vh;padding:40px;background:#061724;color:#eefcff;line-height:1.5}body::before{content:"";position:fixed;inset:0;z-index:-2;background:url('{{ brand.login_background }}') center/cover no-repeat;filter:saturate(1.08) brightness(.58)}body::after{content:"";position:fixed;inset:0;z-index:-1;background:linear-gradient(120deg,rgba(4,17,29,.82),rgba(7,39,58,.68),rgba(3,18,30,.86))}.card{background:linear-gradient(180deg,rgba(8,31,49,.96),rgba(7,28,45,.94));border:1px solid rgba(178,234,255,.24);border-radius:18px;padding:24px;max-width:640px;margin:10vh auto;box-shadow:0 18px 46px rgba(0,13,24,.32)}a{display:inline-flex;margin-top:10px;color:#073244;background:#67e4f8;border-radius:10px;padding:10px 14px;text-decoration:none;font-weight:800}
+</style>
+</head>
+<body>
+<main class="card">
+  <h1>Сессия этой вкладки изменена</h1>
+  <p>{{ message }}</p>
+  <p>Изменена только сессия этого типа кабинета. Сессии других кабинетов продолжают работать независимо.</p>
+  <a href="{{ login_path }}">Перейти ко входу</a>
+</main>
+</body>
+</html>
