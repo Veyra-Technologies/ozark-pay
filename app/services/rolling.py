@@ -225,10 +225,14 @@ async def create_pending_allocation(
         merchant_fee_rub=merchant_fee,
         merchant_net_rub=merchant_net,
         rapira_rate_rub=rate_value,
+        rapira_rate_symbol=quote.symbol,
         rapira_rate_side=quote.side,
         rapira_rate_source=quote.source,
         rapira_rate_field=quote.provider_field,
         rapira_rate_updated_at=quote.updated_at,
+        rapira_provider_timestamp=quote.provider_timestamp,
+        rapira_fetched_at=quote.fetched_at,
+        rapira_freshness_basis=quote.freshness_basis,
         merchant_net_usdt=merchant_net_usdt,
         status=RollingAllocationStatus.pending.value,
     )
@@ -248,6 +252,14 @@ async def create_pending_allocation(
             'rapira_side': quote.side,
             'rapira_source': quote.source,
             'rapira_field': quote.provider_field,
+            'rapira_symbol': quote.symbol,
+            'rapira_provider_timestamp': (
+                quote.provider_timestamp.isoformat()
+                if quote.provider_timestamp
+                else None
+            ),
+            'rapira_fetched_at': quote.fetched_at.isoformat(),
+            'rapira_freshness_basis': quote.freshness_basis,
         },
     ))
     return allocation
@@ -387,8 +399,12 @@ def _allocation_financing_result(allocation: MerchantRollingAllocation) -> dict:
         'rolling_applied_rub': money(allocation.rolling_applied_rub),
         'settle_credited_rub': money(allocation.settle_credited_rub),
         'rapira_rate_rub': rolling_rate(allocation.rapira_rate_rub),
+        'rapira_rate_symbol': allocation.rapira_rate_symbol,
         'rapira_rate_side': allocation.rapira_rate_side,
         'rapira_rate_source': allocation.rapira_rate_source,
+        'rapira_provider_timestamp': allocation.rapira_provider_timestamp,
+        'rapira_fetched_at': allocation.rapira_fetched_at,
+        'rapira_freshness_basis': allocation.rapira_freshness_basis,
     }
 
 

@@ -223,7 +223,7 @@ def test_postgres_clean_downgrade_and_funded_rolling_downgrade_guard():
         with psycopg.connect(database_url) as verify:
             assert verify.execute(
                 'SELECT version_num FROM alembic_version'
-            ).fetchone()[0] == '0015_merchant_rolling'
+            ).fetchone()[0] == '0016_rolling_rapira_freshness'
             assert verify.execute(
                 'SELECT count(*) FROM merchant_rolling_ledger_entries'
             ).fetchone()[0] == 1

@@ -244,8 +244,16 @@ async def _rolling_fields_for_deposit(db: AsyncSession, dep: Deposit) -> dict:
             'rolling_applied_rub': str(allocation.rolling_applied_rub),
             'settle_credited_rub': str(allocation.settle_credited_rub),
             'rapira_rate_rub': str(allocation.rapira_rate_rub),
+            'rapira_rate_symbol': allocation.rapira_rate_symbol,
             'rapira_rate_side': allocation.rapira_rate_side,
             'rapira_rate_source': allocation.rapira_rate_source,
+            'rapira_provider_timestamp': (
+                allocation.rapira_provider_timestamp.isoformat()
+                if allocation.rapira_provider_timestamp
+                else None
+            ),
+            'rapira_fetched_at': allocation.rapira_fetched_at.isoformat(),
+            'rapira_freshness_basis': allocation.rapira_freshness_basis,
             'status': allocation.status,
         },
     }

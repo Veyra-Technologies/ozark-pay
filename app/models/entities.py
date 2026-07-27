@@ -286,10 +286,16 @@ class MerchantRollingAllocation(Base, TimestampMixin):
     merchant_fee_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     merchant_net_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     rapira_rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8))
+    rapira_rate_symbol: Mapped[str] = mapped_column(String(16))
     rapira_rate_side: Mapped[str] = mapped_column(String(8), default='ask')
     rapira_rate_source: Mapped[str] = mapped_column(String(64))
     rapira_rate_field: Mapped[str] = mapped_column(String(64), default='askPrice')
     rapira_rate_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    rapira_provider_timestamp: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rapira_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    rapira_freshness_basis: Mapped[str] = mapped_column(String(32))
     merchant_net_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
     rolling_applied_usdt: Mapped[Decimal] = mapped_column(
         Numeric(24, 6), default=Decimal('0.000000')
@@ -318,6 +324,10 @@ class MerchantRollingAllocation(Base, TimestampMixin):
         CheckConstraint('rolling_applied_rub >= 0', name='ck_rolling_allocation_applied_rub_nonnegative'),
         CheckConstraint('settle_credited_rub >= 0', name='ck_rolling_allocation_settle_nonnegative'),
         CheckConstraint("rapira_rate_side = 'ask'", name='ck_rolling_allocation_rate_side'),
+        CheckConstraint(
+            "rapira_freshness_basis IN ('provider_timestamp','fetched_at')",
+            name='ck_rolling_allocation_freshness_basis',
+        ),
         CheckConstraint(
             "status IN ('pending','paid','released','reversed')",
             name='ck_rolling_allocation_status',

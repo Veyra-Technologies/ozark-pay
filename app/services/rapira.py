@@ -36,14 +36,15 @@ class RollingRapiraQuote:
     rate: Decimal
     side: str
     source: str
-    received_at: datetime
-    market_updated_at: datetime | None
+    provider_timestamp: datetime | None
+    fetched_at: datetime
+    freshness_basis: str
     stale: bool
     provider_field: str
 
     @property
     def updated_at(self) -> datetime:
-        return self.market_updated_at or self.received_at
+        return self.provider_timestamp or self.fetched_at
 
 
 class RollingRateUnavailable(ValueError):
@@ -82,16 +83,16 @@ def parse_rapira_market_payload(payload: Any) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)]
 
 
-def _pair_direction(row: dict[str, Any]) -> str | None:
-    symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+def _symbol_direction(symbol: str) -> str | None:
     compact = symbol.replace('/', '')
-    # Rapira's public payload can expose base/quote metadata in the opposite
-    # order to its canonical symbol. A recognized symbol is authoritative.
     if symbol in RAPIRA_SYMBOLS or compact in RAPIRA_SYMBOLS:
         return 'direct'
     if symbol in RUB_USDT_SYMBOLS or compact in RUB_USDT_SYMBOLS:
         return 'inverse'
+    return None
 
+
+def _metadata_direction(row: dict[str, Any]) -> str | None:
     base = _normalize_symbol(row.get('baseCurrency'))
     quote = _normalize_symbol(row.get('quoteCurrency'))
     if base == 'USDT' and quote == 'RUB':
@@ -99,6 +100,32 @@ def _pair_direction(row: dict[str, Any]) -> str | None:
     if base == 'RUB' and quote == 'USDT':
         return 'inverse'
     return None
+
+
+def _pair_direction(row: dict[str, Any]) -> str | None:
+    """Preserve the legacy symbol-first metadata fallback policy."""
+    symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+    return _symbol_direction(symbol) or _metadata_direction(row)
+
+
+def _strict_pair_direction(row: dict[str, Any]) -> str | None:
+    """Use only a recognized canonical symbol for a strict Rolling quote."""
+    symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+    direction = _symbol_direction(symbol)
+    if direction is None:
+        return None
+
+    metadata_direction = _metadata_direction(row)
+    if metadata_direction and metadata_direction != direction:
+        logging.getLogger('app.finance').warning(
+            'rolling_rapira_pair_metadata_conflict',
+            extra={
+                'symbol': symbol,
+                'base_currency': _normalize_symbol(row.get('baseCurrency')),
+                'quote_currency': _normalize_symbol(row.get('quoteCurrency')),
+            },
+        )
+    return direction
 
 
 def _provider_datetime(value: Any) -> datetime | None:
@@ -124,39 +151,56 @@ def _provider_datetime(value: Any) -> datetime | None:
 def parse_strict_rolling_ask_quote(
     payload: Any,
     *,
-    received_at: datetime | None = None,
+    fetched_at: datetime | None = None,
+    evaluated_at: datetime | None = None,
 ) -> RollingRapiraQuote | None:
-    received_at = received_at or datetime.now(timezone.utc)
-    if received_at.tzinfo is None:
+    fetched_at = fetched_at or datetime.now(timezone.utc)
+    evaluated_at = evaluated_at or fetched_at
+    if fetched_at.tzinfo is None or evaluated_at.tzinfo is None:
         return None
-    received_at = received_at.astimezone(timezone.utc)
+    fetched_at = fetched_at.astimezone(timezone.utc)
+    evaluated_at = evaluated_at.astimezone(timezone.utc)
     max_age = timedelta(seconds=settings.ROLLING_RAPIRA_MAX_AGE_SECONDS)
+    fetched_age = evaluated_at - fetched_at
+    if fetched_age > max_age or fetched_age < -_PROVIDER_FUTURE_SKEW:
+        return None
+
     for row in parse_rapira_market_payload(payload):
-        direction = _pair_direction(row)
+        direction = _strict_pair_direction(row)
         if direction is None:
             continue
         ask = _to_decimal(row.get('askPrice'))
         if not ask:
             continue
         rate = ask if direction == 'direct' else Decimal('1') / ask
-        market_updated_at = _provider_datetime(
-            row.get('updatedAt')
-            or row.get('updated_at')
-            or row.get('timestamp')
-            or row.get('time')
+        raw_provider_timestamp = next(
+            (
+                row.get(field)
+                for field in ('updatedAt', 'updated_at', 'timestamp', 'time')
+                if row.get(field) not in (None, '')
+            ),
+            None,
         )
-        if market_updated_at is None:
-            continue
-        age = received_at - market_updated_at
-        if age > max_age or age < -_PROVIDER_FUTURE_SKEW:
-            continue
+        provider_timestamp = _provider_datetime(raw_provider_timestamp)
+        if raw_provider_timestamp is not None:
+            if provider_timestamp is None:
+                continue
+            provider_age = fetched_at - provider_timestamp
+            if provider_age > max_age or provider_age < -_PROVIDER_FUTURE_SKEW:
+                continue
+        freshness_basis = (
+            'provider_timestamp'
+            if provider_timestamp is not None
+            else 'fetched_at'
+        )
         return RollingRapiraQuote(
             symbol='USDT/RUB',
             rate=rate,
             side='ask',
-            source='Rapira',
-            received_at=received_at,
-            market_updated_at=market_updated_at,
+            source='rapira_live',
+            provider_timestamp=provider_timestamp,
+            fetched_at=fetched_at,
+            freshness_basis=freshness_basis,
             stale=False,
             provider_field='askPrice',
         )
@@ -209,27 +253,38 @@ async def get_strict_rolling_ask_quote() -> RollingRapiraQuote:
     global _strict_rolling_cache
     now = datetime.now(timezone.utc)
     max_age = timedelta(seconds=settings.ROLLING_RAPIRA_MAX_AGE_SECONDS)
-    if _strict_rolling_cache:
-        quote_age = now - _strict_rolling_cache.updated_at
-        cache_age = now - _strict_rolling_cache.received_at
-        if (
-            -_PROVIDER_FUTURE_SKEW <= quote_age <= max_age
-            and cache_age <= timedelta(seconds=max(1, settings.RAPIRA_RATES_CACHE_SECONDS))
-        ):
-            return _strict_rolling_cache
-
     url = settings.RAPIRA_RATES_URL.strip()
     if not settings.RAPIRA_RATES_ENABLED or not url:
         raise RollingRateUnavailable('rolling_rate_unavailable')
+
+    if _strict_rolling_cache:
+        freshness_age = now - _strict_rolling_cache.updated_at
+        cache_age = now - _strict_rolling_cache.fetched_at
+        strict_cache_seconds = min(
+            60,
+            settings.ROLLING_RAPIRA_MAX_AGE_SECONDS,
+            max(1, settings.RAPIRA_RATES_CACHE_SECONDS),
+        )
+        if (
+            _strict_rolling_cache.symbol == 'USDT/RUB'
+            and _strict_rolling_cache.side == 'ask'
+            and _strict_rolling_cache.source == 'rapira_live'
+            and _strict_rolling_cache.provider_field == 'askPrice'
+            and -_PROVIDER_FUTURE_SKEW <= freshness_age <= max_age
+            and timedelta(0) <= cache_age <= timedelta(seconds=strict_cache_seconds)
+        ):
+            return _strict_rolling_cache
+
     timeout = httpx.Timeout(settings.RAPIRA_RATES_TIMEOUT_SECONDS)
     try:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             response = await client.get(url, headers={'accept': 'application/json'})
             response.raise_for_status()
-            received_at = datetime.now(timezone.utc)
+            fetched_at = datetime.now(timezone.utc)
             quote = parse_strict_rolling_ask_quote(
                 response.json(),
-                received_at=received_at,
+                fetched_at=fetched_at,
+                evaluated_at=fetched_at,
             )
     except (httpx.HTTPError, ValueError) as exc:
         logging.getLogger('app.finance').warning(
@@ -238,9 +293,6 @@ async def get_strict_rolling_ask_quote() -> RollingRapiraQuote:
         )
         raise RollingRateUnavailable('rolling_rate_unavailable') from exc
     if not quote:
-        raise RollingRateUnavailable('rolling_rate_unavailable')
-    quote_age = quote.received_at - quote.updated_at
-    if quote_age > max_age or quote_age < -_PROVIDER_FUTURE_SKEW:
         raise RollingRateUnavailable('rolling_rate_unavailable')
     _strict_rolling_cache = quote
     return quote

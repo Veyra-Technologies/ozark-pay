@@ -121,6 +121,7 @@ async def _deposit_fixture(
     merchant_percent='10',
     create_allocation=True,
     expires_at=None,
+    with_provider_timestamp=True,
 ):
     now = datetime.now(timezone.utc)
     merchant_rule = FeeRule(
@@ -200,9 +201,14 @@ async def _deposit_fixture(
         symbol='USDT/RUB',
         rate=Decimal(rate),
         side='ask',
-        source='Rapira',
-        received_at=now,
-        market_updated_at=now,
+        source='rapira_live',
+        provider_timestamp=now if with_provider_timestamp else None,
+        fetched_at=now,
+        freshness_basis=(
+            'provider_timestamp'
+            if with_provider_timestamp
+            else 'fetched_at'
+        ),
         stale=False,
         provider_field='askPrice',
     )
@@ -795,9 +801,10 @@ def test_postgres_idempotent_allocation_keeps_the_original_rate_snapshot():
                     symbol='USDT/RUB',
                     rate=Decimal('200'),
                     side='ask',
-                    source='Rapira',
-                    received_at=datetime.now(timezone.utc),
-                    market_updated_at=datetime.now(timezone.utc),
+                    source='rapira_live',
+                    provider_timestamp=datetime.now(timezone.utc),
+                    fetched_at=datetime.now(timezone.utc),
+                    freshness_basis='provider_timestamp',
                     stale=False,
                     provider_field='askPrice',
                 )
@@ -809,12 +816,43 @@ def test_postgres_idempotent_allocation_keeps_the_original_rate_snapshot():
                 )
                 assert repeated.id == allocation.id
                 assert repeated.rapira_rate_rub == Decimal('100.00000000')
+                assert repeated.rapira_rate_symbol == 'USDT/RUB'
+                assert repeated.rapira_rate_side == 'ask'
+                assert repeated.rapira_rate_source == 'rapira_live'
+                assert repeated.rapira_provider_timestamp is not None
+                assert repeated.rapira_fetched_at is not None
+                assert repeated.rapira_freshness_basis == 'provider_timestamp'
                 assert await db.scalar(
                     select(func.count(MerchantRollingLedgerEntry.id)).where(
                         MerchantRollingLedgerEntry.deposit_id == deposit.id,
                         MerchantRollingLedgerEntry.entry_type == 'pending_added',
                     )
                 ) == 1
+                await db.rollback()
+        finally:
+            await engine.dispose()
+    asyncio.run(scenario())
+
+
+def test_postgres_allocation_persists_nullable_provider_timestamp_and_fetched_at():
+    async def scenario():
+        engine = create_async_engine(_database_url())
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                merchant, _ = await _merchant_fixture(db)
+                _, _, allocation = await _deposit_fixture(
+                    db,
+                    merchant,
+                    with_provider_timestamp=False,
+                )
+
+                assert allocation.rapira_rate_rub == Decimal('100.00000000')
+                assert allocation.rapira_rate_symbol == 'USDT/RUB'
+                assert allocation.rapira_rate_side == 'ask'
+                assert allocation.rapira_rate_source == 'rapira_live'
+                assert allocation.rapira_provider_timestamp is None
+                assert allocation.rapira_fetched_at is not None
+                assert allocation.rapira_freshness_basis == 'fetched_at'
                 await db.rollback()
         finally:
             await engine.dispose()

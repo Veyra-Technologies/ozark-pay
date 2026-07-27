@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -104,12 +105,58 @@ def test_general_parser_handles_malformed_payload_stably(payload):
     assert parse_rapira_rub_usdt_rate(payload) is None
 
 
-def test_actual_payload_is_accepted_by_general_but_not_timestamp_strict_flow():
+def test_actual_payload_is_accepted_by_general_and_strict_live_flow():
     payload = load_redacted_rapira_payload()
     now = datetime.now(timezone.utc)
 
     assert parse_rapira_rub_usdt_rate(payload) == Decimal('81.42')
-    assert parse_strict_rolling_ask_quote(payload, received_at=now) is None
+    quote = parse_strict_rolling_ask_quote(payload, fetched_at=now)
+    assert quote is not None
+    assert quote.rate == Decimal('81.42')
+    assert quote.provider_timestamp is None
+    assert quote.fetched_at == now
+    assert quote.freshness_basis == 'fetched_at'
+    assert quote.source == 'rapira_live'
+
+
+def test_strict_live_warns_on_symbol_metadata_conflict_without_payload(caplog):
+    payload = load_redacted_rapira_payload()
+    now = datetime.now(timezone.utc)
+
+    with caplog.at_level(logging.WARNING, logger='app.finance'):
+        quote = parse_strict_rolling_ask_quote(payload, fetched_at=now)
+
+    assert quote is not None
+    warning = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == 'rolling_rapira_pair_metadata_conflict'
+    )
+    assert warning.symbol == 'USDT/RUB'
+    assert warning.base_currency == 'RUB'
+    assert warning.quote_currency == 'USDT'
+    assert 'askPrice' not in warning.getMessage()
+    assert '81.42' not in warning.getMessage()
+
+
+def test_strict_rolling_rejects_old_fetched_at_without_provider_timestamp():
+    evaluated_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    fetched_at = evaluated_at - timedelta(
+        seconds=61,
+    )
+
+    assert parse_strict_rolling_ask_quote(
+        load_redacted_rapira_payload(),
+        fetched_at=fetched_at,
+        evaluated_at=evaluated_at,
+    ) is None
+
+
+def test_malformed_provider_timestamp_does_not_break_legacy_parser():
+    payload = load_redacted_rapira_payload()
+    payload['data'][0]['timestamp'] = 'not-a-timestamp'
+
+    assert parse_rapira_rub_usdt_rate(payload) == Decimal('81.42')
 
 
 @pytest.mark.parametrize(
@@ -134,7 +181,7 @@ def test_stale_and_future_timestamp_are_rejected_only_by_strict_rolling(
     assert parse_rapira_rub_usdt_rate(payload) == Decimal('81.42')
     assert parse_strict_rolling_ask_quote(
         payload,
-        received_at=received_at,
+        fetched_at=received_at,
     ) is None
 
 
@@ -145,14 +192,16 @@ def test_strict_rolling_uses_fresh_ask_and_returns_extended_quote():
 
     quote = parse_strict_rolling_ask_quote(
         payload,
-        received_at=received_at,
+        fetched_at=received_at,
     )
 
     assert isinstance(quote, RollingRapiraQuote)
     assert quote.rate == Decimal('81.42')
     assert quote.side == 'ask'
     assert quote.provider_field == 'askPrice'
-    assert quote.market_updated_at == received_at
+    assert quote.provider_timestamp == received_at
+    assert quote.fetched_at == received_at
+    assert quote.freshness_basis == 'provider_timestamp'
 
 
 def test_general_public_quote_keeps_origin_main_object_contract(monkeypatch):
@@ -176,6 +225,86 @@ def test_general_public_quote_keeps_origin_main_object_contract(monkeypatch):
     assert quote.stale is False
 
 
+def test_legacy_quote_keeps_configured_fallback_when_live_rates_disabled(
+    monkeypatch,
+):
+    import app.services.rapira as rapira
+
+    monkeypatch.setattr(rapira, '_cache_value', None)
+    monkeypatch.setattr(rapira, '_cache_expires_at', None)
+    monkeypatch.setattr(rapira, '_last_success_value', None)
+    monkeypatch.setattr(rapira, '_last_success_at', None)
+    monkeypatch.setattr(rapira.settings, 'RAPIRA_RATES_ENABLED', False)
+    monkeypatch.setattr(
+        rapira.settings,
+        'SETTLEMENT_USDT_RUB_RATE',
+        Decimal('100'),
+    )
+
+    quote = asyncio.run(rapira.get_rapira_rub_usdt_quote())
+
+    assert quote.rate_rub == Decimal('100')
+    assert quote.source == 'SETTLEMENT_USDT_RUB_RATE'
+    assert quote.stale is True
+
+
+def test_live_payload_without_timestamp_unblocks_rolling_create_service(
+    monkeypatch,
+):
+    import app.services.rapira as rapira
+    import app.services.rolling as rolling
+
+    payload = load_redacted_rapira_payload()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def get(self, url, headers):
+            return FakeResponse()
+
+    async def rolling_mode(db, merchant_id):
+        return 'rolling'
+
+    async def no_account(db, merchant_id):
+        return None
+
+    monkeypatch.setattr(rapira, '_strict_rolling_cache', None)
+    monkeypatch.setattr(rapira.settings, 'RAPIRA_RATES_ENABLED', True)
+    monkeypatch.setattr(
+        rapira.settings,
+        'RAPIRA_RATES_URL',
+        'https://provider.invalid/read-only',
+    )
+    monkeypatch.setattr(
+        rapira.httpx,
+        'AsyncClient',
+        lambda **kwargs: FakeClient(),
+    )
+    monkeypatch.setattr(rolling, 'merchant_settlement_mode', rolling_mode)
+    monkeypatch.setattr(rolling, 'get_rolling_account', no_account)
+
+    quote = asyncio.run(
+        rolling.rolling_quote_for_deposit_create(None, uuid4())
+    )
+
+    assert quote is not None
+    assert quote.rate == Decimal('81.42')
+    assert quote.provider_timestamp is None
+    assert quote.freshness_basis == 'fetched_at'
+    assert quote.source == 'rapira_live'
+
+
 def test_general_cache_does_not_depend_on_strict_rolling_cache(monkeypatch):
     import app.services.rapira as rapira
 
@@ -194,9 +323,10 @@ def test_general_cache_does_not_depend_on_strict_rolling_cache(monkeypatch):
             symbol='USDT/RUB',
             rate=Decimal('999'),
             side='ask',
-            source='Rapira',
-            received_at=now - timedelta(hours=1),
-            market_updated_at=now - timedelta(hours=1),
+            source='rapira_live',
+            provider_timestamp=None,
+            fetched_at=now - timedelta(hours=1),
+            freshness_basis='fetched_at',
             stale=False,
             provider_field='askPrice',
         ),

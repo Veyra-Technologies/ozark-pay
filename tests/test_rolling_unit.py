@@ -37,13 +37,16 @@ def test_strict_rapira_accepts_direct_ask_only():
                 'updatedAt': now.isoformat(),
             }]
         },
-        received_at=now,
+        fetched_at=now,
     )
     assert quote is not None
     assert quote.rate == Decimal('100.12345678')
     assert quote.side == 'ask'
-    assert quote.source == 'Rapira'
+    assert quote.source == 'rapira_live'
     assert quote.provider_field == 'askPrice'
+    assert quote.provider_timestamp == now
+    assert quote.fetched_at == now
+    assert quote.freshness_basis == 'provider_timestamp'
     assert quote.stale is False
 
 
@@ -51,12 +54,13 @@ def test_strict_rapira_correctly_inverts_reverse_ask():
     now = datetime.now(timezone.utc)
     quote = parse_strict_rolling_ask_quote({
         'data': [{
+            'symbol': 'RUB/USDT',
             'baseCurrency': 'RUB',
             'quoteCurrency': 'USDT',
             'askPrice': '0.01',
             'timestamp': now.isoformat(),
         }]
-    }, received_at=now)
+    }, fetched_at=now)
     assert quote is not None
     assert quote.rate == Decimal('100')
     assert quote.side == 'ask'
@@ -71,7 +75,7 @@ def test_strict_rapira_rejects_non_ask_fields(field):
             field: '100',
             'timestamp': now.isoformat(),
         }]
-    }, received_at=now) is None
+    }, fetched_at=now) is None
 
 
 def test_strict_rapira_rejects_unrelated_pair():
@@ -82,7 +86,19 @@ def test_strict_rapira_rejects_unrelated_pair():
             'askPrice': '100',
             'timestamp': now.isoformat(),
         }]
-    }, received_at=now) is None
+    }, fetched_at=now) is None
+
+
+def test_strict_rapira_requires_canonical_symbol_not_only_pair_metadata():
+    now = datetime.now(timezone.utc)
+    assert parse_strict_rolling_ask_quote({
+        'data': [{
+            'baseCurrency': 'USDT',
+            'quoteCurrency': 'RUB',
+            'askPrice': '100',
+            'timestamp': now.isoformat(),
+        }]
+    }, fetched_at=now) is None
 
 
 @pytest.mark.parametrize(
@@ -97,7 +113,7 @@ def test_strict_rapira_rejects_missing_or_nonpositive_ask(ask_price):
             'askPrice': ask_price,
             'timestamp': now.isoformat(),
         }]
-    }, received_at=now) is None
+    }, fetched_at=now) is None
 
 
 def test_strict_rapira_accepts_numeric_json_and_later_valid_market_entry():
@@ -115,7 +131,7 @@ def test_strict_rapira_accepts_numeric_json_and_later_valid_market_entry():
                 'timestamp': now.isoformat(),
             },
         ]
-    }, received_at=now)
+    }, fetched_at=now)
     assert quote is not None
     assert quote.rate == Decimal('100.125')
 
@@ -123,12 +139,11 @@ def test_strict_rapira_accepts_numeric_json_and_later_valid_market_entry():
 @pytest.mark.parametrize(
     'timestamp',
     [
-        None,
         '2026-01-01T12:00:00',
         'not-a-timestamp',
     ],
 )
-def test_strict_rapira_rejects_missing_invalid_or_timezone_less_timestamp(
+def test_strict_rapira_rejects_invalid_or_timezone_less_timestamp(
     timestamp,
 ):
     received_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -138,7 +153,7 @@ def test_strict_rapira_rejects_missing_invalid_or_timezone_less_timestamp(
             'askPrice': '100',
             'timestamp': timestamp,
         }]
-    }, received_at=received_at) is None
+    }, fetched_at=received_at) is None
 
 
 def test_strict_rapira_rejects_stale_and_future_provider_timestamp():
@@ -153,7 +168,7 @@ def test_strict_rapira_rejects_stale_and_future_provider_timestamp():
                 'askPrice': '100',
                 'timestamp': timestamp.isoformat(),
             }]
-        }, received_at=received_at) is None
+        }, fetched_at=received_at) is None
 
 
 def test_financial_quantization_is_decimal_half_up():
@@ -228,6 +243,17 @@ def test_migrations_backfill_postpaid_and_legacy_ttl():
         rolling_migration
     )
 
+    freshness_migration = (
+        ROOT / 'alembic/versions/0016_rolling_rapira_freshness.py'
+    ).read_text(encoding='utf-8')
+    for field in (
+        'rapira_rate_symbol',
+        'rapira_provider_timestamp',
+        'rapira_fetched_at',
+        'rapira_freshness_basis',
+    ):
+        assert field in freshness_migration
+
 
 def test_balance_api_keeps_legacy_fields_and_adds_rolling():
     merchant_api = (ROOT / 'app/api/v1/merchant.py').read_text(encoding='utf-8')
@@ -268,12 +294,12 @@ def test_application_imports_openapi_and_templates_compile():
         templates.env.get_template(name)
 
 
-def test_strict_rolling_rate_rejects_stale_cache_and_configured_fallback(
+def test_strict_disabled_rejects_fresh_cache_and_configured_fallback_100(
     monkeypatch,
 ):
     import app.services.rapira as rapira
 
-    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    now = datetime.now(timezone.utc)
     monkeypatch.setattr(
         rapira,
         '_strict_rolling_cache',
@@ -281,9 +307,10 @@ def test_strict_rolling_rate_rejects_stale_cache_and_configured_fallback(
             symbol='USDT/RUB',
             rate=Decimal('100'),
             side='ask',
-            source='Rapira',
-            received_at=old,
-            market_updated_at=old,
+            source='rapira_live',
+            provider_timestamp=None,
+            fetched_at=now,
+            freshness_basis='fetched_at',
             stale=False,
             provider_field='askPrice',
         ),
@@ -293,7 +320,7 @@ def test_strict_rolling_rate_rejects_stale_cache_and_configured_fallback(
     monkeypatch.setattr(
         rapira.settings,
         'SETTLEMENT_USDT_RUB_RATE',
-        Decimal('777'),
+        Decimal('100'),
     )
     with pytest.raises(RollingRateUnavailable):
         asyncio.run(rapira.get_strict_rolling_ask_quote())
@@ -331,6 +358,62 @@ def test_strict_rolling_rate_rejects_malformed_provider_json(monkeypatch):
         'AsyncClient',
         lambda **kwargs: FakeClient(),
     )
+    with pytest.raises(RollingRateUnavailable):
+        asyncio.run(rapira.get_strict_rolling_ask_quote())
+
+
+def test_strict_rolling_cache_never_lives_longer_than_sixty_seconds(
+    monkeypatch,
+):
+    import app.services.rapira as rapira
+
+    class InvalidResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            raise ValueError('force live failure after expired strict cache')
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def get(self, url, headers):
+            return InvalidResponse()
+
+    old = datetime.now(timezone.utc) - timedelta(seconds=61)
+    monkeypatch.setattr(
+        rapira,
+        '_strict_rolling_cache',
+        RollingRapiraQuote(
+            symbol='USDT/RUB',
+            rate=Decimal('100'),
+            side='ask',
+            source='rapira_live',
+            provider_timestamp=None,
+            fetched_at=old,
+            freshness_basis='fetched_at',
+            stale=False,
+            provider_field='askPrice',
+        ),
+    )
+    monkeypatch.setattr(rapira.settings, 'RAPIRA_RATES_ENABLED', True)
+    monkeypatch.setattr(
+        rapira.settings,
+        'RAPIRA_RATES_URL',
+        'https://provider.invalid/read-only',
+    )
+    monkeypatch.setattr(rapira.settings, 'ROLLING_RAPIRA_MAX_AGE_SECONDS', 3600)
+    monkeypatch.setattr(rapira.settings, 'RAPIRA_RATES_CACHE_SECONDS', 300)
+    monkeypatch.setattr(
+        rapira.httpx,
+        'AsyncClient',
+        lambda **kwargs: FakeClient(),
+    )
+
     with pytest.raises(RollingRateUnavailable):
         asyncio.run(rapira.get_strict_rolling_ask_quote())
 
