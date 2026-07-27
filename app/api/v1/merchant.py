@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -8,8 +8,18 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
 from app.api.deps import merchant_auth
-from app.models import Merchant, Deposit, Payout, Balance, ApiRequestLog, WebhookEvent, Requisite
+from app.models import (
+    ApiRequestLog,
+    Balance,
+    Deposit,
+    Merchant,
+    MerchantRollingAllocation,
+    Payout,
+    Requisite,
+    WebhookEvent,
+)
 from app.schemas.common import PaymentCreate, PayoutCreate
+from app.core.config import settings
 from app.core.enums import DepositStatus, PaymentMethod, PayoutStatus, RiskDecision
 from app.core.payment_methods import normalize_payment_method, payment_method_label
 from app.core.requisite_providers import requisite_provider_payload
@@ -28,9 +38,20 @@ from app.services.fee_tiers import (
     resolve_fee_rule,
 )
 from app.services.webhook_enqueue import enqueue_webhook_delivery
+from app.services.aggregator_enqueue import enqueue_aggregator_callback_delivery
+from app.services.deposit_lifecycle import (
+    deposit_deadline,
+    finalize_unsuccessful_deposit,
+    new_deposit_expires_at,
+)
+from app.services.rapira import RollingRateUnavailable
+from app.services.rolling import (
+    RollingError,
+    create_pending_allocation,
+    rolling_overview,
+    rolling_quote_for_deposit_create,
+)
 router=APIRouter(prefix='/merchant', tags=['merchant-api'])
-DEPOSIT_TTL_SECONDS = 15 * 60
-DEPOSIT_TTL = timedelta(seconds=DEPOSIT_TTL_SECONDS)
 
 def _enqueue_webhook(event_id) -> bool:
     return enqueue_webhook_delivery(event_id)
@@ -56,6 +77,8 @@ MERCHANT_ERROR_MESSAGES = {
     'negative_platform_margin': 'The configured executor fee exceeds the merchant fee.',
     'fee_configuration_error': 'Fee configuration blocks this operation.',
     'webhook_not_found': 'Webhook event was not found.',
+    'rolling_rate_unavailable': 'A fresh Rapira ask quote is unavailable for Rolling.',
+    'rolling_suspended': 'Rolling traffic is suspended for this merchant.',
 }
 
 
@@ -81,12 +104,11 @@ def _iso_z(dt: datetime) -> str:
 
 
 def deposit_expires_at(dep: Deposit) -> datetime:
-    created_at = getattr(dep, 'created_at', None) or datetime.now(timezone.utc)
-    return _aware(created_at) + DEPOSIT_TTL
+    return deposit_deadline(dep)
 
 
 def deposit_ttl_seconds() -> int:
-    return DEPOSIT_TTL_SECONDS
+    return settings.DEPOSIT_PROCESSING_TTL_SECONDS
 
 
 def deposit_ttl_fields(dep: Deposit) -> dict:
@@ -158,6 +180,7 @@ async def _idempotent_deposit_response(db: AsyncSession, dep: Deposit) -> dict:
         **deposit_ttl_fields(dep),
         'idempotent': True,
         'payment_details': await _payment_details_for_deposit(db, dep),
+        **await _rolling_fields_for_deposit(db, dep),
     }
 
 
@@ -204,6 +227,29 @@ async def _payment_details_for_deposit(db: AsyncSession, dep: Deposit) -> dict |
         **provider,
     }
 
+
+async def _rolling_fields_for_deposit(db: AsyncSession, dep: Deposit) -> dict:
+    allocation = (await db.execute(
+        select(MerchantRollingAllocation).where(
+            MerchantRollingAllocation.deposit_id == dep.id
+        )
+    )).scalar_one_or_none()
+    if not allocation:
+        return {'settlement_mode': 'postpaid', 'rolling': None}
+    return {
+        'settlement_mode': 'rolling',
+        'rolling': {
+            'merchant_net_usdt': str(allocation.merchant_net_usdt),
+            'rolling_applied_usdt': str(allocation.rolling_applied_usdt),
+            'rolling_applied_rub': str(allocation.rolling_applied_rub),
+            'settle_credited_rub': str(allocation.settle_credited_rub),
+            'rapira_rate_rub': str(allocation.rapira_rate_rub),
+            'rapira_rate_side': allocation.rapira_rate_side,
+            'rapira_rate_source': allocation.rapira_rate_source,
+            'status': allocation.status,
+        },
+    }
+
 @router.post('/deposits')
 async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth), idempotency_key: str | None = Header(default=None, alias='Idempotency-Key')):
     idem = (idempotency_key or data.external_id).strip()[:128]
@@ -248,6 +294,24 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
         await db.commit()
         raise merchant_error(409, code) from exc
     try:
+        rolling_quote = await rolling_quote_for_deposit_create(db, merchant.id)
+    except RollingRateUnavailable as exc:
+        await audit(
+            db,
+            'deposit_rolling_rate_unavailable',
+            'merchant',
+            target_id=merchant.id,
+            ip=ip,
+            details={'code': exc.code},
+        )
+        await log_req(db, merchant, request, 503)
+        await db.commit()
+        raise merchant_error(503, exc.code) from exc
+    except RollingError as exc:
+        await log_req(db, merchant, request, 409)
+        await db.commit()
+        raise merchant_error(409, getattr(exc, 'code', 'rolling_error'), str(exc)) from exc
+    try:
         selected_requisite = await select_deposit_requisite(
             db,
             merchant_id=merchant.id,
@@ -272,17 +336,23 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
         await log_req(db,merchant,request,409); await db.commit()
         message = str(exc)
         raise merchant_error(409, _requisite_error_code(message), message)
-    dep=Deposit(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, amount=data.amount, currency=data.currency, method=data.method.value, status=DepositStatus.pending.value, requisites_id=selected_requisite.requisite.id, client_ip=ip, metadata_json={**(data.metadata or {}), **selected_requisite.settlement_metadata(), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
+    dep=Deposit(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, amount=data.amount, currency=data.currency, method=data.method.value, status=DepositStatus.pending.value, requisites_id=selected_requisite.requisite.id, client_ip=ip, expires_at=new_deposit_expires_at(), metadata_json={**(data.metadata or {}), **selected_requisite.settlement_metadata(), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
     db.add(dep)
     try:
         await db.flush()
-        await create_operation_fee_snapshot(
+        snapshot = await create_operation_fee_snapshot(
             db,
             deposit=dep,
             merchant_rule=merchant_rate_rule,
             executor_rule=selected_requisite.executor_rate_rule,
             executor_type=selected_requisite.executor_type,
             executor_id=selected_requisite.executor_id,
+        )
+        await create_pending_allocation(
+            db,
+            deposit=dep,
+            snapshot=snapshot,
+            quote=rolling_quote,
         )
     except IntegrityError as exc:
         await db.rollback()
@@ -292,17 +362,26 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
             return await _idempotent_deposit_response(db, existing)
         await log_req(db,merchant,request,409); await db.commit()
         raise merchant_error(409, IDEMPOTENCY_CONFLICT) from exc
+    except RollingError as exc:
+        await db.rollback()
+        await log_req(db, merchant, request, 409)
+        await db.commit()
+        raise merchant_error(
+            409,
+            getattr(exc, 'code', 'rolling_error'),
+            str(exc),
+        ) from exc
     await record_risk_event(db, merchant_id=merchant.id, operation_type='deposit', operation_id=dep.id, result=risk)
     await log_req(db,merchant,request)
     await db.commit(); await db.refresh(dep)
-    return {'id':dep.id,'external_id':dep.external_id,'status':dep.status,'amount':dep.amount,'method':dep.method,**deposit_ttl_fields(dep),'risk_decision':risk.decision.value,'payment_details':selected_requisite.payment_details()}
+    return {'id':dep.id,'external_id':dep.external_id,'status':dep.status,'amount':dep.amount,'method':dep.method,**deposit_ttl_fields(dep),'risk_decision':risk.decision.value,'payment_details':selected_requisite.payment_details(),**await _rolling_fields_for_deposit(db, dep)}
 
 @router.get('/deposits/{external_id}')
 async def deposit_status(external_id: str, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
     dep=(await db.execute(select(Deposit).where(Deposit.merchant_id==merchant.id, Deposit.external_id==external_id))).scalar_one_or_none()
     if not dep: raise merchant_error(404, 'not_found')
     await log_req(db,merchant,request); await db.commit()
-    return {'id':dep.id,'external_id':dep.external_id,'status':dep.status,'amount':dep.amount,**deposit_ttl_fields(dep),'payment_details':await _payment_details_for_deposit(db, dep)}
+    return {'id':dep.id,'external_id':dep.external_id,'status':dep.status,'amount':dep.amount,**deposit_ttl_fields(dep),'payment_details':await _payment_details_for_deposit(db, dep),**await _rolling_fields_for_deposit(db, dep)}
 
 @router.post('/deposits/{external_id}/cancel')
 async def cancel_deposit(external_id: str, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
@@ -313,12 +392,23 @@ async def cancel_deposit(external_id: str, request: Request, db: AsyncSession=De
     if dep.status == DepositStatus.paid.value:
         await log_req(db,merchant,request,409); await db.commit()
         raise merchant_error(409, 'paid_deposit_cannot_be_cancelled')
-    if dep.status not in [DepositStatus.failed.value, DepositStatus.expired.value, DepositStatus.cancelled.value]:
-        await release_trader_deposit_hold(db, dep)
-        dep.status = DepositStatus.cancelled.value
-        await check_payment_result_for_risk(db, dep)
+    finalization = await finalize_unsuccessful_deposit(
+        db,
+        dep,
+        reason='merchant_cancelled',
+        target_status=DepositStatus.cancelled.value,
+        actor_id=merchant.owner_id,
+        actor_role='merchant',
+        actor_ip=client_ip(request),
+        request_id=request.headers.get('X-Request-ID'),
+        audit_action='deposit_cancelled_by_merchant',
+    )
     await log_req(db,merchant,request)
     await db.commit()
+    if finalization.webhook_event_id:
+        _enqueue_webhook(finalization.webhook_event_id)
+    for callback_id in finalization.aggregator_callback_log_ids:
+        enqueue_aggregator_callback_delivery(callback_id)
     return {'id':dep.id,'external_id':dep.external_id,'status':dep.status,'amount':dep.amount}
 
 @router.post('/payouts')
@@ -381,9 +471,19 @@ async def cancel_payout(external_id: str, request: Request, db: AsyncSession=Dep
 
 @router.get('/balance')
 async def balance(request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
-    b=(await db.execute(select(Balance).where(Balance.merchant_id==merchant.id))).scalar_one_or_none()
+    b=(await db.execute(select(Balance).where(Balance.merchant_id==merchant.id, Balance.currency=='RUB'))).scalar_one_or_none()
+    finance = await rolling_overview(db, merchant.id)
     await log_req(db,merchant,request); await db.commit()
-    return {'available': b.available if b else 0, 'frozen': b.frozen if b else 0, 'currency': b.currency if b else 'RUB'}
+    rolling_payload = finance['rolling']
+    if rolling_payload:
+        rolling_payload = {key: (str(value) if isinstance(value, Decimal) else value) for key, value in rolling_payload.items()}
+    return {
+        'available': str(b.available if b else Decimal('0.00')),
+        'frozen': str(b.frozen if b else Decimal('0.00')),
+        'currency': 'RUB',
+        'settlement_mode': finance['settlement_mode'],
+        'rolling': rolling_payload,
+    }
 
 @router.get('/statistics')
 async def statistics(request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):

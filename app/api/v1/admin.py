@@ -631,6 +631,15 @@ async def confirm_deposit(deposit_id: str, request: Request, db: AsyncSession=De
     except DepositConfirmationError as exc:
         raise HTTPException(exc.status_code, exc.api_detail) from exc
     delivery = enqueue_deposit_confirmation_deliveries(result)
+    if not result.confirmed:
+        raise HTTPException(
+            409,
+            {
+                'code': 'deposit_expired',
+                'reason': result.reason,
+                'status': result.status,
+            },
+        )
     return {'ok':True,'webhook_event_id':result.webhook_event_id,**delivery,**result.settlement}
 
 @router.post('/payouts/{payout_id}/complete')
@@ -739,20 +748,35 @@ async def risk_events(db: AsyncSession=Depends(get_db), actor=Depends(require_ro
 @router.post('/sms/{sms_id}/confirm/{deposit_id}')
 async def manual_sms_confirm(sms_id: UUID, deposit_id: UUID, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin))):
     try:
-        sms, dep, changed = await confirm_deposit_from_sms(db, sms_id, deposit_id)
+        sms, dep, changed, finalization = await confirm_deposit_from_sms(
+            db,
+            sms_id,
+            deposit_id,
+            actor_id=actor.id,
+            actor_ip=client_ip(request),
+        )
     except LookupError:
         await db.rollback()
         raise HTTPException(404, 'sms or deposit not found')
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(409, str(exc)) from exc
-    ev = await queue_webhook(db, dep.merchant_id, 'deposit.paid', build_deposit_webhook_payload(dep, 'deposit.paid', {'source':'sms'}))
-    aggregator_callback_logs = await sync_payment_from_deposit(db, dep)
+    ev = None
+    aggregator_callback_logs = []
+    if changed:
+        ev = await queue_webhook(db, dep.merchant_id, 'deposit.paid', build_deposit_webhook_payload(dep, 'deposit.paid', {'source':'sms'}))
+        aggregator_callback_logs = await sync_payment_from_deposit(db, dep)
     await audit(db,'sms_manual_confirm','sms',actor.id,sms.id,client_ip(request),{'deposit_id':str(dep.id),'changed':changed})
     await db.commit()
-    webhook_enqueued = _enqueue_webhook(ev.id)
+    if finalization:
+        if finalization.webhook_event_id:
+            _enqueue_webhook(finalization.webhook_event_id)
+        for callback_id in finalization.aggregator_callback_log_ids:
+            enqueue_aggregator_callback_delivery(callback_id)
+        raise HTTPException(409, 'deposit expired and was finalized as trader_timeout')
+    webhook_enqueued = bool(ev and _enqueue_webhook(ev.id))
     aggregator_callbacks_enqueued = [enqueue_aggregator_callback_delivery(log.id) for log in aggregator_callback_logs]
-    return {'ok':True,'sms_id':sms.id,'deposit_id':dep.id,'changed':changed,'webhook_event_id':ev.id,'webhook_enqueued':webhook_enqueued,'aggregator_callbacks_enqueued':sum(1 for item in aggregator_callbacks_enqueued if item)}
+    return {'ok':True,'sms_id':sms.id,'deposit_id':dep.id,'changed':changed,'webhook_event_id':ev.id if ev else None,'webhook_enqueued':webhook_enqueued,'aggregator_callbacks_enqueued':sum(1 for item in aggregator_callbacks_enqueued if item)}
 
 @router.post('/appeals/{appeal_id}/messages')
 async def add_appeal_message(appeal_id: UUID, data: AppealMessageIn, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin,Role.support,Role.merchant,Role.operator,Role.trader))):
