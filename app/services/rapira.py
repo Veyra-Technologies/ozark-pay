@@ -57,7 +57,7 @@ def _to_decimal(value: Any) -> Decimal | None:
         parsed = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    return parsed if parsed > 0 else None
+    return parsed if parsed.is_finite() and parsed > 0 else None
 
 
 def _pick_price(row: dict[str, Any]) -> Decimal | None:
@@ -72,13 +72,33 @@ def _normalize_symbol(value: Any) -> str:
     return str(value or '').upper().replace('-', '/').strip()
 
 
-def _payload_rows(payload: Any) -> list[dict[str, Any]]:
+def parse_rapira_market_payload(payload: Any) -> list[dict[str, Any]]:
+    """Return provider market rows without applying a quote policy."""
     rows = payload.get('data') if isinstance(payload, dict) else payload
     if isinstance(rows, dict):
         rows = rows.get('items') or rows.get('rates') or rows.get('data') or list(rows.values())
     if not isinstance(rows, list):
         return []
     return [row for row in rows if isinstance(row, dict)]
+
+
+def _pair_direction(row: dict[str, Any]) -> str | None:
+    symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+    compact = symbol.replace('/', '')
+    # Rapira's public payload can expose base/quote metadata in the opposite
+    # order to its canonical symbol. A recognized symbol is authoritative.
+    if symbol in RAPIRA_SYMBOLS or compact in RAPIRA_SYMBOLS:
+        return 'direct'
+    if symbol in RUB_USDT_SYMBOLS or compact in RUB_USDT_SYMBOLS:
+        return 'inverse'
+
+    base = _normalize_symbol(row.get('baseCurrency'))
+    quote = _normalize_symbol(row.get('quoteCurrency'))
+    if base == 'USDT' and quote == 'RUB':
+        return 'direct'
+    if base == 'RUB' and quote == 'USDT':
+        return 'inverse'
+    return None
 
 
 def _provider_datetime(value: Any) -> datetime | None:
@@ -111,27 +131,14 @@ def parse_strict_rolling_ask_quote(
         return None
     received_at = received_at.astimezone(timezone.utc)
     max_age = timedelta(seconds=settings.ROLLING_RAPIRA_MAX_AGE_SECONDS)
-    for row in _payload_rows(payload):
-        symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
-        compact = symbol.replace('/', '')
-        base = _normalize_symbol(row.get('baseCurrency'))
-        quote = _normalize_symbol(row.get('quoteCurrency'))
-        direct_pair = (
-            symbol in RAPIRA_SYMBOLS
-            or compact in RAPIRA_SYMBOLS
-            or (base == 'USDT' and quote == 'RUB')
-        )
-        inverse_pair = (
-            symbol in RUB_USDT_SYMBOLS
-            or compact in RUB_USDT_SYMBOLS
-            or (base == 'RUB' and quote == 'USDT')
-        )
-        if not direct_pair and not inverse_pair:
+    for row in parse_rapira_market_payload(payload):
+        direction = _pair_direction(row)
+        if direction is None:
             continue
         ask = _to_decimal(row.get('askPrice'))
         if not ask:
             continue
-        rate = ask if direct_pair else Decimal('1') / ask
+        rate = ask if direction == 'direct' else Decimal('1') / ask
         market_updated_at = _provider_datetime(
             row.get('updatedAt')
             or row.get('updated_at')
@@ -157,30 +164,15 @@ def parse_strict_rolling_ask_quote(
 
 
 def parse_rapira_rub_usdt_rate(payload: Any) -> Decimal | None:
-    rows = payload.get('data') if isinstance(payload, dict) else payload
-    if isinstance(rows, dict):
-        rows = rows.get('items') or rows.get('rates') or rows.get('data') or list(rows.values())
-    if not isinstance(rows, list):
-        return None
-
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+    for row in parse_rapira_market_payload(payload):
         price = _pick_price(row)
         if not price:
             continue
-        compact = symbol.replace('/', '')
-        if symbol in RAPIRA_SYMBOLS or compact in RAPIRA_SYMBOLS:
+        direction = _pair_direction(row)
+        if direction == 'direct':
             return price
-        if symbol in RUB_USDT_SYMBOLS or compact in RUB_USDT_SYMBOLS:
+        if direction == 'inverse':
             return Decimal('1') / price
-        base = _normalize_symbol(row.get('baseCurrency'))
-        quote = _normalize_symbol(row.get('quoteCurrency'))
-        if base == 'RUB' and quote == 'USDT':
-            return Decimal('1') / price
-        if base == 'USDT' and quote == 'RUB':
-            return price
     return None
 
 
