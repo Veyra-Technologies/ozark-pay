@@ -9,6 +9,8 @@ from app.models import Deposit, SmsMessage
 from app.core.enums import DepositStatus
 from app.services.fees import settle_deposit_credit
 from app.services.antiscam import check_payment_result_for_risk
+from app.services.deposit_lifecycle import finalize_unsuccessful_deposit
+from app.services.deposit_ttl import deposit_is_expired
 from app.services.requisites import settle_trader_deposit_balance
 
 AMOUNT_MARKERS = (
@@ -129,18 +131,36 @@ async def ingest_sms(db: AsyncSession, provider_message_id: str, sender: str, bo
     return sms
 
 
-async def confirm_deposit_from_sms(db: AsyncSession, sms_id, deposit_id):
-    sms = (await db.execute(select(SmsMessage).where(SmsMessage.id == sms_id).with_for_update())).scalar_one_or_none()
+async def confirm_deposit_from_sms(
+    db: AsyncSession,
+    sms_id,
+    deposit_id,
+    *,
+    actor_id=None,
+    actor_ip: str | None = None,
+):
     dep = (await db.execute(select(Deposit).where(Deposit.id == deposit_id).with_for_update())).scalar_one_or_none()
+    sms = (await db.execute(select(SmsMessage).where(SmsMessage.id == sms_id).with_for_update())).scalar_one_or_none()
     if not sms or not dep:
         raise LookupError('sms or deposit not found')
     if sms.processed and sms.linked_deposit_id:
         if sms.linked_deposit_id == dep.id:
-            return sms, dep, False
+            return sms, dep, False, None
         raise ValueError('sms is already linked to another deposit')
     if sms.parsed_amount is not None and sms.parsed_amount != dep.amount:
         raise ValueError('sms amount does not match deposit amount')
     if dep.status in [DepositStatus.created.value, DepositStatus.pending.value, DepositStatus.appeal_opened.value]:
+        if deposit_is_expired(dep):
+            finalization = await finalize_unsuccessful_deposit(
+                db,
+                dep,
+                reason='trader_timeout',
+                actor_id=actor_id,
+                actor_role='superadmin',
+                actor_ip=actor_ip,
+                audit_action='sms_confirm_rejected_after_ttl',
+            )
+            return sms, dep, False, finalization
         await settle_trader_deposit_balance(db, dep)
         await settle_deposit_credit(db, merchant_id=dep.merchant_id, method=dep.method, amount=dep.amount, operation_id=dep.id, description='manual SMS confirmation')
         dep.status = DepositStatus.paid.value
@@ -150,4 +170,4 @@ async def confirm_deposit_from_sms(db: AsyncSession, sms_id, deposit_id):
     sms.linked_deposit_id = dep.id
     sms.processed = True
     sms.review_required = False
-    return sms, dep, True
+    return sms, dep, True, None

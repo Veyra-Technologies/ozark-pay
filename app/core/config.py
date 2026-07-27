@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     RAPIRA_RATES_URL: str = 'https://api.rapira.net/open/market/rates'
     RAPIRA_RATES_TIMEOUT_SECONDS: float = 5.0
     RAPIRA_RATES_CACHE_SECONDS: int = 15
+    DEPOSIT_PROCESSING_TTL_SECONDS: int = Field(default=900, ge=60, le=86400)
+    ROLLING_RAPIRA_MAX_AGE_SECONDS: int = Field(default=60, ge=5, le=3600)
     SECRET_FLASH_TTL_SECONDS: int = 300
     CABINET_POLL_INTERVAL_SECONDS: int = 10
 

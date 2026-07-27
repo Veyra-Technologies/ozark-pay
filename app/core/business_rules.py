@@ -50,14 +50,12 @@ ROLE_PERMISSIONS = {
     Role.operator.value: [
         'requisites.manage_own',
         'operations.confirm',
-        'operations.complete',
         'sms.confirm',
         'appeals.reply',
     ],
     Role.trader.value: [
         'requisites.manage_own',
         'operations.confirm',
-        'operations.complete',
         'sms.confirm',
         'appeals.reply',
     ],

@@ -11,6 +11,10 @@ from app.services.aggregator_enqueue import enqueue_aggregator_callback_delivery
 from app.services.aggregators import sync_payment_from_deposit
 from app.services.antiscam import check_payment_result_for_risk
 from app.services.audit import audit
+from app.services.deposit_lifecycle import (
+    deposit_is_expired,
+    finalize_unsuccessful_deposit,
+)
 from app.services.fees import settle_deposit_credit
 from app.services.requisites import settle_trader_deposit_balance
 from app.services.webhook_enqueue import enqueue_webhook_delivery
@@ -50,9 +54,12 @@ class DepositConfirmationSystemError(DepositConfirmationError):
 @dataclass(frozen=True)
 class DepositConfirmationResult:
     deposit_id: UUID
-    settlement: dict
-    webhook_event_id: UUID
-    aggregator_callback_log_ids: tuple[UUID, ...]
+    confirmed: bool
+    status: str
+    reason: str | None
+    settlement: dict | None
+    webhook_event_id: UUID | None
+    aggregator_callback_log_ids: tuple[UUID, ...] = ()
 
 
 async def _rollback(db: AsyncSession, operation_id: UUID | str, actor_id: UUID | str) -> None:
@@ -93,6 +100,26 @@ async def confirm_deposit_payment(
                 'Заявку в текущем статусе нельзя подтвердить',
                 api_detail=f'deposit status {deposit.status} cannot be confirmed',
             )
+        if deposit_is_expired(deposit):
+            finalization = await finalize_unsuccessful_deposit(
+                db,
+                deposit,
+                reason='trader_timeout',
+                actor_id=actor_id,
+                actor_role='system',
+                actor_ip=actor_ip,
+                audit_action='deposit_confirm_rejected_after_ttl',
+            )
+            await db.commit()
+            return DepositConfirmationResult(
+                deposit_id=deposit.id,
+                confirmed=False,
+                status=deposit.status,
+                reason='trader_timeout',
+                settlement=None,
+                webhook_event_id=finalization.webhook_event_id,
+                aggregator_callback_log_ids=finalization.aggregator_callback_log_ids,
+            )
 
         await settle_trader_deposit_balance(db, deposit)
         settlement = await settle_deposit_credit(
@@ -105,6 +132,10 @@ async def confirm_deposit_payment(
         )
         deposit.status = DepositStatus.paid.value
         await check_payment_result_for_risk(db, deposit)
+        # Keep all payload fields loaded before the synchronous snapshot
+        # builder; server-generated updated_at is expired by PostgreSQL flush.
+        await db.flush()
+        await db.refresh(deposit, attribute_names=['updated_at'])
         webhook_event = await queue_webhook(
             db,
             deposit.merchant_id,
@@ -149,6 +180,9 @@ async def confirm_deposit_payment(
 
     return DepositConfirmationResult(
         deposit_id=deposit.id,
+        confirmed=True,
+        status=deposit.status,
+        reason=None,
         settlement=settlement,
         webhook_event_id=webhook_event.id,
         aggregator_callback_log_ids=tuple(log.id for log in aggregator_logs),
@@ -159,7 +193,8 @@ def enqueue_deposit_confirmation_deliveries(result: DepositConfirmationResult) -
     """Kick queued deliveries after commit; queue outages must not undo settlement."""
     webhook_enqueued = False
     try:
-        webhook_enqueued = bool(enqueue_webhook_delivery(result.webhook_event_id))
+        if result.webhook_event_id:
+            webhook_enqueued = bool(enqueue_webhook_delivery(result.webhook_event_id))
     except Exception:
         logger.exception(
             'deposit_confirmation_webhook_enqueue_failed',
