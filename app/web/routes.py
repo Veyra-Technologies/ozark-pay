@@ -17,11 +17,12 @@ from fastapi import APIRouter, Request, Depends, Form, HTTPException, File, Uplo
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.db.session import get_db
-from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule
+from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
@@ -63,6 +64,11 @@ from app.services.aggregators import create_aggregator_account, money, percent, 
 from app.services.ledger import LedgerError, debit_frozen, manual_trader_adjustment, release_hold
 from app.services.requisites import deposit_trader_profit_amount, deposit_trader_settlement_amount, release_trader_deposit_hold
 from app.services.deposit_confirmation import DepositConfirmationError, DepositConfirmationSystemError, confirm_deposit_payment, enqueue_deposit_confirmation_deliveries
+from app.services.deposit_lifecycle import (
+    expire_due_deposits,
+    finalize_unsuccessful_deposit,
+)
+from app.services.deposit_ttl import deposit_deadline
 from app.services.rapira import get_rapira_rub_usdt_quote
 from app.services.settlements import SETTLEMENT_STATUS_COMPLETED, SETTLEMENT_STATUS_PENDING, SETTLEMENT_STATUS_REJECTED, create_merchant_settlement, merchant_settlement_quote, settlement_rate_rub
 from app.services.webhook_enqueue import enqueue_webhook_delivery
@@ -78,6 +84,16 @@ from app.services.fee_tiers import (
     replace_fee_rule as replace_tier_fee_rule,
 )
 from app.services.platform_income import platform_income_dashboard
+from app.services.rolling import (
+    RollingError,
+    get_finance_profile,
+    get_rolling_account,
+    reconcile_rolling_account,
+    register_funding,
+    rolling_overview,
+    set_merchant_settlement_mode,
+    set_rolling_suspension,
+)
 from app.services.merchant_api_keys import (
     MerchantApiKeyError,
     api_key_fingerprint,
@@ -242,7 +258,7 @@ ROLE_DESCRIPTIONS = {
     'trader': 'Кабинет трейдера: подключение реквизитов и обработка платежей.',
 }
 ROLE_SECTIONS = {
-    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Audit log', 'Risk / AML'],
+    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Rolling', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Audit log', 'Risk / AML'],
     'admin': ['Обзор', 'Создать кабинет', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Risk / AML'],
     'support': ['Обзор', 'Площадки/агрегаторы', 'Aggregators', 'Трейдеры', 'Все пополнения', 'Все выплаты', 'Апелляции', 'Смс хаб', 'История обращений', 'Безопасность'],
     'merchant': ['Обзор', 'Пополнение', 'Выплаты', 'Кошелек', 'Статистика', 'API ключи', 'Webhook', 'Интеграция казино', 'Апелляции', 'Безопасность'],
@@ -358,7 +374,6 @@ def _twofa_redirect() -> RedirectResponse:
 MANAGED_USER_ROLES = {Role.admin.value, Role.support.value, Role.merchant.value, Role.operator.value, Role.trader.value}
 TRADER_ROLES = {Role.operator.value, Role.trader.value}
 
-DEPOSIT_PROCESSING_TTL = timedelta(minutes=15)
 DEPOSIT_ACTIVE_FOR_TRADER = {
     DepositStatus.created.value,
     DepositStatus.pending.value,
@@ -366,12 +381,8 @@ DEPOSIT_ACTIVE_FOR_TRADER = {
 }
 
 
-def _aware(dt: datetime) -> datetime:
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
 def _deposit_deadline(dep: Deposit) -> datetime:
-    return _aware(dep.created_at) + DEPOSIT_PROCESSING_TTL
+    return deposit_deadline(dep)
 
 
 def _deposit_webhook_payload(dep: Deposit) -> dict:
@@ -379,40 +390,7 @@ def _deposit_webhook_payload(dep: Deposit) -> dict:
 
 
 async def expire_stale_deposits(db: AsyncSession) -> list:
-    cutoff = datetime.now(timezone.utc) - DEPOSIT_PROCESSING_TTL
-    rows = (await db.execute(
-        select(Deposit)
-        .where(
-            Deposit.status.in_([DepositStatus.created.value, DepositStatus.pending.value]),
-            Deposit.created_at <= cutoff,
-        )
-        .with_for_update()
-    )).scalars().all()
-    events = []
-    for dep in rows:
-        dep.status = DepositStatus.failed.value
-        payload = _deposit_webhook_payload(dep)
-        await release_trader_deposit_hold(db, dep)
-        await check_payment_result_for_risk(db, dep)
-        events.append(await queue_webhook(db, dep.merchant_id, 'deposit.failed', payload))
-        await sync_payment_from_deposit(db, dep)
-    return events
-
-
-async def fail_deposit_from_cabinet(db: AsyncSession, dep: Deposit) -> object:
-    dep.status = DepositStatus.failed.value
-    payload = _deposit_webhook_payload(dep)
-    await release_trader_deposit_hold(db, dep)
-    await check_payment_result_for_risk(db, dep)
-    return await queue_webhook(db, dep.merchant_id, 'deposit.failed', payload)
-
-
-async def cancel_deposit_from_cabinet(db: AsyncSession, dep: Deposit) -> object:
-    dep.status = DepositStatus.cancelled.value
-    payload = _deposit_webhook_payload(dep)
-    await release_trader_deposit_hold(db, dep)
-    await check_payment_result_for_risk(db, dep)
-    return await queue_webhook(db, dep.merchant_id, 'deposit.cancelled', payload)
+    return await expire_due_deposits(db)
 
 
 def _can_manage_requisite(user: User, req: Requisite) -> bool:
@@ -762,6 +740,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
     realm_session['user_id'] = str(user.id)
     realm_session['role'] = user.role
     realm_session['auth'] = _session_marker(user)
+    realm_session['twofa_verified'] = bool(user.twofa_enabled)
     realm_session[SESSION_REALM_KEY] = realm
     realm_session[SESSION_GENERATION_KEY] = secrets.token_urlsafe(24)
     _mark_session_event(
@@ -1637,6 +1616,7 @@ async def enable_2fa(request: Request, otp: str = Form(...), db: AsyncSession = 
         return RedirectResponse('/cabinet?msg=Неверный+2FA+код', status_code=303)
     user.twofa_enabled = True
     request.session['auth'] = _session_marker(user)
+    request.session['twofa_verified'] = True
     await audit(db, '2fa_enabled', 'user', actor_id=user.id, target_id=str(user.id), ip=client_ip(request))
     await db.commit()
     return RedirectResponse('/cabinet?msg=2FA+подключена', status_code=303)
@@ -1653,6 +1633,7 @@ async def disable_2fa(request: Request, otp: str = Form(''), db: AsyncSession = 
         return RedirectResponse('/cabinet?msg=Неверный+2FA+код', status_code=303)
     user.twofa_enabled = False
     user.twofa_secret = None
+    request.session.pop('twofa_verified', None)
     await audit(db, '2fa_disabled', 'user', actor_id=user.id, target_id=str(user.id), ip=client_ip(request))
     await db.commit()
     return RedirectResponse('/cabinet?msg=2FA+отключена', status_code=303)
@@ -1697,31 +1678,67 @@ async def cabinet_confirm_deposit(deposit_id: str, request: Request, db: AsyncSe
     except DepositConfirmationError as exc:
         return _redirect(exc.public_message, 'deposits')
     delivery = enqueue_deposit_confirmation_deliveries(result)
+    if not result.confirmed:
+        return _redirect(
+            'Срок заявки истёк: выполнена финализация trader_timeout',
+            'deposits',
+        )
     message = 'Deposit confirmed, webhook queued' if delivery['webhook_enqueued'] else 'Deposit confirmed, webhook queue unavailable'
     return _redirect(message, 'deposits')
 
 
 @router.post('/cabinet/deposits/{deposit_id}/decline')
-async def cabinet_decline_deposit(deposit_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+async def cabinet_decline_deposit(
+    deposit_id: str,
+    request: Request,
+    reason: str = Form(''),
+    db: AsyncSession = Depends(get_db),
+):
     user = await get_current_web_user(request, db)
     if not user:
         return RedirectResponse('/login', status_code=303)
     if staff_2fa_setup_required(user):
         return _twofa_redirect()
-    dep = (await db.execute(select(Deposit).where(Deposit.id == deposit_id).with_for_update())).scalar_one_or_none()
+    if user.role not in [Role.superadmin.value, Role.admin.value]:
+        raise HTTPException(403, 'Only admin or superadmin may decline a deposit')
+    reason = reason.strip()
+    if user.role == Role.superadmin.value and not reason:
+        raise HTTPException(422, 'Decline reason is required')
+    reason = reason or 'admin_decline'
+    try:
+        deposit_uuid = uuid.UUID(deposit_id)
+    except ValueError:
+        raise HTTPException(404, 'Deposit not found')
+    dep = (await db.execute(
+        select(Deposit).where(Deposit.id == deposit_uuid).with_for_update()
+    )).scalar_one_or_none()
     if not dep:
         return RedirectResponse('/cabinet?msg=' + quote_plus('Заявка не найдена'), status_code=303)
-    if not await can_confirm_deposit(db, user, dep):
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Нет доступа к этой заявке'), status_code=303)
-    if dep.status not in [DepositStatus.created.value, DepositStatus.pending.value, DepositStatus.appeal_opened.value]:
-        return RedirectResponse('/cabinet?msg=' + quote_plus(f'Нельзя отклонить заявку в статусе {dep.status}'), status_code=303)
-    ev = await fail_deposit_from_cabinet(db, dep)
-    aggregator_callback_logs = await sync_payment_from_deposit(db, dep)
-    await audit(db, 'deposit_declined_from_cabinet', 'deposit', user.id, dep.id, client_ip(request))
+    result = await finalize_unsuccessful_deposit(
+        db,
+        dep,
+        reason=f'manual_decline:{reason[:400]}',
+        target_status=DepositStatus.failed.value,
+        actor_id=user.id,
+        actor_role=user.role,
+        actor_ip=client_ip(request),
+        request_id=request.headers.get('X-Request-ID'),
+        audit_action='deposit_declined_from_cabinet',
+    )
     await db.commit()
-    webhook_enqueued = enqueue_webhook_delivery(ev.id)
-    for log in aggregator_callback_logs:
-        enqueue_aggregator_callback_delivery(log.id)
+    webhook_enqueued = bool(
+        result.webhook_event_id
+        and enqueue_webhook_delivery(result.webhook_event_id)
+    )
+    for callback_id in result.aggregator_callback_log_ids:
+        enqueue_aggregator_callback_delivery(callback_id)
+    if not result.changed:
+        return RedirectResponse(
+            '/cabinet?msg=' + quote_plus(
+                f'Deposit already finalized with status {result.status}'
+            ),
+            status_code=303,
+        )
     message = 'Deposit declined, webhook queued' if webhook_enqueued else 'Deposit declined, webhook queue unavailable'
     return RedirectResponse('/cabinet?msg=' + quote_plus(message), status_code=303)
 
@@ -1834,7 +1851,9 @@ async def cabinet_trader_accept_appeal(appeal_id: str, request: Request, db: Asy
         appeal_uuid = uuid.UUID(appeal_id)
     except ValueError:
         return _redirect('Апелляция не найдена', 'appeals')
-    appeal = (await db.execute(select(Appeal).where(Appeal.id == appeal_uuid).with_for_update())).scalar_one_or_none()
+    appeal = (await db.execute(
+        select(Appeal).where(Appeal.id == appeal_uuid)
+    )).scalar_one_or_none()
     if not appeal or not await _appeal_visible_to_user(db, user, appeal):
         return _redirect('Апелляция не найдена', 'appeals')
     if appeal.status != AppealStatus.opened.value:
@@ -1870,7 +1889,9 @@ async def cabinet_trader_reject_appeal(
         appeal_uuid = uuid.UUID(appeal_id)
     except ValueError:
         return _redirect('Апелляция не найдена', 'appeals')
-    appeal = (await db.execute(select(Appeal).where(Appeal.id == appeal_uuid).with_for_update())).scalar_one_or_none()
+    appeal = (await db.execute(
+        select(Appeal).where(Appeal.id == appeal_uuid).with_for_update()
+    )).scalar_one_or_none()
     if not appeal or not await _appeal_visible_to_user(db, user, appeal):
         return _redirect('Апелляция не найдена', 'appeals')
     if appeal.status != AppealStatus.opened.value:
@@ -1939,7 +1960,9 @@ async def cabinet_staff_resolve_appeal(appeal_id: str, request: Request, action:
         appeal_uuid = uuid.UUID(appeal_id)
     except ValueError:
         return _redirect('Апелляция не найдена', 'appeals')
-    appeal = (await db.execute(select(Appeal).where(Appeal.id == appeal_uuid).with_for_update())).scalar_one_or_none()
+    appeal = (await db.execute(
+        select(Appeal).where(Appeal.id == appeal_uuid)
+    )).scalar_one_or_none()
     if not appeal:
         return _redirect('Апелляция не найдена', 'appeals')
     if appeal.status not in [AppealStatus.opened.value, AppealStatus.in_review.value]:
@@ -2104,6 +2127,15 @@ async def _require_superadmin_web(request: Request, db: AsyncSession) -> User | 
         return RedirectResponse('/login', status_code=303)
     if actor.role != Role.superadmin.value:
         return _redirect('Недостаточно прав', 'antiscam')
+    if staff_2fa_setup_required(actor):
+        return _twofa_redirect()
+    if not request.scope.get('session', {}).get('twofa_verified'):
+        request.scope.get('session', {}).clear()
+        return RedirectResponse(
+            '/login?error='
+            + quote_plus('РўСЂРµР±СѓРµС‚СЃСЏ РЅРѕРІС‹Р№ РІС…РѕРґ СЃ 2FA'),
+            status_code=303,
+        )
     return actor
 
 
@@ -2344,6 +2376,161 @@ async def cabinet_antiscam_trader_withdrawals(request: Request, trader_id: str, 
     await audit(db, 'superadmin_froze_withdrawals' if trader.trader_withdrawals_frozen else 'superadmin_unfroze_withdrawals', 'user', actor.id, trader.id, client_ip(request), {'before': old, 'after': trader.trader_withdrawals_frozen})
     await db.commit()
     return _redirect('Настройка вывода трейдера сохранена', 'antiscam')
+
+
+@router.post('/cabinet/rolling/merchants/{merchant_id}/mode')
+async def cabinet_rolling_set_mode(
+    merchant_id: str,
+    request: Request,
+    settlement_mode: str = Form(...),
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    reason = reason.strip()
+    if not reason:
+        raise HTTPException(422, 'Reason is required')
+    try:
+        merchant_uuid = uuid.UUID(merchant_id)
+    except ValueError:
+        raise HTTPException(404, 'Merchant not found')
+    merchant = (await db.execute(
+        select(Merchant).where(Merchant.id == merchant_uuid)
+    )).scalar_one_or_none()
+    if not merchant:
+        raise HTTPException(404, 'Merchant not found')
+    try:
+        profile, account = await set_merchant_settlement_mode(
+            db,
+            merchant_id=merchant.id,
+            mode=settlement_mode,
+            actor_id=actor.id,
+        )
+    except RollingError as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'rolling')
+    await audit(
+        db,
+        'merchant_settlement_mode_changed',
+        'merchant',
+        actor.id,
+        merchant.id,
+        client_ip(request),
+        {
+            'settlement_mode': profile.settlement_mode,
+            'rolling_account_status': account.status if account else None,
+            'reason': reason[:500],
+        },
+    )
+    await db.commit()
+    return _redirect(
+        f'Режим {merchant.name} изменён на {profile.settlement_mode}',
+        'rolling',
+    )
+
+
+@router.post('/cabinet/rolling/merchants/{merchant_id}/funding')
+async def cabinet_rolling_funding(
+    merchant_id: str,
+    request: Request,
+    amount_usdt: str = Form(...),
+    network: str = Form(...),
+    destination_address: str = Form(...),
+    tx_hash: str = Form(...),
+    funded_at: str = Form(...),
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        merchant_uuid = uuid.UUID(merchant_id)
+        amount = Decimal(amount_usdt)
+        funded = datetime.fromisoformat(funded_at.replace('Z', '+00:00'))
+    except (ValueError, InvalidOperation):
+        raise HTTPException(422, 'Invalid merchant, amount, or funded_at')
+    kwargs = {
+        'merchant_id': merchant_uuid,
+        'actor_id': actor.id,
+        'amount_usdt': amount,
+        'network': network,
+        'destination_address': destination_address,
+        'tx_hash': tx_hash,
+        'funded_at': funded,
+        'reason': reason,
+    }
+    try:
+        entry = await register_funding(db, **kwargs)
+    except IntegrityError:
+        await db.rollback()
+        try:
+            entry = await register_funding(db, **kwargs)
+        except (RollingError, IntegrityError) as exc:
+            await db.rollback()
+            return _redirect(str(exc), 'rolling')
+    except RollingError as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'rolling')
+    await audit(
+        db,
+        'rolling_funding_recorded',
+        'merchant',
+        actor.id,
+        merchant_uuid,
+        client_ip(request),
+        {
+            'entry_id': str(entry.id),
+            'entry_type': entry.entry_type,
+            'amount_usdt': str(entry.amount_usdt),
+            'network': entry.network,
+            'tx_hash': entry.tx_hash,
+            'reason': reason[:500],
+        },
+    )
+    await db.commit()
+    return _redirect(
+        f'Rolling {entry.entry_type} сохранён: {entry.amount_usdt} USDT',
+        'rolling',
+    )
+
+
+@router.post('/cabinet/rolling/merchants/{merchant_id}/suspension')
+async def cabinet_rolling_suspension(
+    merchant_id: str,
+    request: Request,
+    suspended: bool = Form(False),
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        merchant_uuid = uuid.UUID(merchant_id)
+        account = await set_rolling_suspension(
+            db,
+            merchant_id=merchant_uuid,
+            suspended=suspended,
+            actor_id=actor.id,
+            reason=reason,
+        )
+    except (ValueError, RollingError) as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'rolling')
+    await audit(
+        db,
+        'rolling_account_suspended' if suspended else 'rolling_account_resumed',
+        'merchant',
+        actor.id,
+        merchant_uuid,
+        client_ip(request),
+        {'status': account.status, 'reason': reason[:500]},
+    )
+    await db.commit()
+    return _redirect(f'Rolling status: {account.status}', 'rolling')
 
 
 @router.get('/cabinet', response_class=HTMLResponse)
@@ -2966,6 +3153,10 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     income_trader_options = []
     income_aggregator_options = []
     income_dashboard = {}
+    merchant_rolling_overview = {'settlement_mode': 'postpaid', 'rolling': None}
+    merchant_rolling_allocations = []
+    merchant_rolling_ledger = []
+    rolling_admin_rows = []
     if user.role in {Role.superadmin.value, Role.admin.value}:
         fee_rules = (await db.execute(
             select(FeeRule).order_by(FeeRule.is_active.desc(), FeeRule.created_at.desc()).limit(500)
@@ -3028,9 +3219,27 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     if role == Role.merchant.value:
         merchant = (await db.execute(select(Merchant).where(Merchant.owner_id == user.id))).scalar_one_or_none()
         if merchant:
-            balance = (await db.execute(select(Balance).where(Balance.merchant_id == merchant.id))).scalar_one_or_none()
+            balance = (await db.execute(
+                select(Balance).where(
+                    Balance.merchant_id == merchant.id,
+                    Balance.currency == 'RUB',
+                )
+            )).scalar_one_or_none()
             settlement_quote = await merchant_settlement_quote(db, merchant.id)
             merchant_api_keys = (await db.execute(select(ApiKey).where(ApiKey.merchant_id == merchant.id).order_by(ApiKey.is_active.desc(), ApiKey.created_at.desc()).limit(20))).scalars().all()
+            merchant_rolling_overview = await rolling_overview(db, merchant.id)
+            merchant_rolling_allocations = (await db.execute(
+                select(MerchantRollingAllocation)
+                .where(MerchantRollingAllocation.merchant_id == merchant.id)
+                .order_by(MerchantRollingAllocation.created_at.desc())
+                .limit(200)
+            )).scalars().all()
+            merchant_rolling_ledger = (await db.execute(
+                select(MerchantRollingLedgerEntry)
+                .where(MerchantRollingLedgerEntry.merchant_id == merchant.id)
+                .order_by(MerchantRollingLedgerEntry.created_at.desc())
+                .limit(200)
+            )).scalars().all()
 
     users = (await db.execute(select(User).where(User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value] else []
     merchant_users = [u for u in users if u.role == Role.merchant.value]
@@ -3328,6 +3537,55 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             str(actor.id): f"{actor.email} ({'trader' if actor.role in [Role.operator.value, Role.trader.value] else actor.role})"
             for actor in audit_actor_users
         }
+    if user.role == Role.superadmin.value:
+        for rolling_merchant in merchants:
+            profile = await get_finance_profile(db, rolling_merchant.id)
+            account = await get_rolling_account(db, rolling_merchant.id)
+            overview = await rolling_overview(db, rolling_merchant.id)
+            allocations = (await db.execute(
+                select(MerchantRollingAllocation)
+                .where(MerchantRollingAllocation.merchant_id == rolling_merchant.id)
+                .order_by(MerchantRollingAllocation.created_at.desc())
+                .limit(100)
+            )).scalars().all()
+            ledger_rows = (await db.execute(
+                select(MerchantRollingLedgerEntry)
+                .where(MerchantRollingLedgerEntry.merchant_id == rolling_merchant.id)
+                .order_by(MerchantRollingLedgerEntry.created_at.desc())
+                .limit(200)
+            )).scalars().all()
+            reconciliation = await reconcile_rolling_account(
+                db,
+                rolling_merchant.id,
+            )
+            rolling_admin_rows.append({
+                'merchant': rolling_merchant,
+                'profile': profile,
+                'account': account,
+                'overview': overview,
+                'allocations': allocations,
+                'ledger': ledger_rows,
+                'settle_overflow_rub': sum(
+                    (
+                        Decimal(row.amount_rub or 0)
+                        for row in ledger_rows
+                        if row.entry_type == 'settle_overflow'
+                    ),
+                    Decimal('0.00'),
+                ),
+                'reconciliation': reconciliation,
+                'audit': [
+                    row for row in audit_logs
+                    if str(row.target_id or '') == str(rolling_merchant.id)
+                    or (
+                        str(row.target_type or '') == 'deposit'
+                        and any(
+                            str(allocation.deposit_id) == str(row.target_id or '')
+                            for allocation in allocations
+                        )
+                    )
+                ][:100],
+            })
 
     known_traders = {str(t.id): t for t in trader_users}
     for merchant_trader in merchant_traders:
@@ -3582,6 +3840,10 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant_settlements': merchant_settlements,
         'settlement_merchant_names': settlement_merchant_names,
         'settlement_quote': settlement_quote,
+        'merchant_rolling_overview': merchant_rolling_overview,
+        'merchant_rolling_allocations': merchant_rolling_allocations,
+        'merchant_rolling_ledger': merchant_rolling_ledger,
+        'rolling_admin_rows': rolling_admin_rows,
         'merchant_traders': merchant_traders,
         'merchant_filter_trader_id': merchant_filter_trader_id,
         'merchant_deal_id': merchant_deal_id,
