@@ -5,7 +5,17 @@ from sqlalchemy import CheckConstraint, DateTime, String, Boolean, ForeignKey, N
 from sqlalchemy.dialects.postgresql import UUID, INET
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base, TimestampMixin
-from app.core.enums import Role, DepositStatus, PayoutStatus, PaymentMethod, AppealStatus, LedgerType
+from app.core.enums import (
+    AppealStatus,
+    DepositStatus,
+    LedgerType,
+    MerchantSettlementMode,
+    PaymentMethod,
+    PayoutStatus,
+    RollingAccountStatus,
+    RollingAllocationStatus,
+    Role,
+)
 from app.core.security import encrypt_secret
 
 class User(Base, TimestampMixin):
@@ -50,6 +60,37 @@ class Merchant(Base, TimestampMixin):
     owner=relationship('User', back_populates='merchant')
     balances=relationship('Balance', back_populates='merchant')
     settlements=relationship('MerchantSettlement', back_populates='merchant')
+    finance_profile=relationship('MerchantFinanceProfile', back_populates='merchant', uselist=False)
+    rolling_account=relationship('MerchantRollingAccount', back_populates='merchant', uselist=False)
+
+
+class MerchantFinanceProfile(Base, TimestampMixin):
+    __tablename__ = 'merchant_finance_profiles'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    merchant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey('merchants.id', ondelete='CASCADE')
+    )
+    settlement_mode: Mapped[str] = mapped_column(
+        String(16), default=MerchantSettlementMode.postpaid.value, index=True
+    )
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True
+    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True
+    )
+    merchant = relationship('Merchant', back_populates='finance_profile')
+    __table_args__ = (
+        UniqueConstraint(
+            'merchant_id',
+            name='uq_merchant_finance_profiles_merchant_id',
+        ),
+        CheckConstraint(
+            "settlement_mode IN ('postpaid','rolling')",
+            name='ck_merchant_finance_profiles_mode',
+        ),
+    )
 
 class ApiKey(Base, TimestampMixin):
     __tablename__='api_keys'
@@ -118,9 +159,16 @@ class Deposit(Base, TimestampMixin):
     requisites_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('requisites.id'), nullable=True)
     client_ip: Mapped[str|None]=mapped_column(String(64), nullable=True)
     metadata_json: Mapped[dict]=mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime]=mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+        server_default=text("now() + interval '15 minutes'"),
+    )
     __table_args__=(
         UniqueConstraint('merchant_id','external_id', name='uq_deposit_merchant_external'),
         UniqueConstraint('merchant_id','idempotency_key', name='uq_deposit_merchant_idempotency'),
+        Index('ix_deposits_status_expires_at', 'status', 'expires_at'),
     )
 
 class Payout(Base, TimestampMixin):
@@ -185,6 +233,158 @@ class PlatformLedgerEntry(Base, TimestampMixin):
     currency: Mapped[str]=mapped_column(String(8), default='RUB')
     description: Mapped[str]=mapped_column(String(500), default='')
     idempotency_key: Mapped[str|None]=mapped_column(String(160), unique=True, nullable=True)
+
+
+class MerchantRollingAccount(Base, TimestampMixin):
+    __tablename__ = 'merchant_rolling_accounts'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    merchant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='CASCADE')
+    )
+    principal_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), default=Decimal('0.000000')
+    )
+    recovered_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), default=Decimal('0.000000')
+    )
+    outstanding_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), default=Decimal('0.000000')
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default=RollingAccountStatus.exhausted.value, index=True
+    )
+    merchant = relationship('Merchant', back_populates='rolling_account')
+    __table_args__ = (
+        UniqueConstraint(
+            'merchant_id',
+            name='uq_merchant_rolling_accounts_merchant_id',
+        ),
+        CheckConstraint('principal_usdt >= 0', name='ck_rolling_account_principal_nonnegative'),
+        CheckConstraint('recovered_usdt >= 0', name='ck_rolling_account_recovered_nonnegative'),
+        CheckConstraint('outstanding_usdt >= 0', name='ck_rolling_account_outstanding_nonnegative'),
+        CheckConstraint(
+            "status IN ('active','exhausted','suspended','closed')",
+            name='ck_rolling_account_status',
+        ),
+    )
+
+
+class MerchantRollingAllocation(Base, TimestampMixin):
+    __tablename__ = 'merchant_rolling_allocations'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    deposit_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT')
+    )
+    merchant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='RESTRICT'), index=True
+    )
+    rolling_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('merchant_rolling_accounts.id', ondelete='RESTRICT'), index=True
+    )
+    gross_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    merchant_fee_percent_snapshot: Mapped[Decimal] = mapped_column(Numeric(10, 6))
+    merchant_fee_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    merchant_net_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    rapira_rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8))
+    rapira_rate_side: Mapped[str] = mapped_column(String(8), default='ask')
+    rapira_rate_source: Mapped[str] = mapped_column(String(64))
+    rapira_rate_field: Mapped[str] = mapped_column(String(64), default='askPrice')
+    rapira_rate_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    merchant_net_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    rolling_applied_usdt: Mapped[Decimal] = mapped_column(
+        Numeric(24, 6), default=Decimal('0.000000')
+    )
+    rolling_applied_rub: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2), default=Decimal('0.00')
+    )
+    settle_credited_rub: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2), default=Decimal('0.00')
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), default=RollingAllocationStatus.pending.value, index=True
+    )
+    release_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__ = (
+        UniqueConstraint(
+            'deposit_id',
+            name='uq_merchant_rolling_allocations_deposit_id',
+        ),
+        CheckConstraint('gross_rub >= 0', name='ck_rolling_allocation_gross_nonnegative'),
+        CheckConstraint('merchant_fee_rub >= 0', name='ck_rolling_allocation_fee_nonnegative'),
+        CheckConstraint('merchant_net_rub >= 0', name='ck_rolling_allocation_net_rub_nonnegative'),
+        CheckConstraint('merchant_net_usdt >= 0', name='ck_rolling_allocation_net_usdt_nonnegative'),
+        CheckConstraint('rolling_applied_usdt >= 0', name='ck_rolling_allocation_applied_usdt_nonnegative'),
+        CheckConstraint('rolling_applied_rub >= 0', name='ck_rolling_allocation_applied_rub_nonnegative'),
+        CheckConstraint('settle_credited_rub >= 0', name='ck_rolling_allocation_settle_nonnegative'),
+        CheckConstraint("rapira_rate_side = 'ask'", name='ck_rolling_allocation_rate_side'),
+        CheckConstraint(
+            "status IN ('pending','paid','released','reversed')",
+            name='ck_rolling_allocation_status',
+        ),
+        Index(
+            'ix_merchant_rolling_allocations_merchant_status',
+            'merchant_id',
+            'status',
+        ),
+    )
+
+
+class MerchantRollingLedgerEntry(Base, TimestampMixin):
+    __tablename__ = 'merchant_rolling_ledger_entries'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rolling_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('merchant_rolling_accounts.id', ondelete='RESTRICT'), index=True
+    )
+    merchant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='RESTRICT'), index=True
+    )
+    deposit_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT'), nullable=True, index=True
+    )
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True
+    )
+    entry_type: Mapped[str] = mapped_column(String(32), index=True)
+    amount_usdt: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    amount_rub: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_rub: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
+    network: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    destination_address: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    tx_hash: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    funded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reason: Mapped[str] = mapped_column(String(500))
+    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    __table_args__ = (
+        CheckConstraint(
+            "entry_type IN ('funding','topup','pending_added','pending_released',"
+            "'recovery','settle_overflow','reversal','manual_adjustment','write_off')",
+            name='ck_rolling_ledger_entry_type',
+        ),
+        CheckConstraint(
+            'amount_usdt IS NULL OR amount_usdt >= 0',
+            name='ck_rolling_ledger_amount_usdt_nonnegative',
+        ),
+        CheckConstraint(
+            'amount_rub IS NULL OR amount_rub >= 0',
+            name='ck_rolling_ledger_amount_rub_nonnegative',
+        ),
+        Index(
+            'ix_merchant_rolling_ledger_account_created',
+            'rolling_account_id',
+            'created_at',
+        ),
+        Index(
+            'uq_merchant_rolling_ledger_network_tx_hash',
+            'network',
+            'tx_hash',
+            unique=True,
+            postgresql_where=text(
+                "entry_type IN ('funding','topup') AND network IS NOT NULL AND tx_hash IS NOT NULL"
+            ),
+        ),
+    )
 
 
 class Requisite(Base, TimestampMixin):

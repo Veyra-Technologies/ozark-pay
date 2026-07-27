@@ -10,11 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Deposit
 from app.services.fee_tiers import FeeConfigurationError, get_operation_fee_snapshot, money, rate
 from app.services.ledger import (
-    credit,
     record_fee,
     record_platform_executor_fee,
     record_platform_income,
 )
+from app.services.rolling import apply_merchant_financing
 
 
 async def settle_deposit_credit(
@@ -61,11 +61,27 @@ async def settle_deposit_credit(
     })
     deposit.metadata_json = metadata
 
-    if net > 0:
-        await credit(
-            db, merchant_id, net, operation_id,
-            f'deposit-confirm:{operation_id}:net', description,
-        )
+    financing = await apply_merchant_financing(
+        db,
+        deposit=deposit,
+        snapshot=snapshot,
+        merchant_net_rub=net,
+        description=description,
+    )
+    metadata.update({
+        'settlement_mode': financing['settlement_mode'],
+        'rolling_applied_usdt': str(financing['rolling_applied_usdt']),
+        'rolling_applied_rub': str(financing['rolling_applied_rub']),
+        'settle_credited_rub': str(financing['settle_credited_rub']),
+        'rapira_rate_rub': (
+            str(financing['rapira_rate_rub'])
+            if financing['rapira_rate_rub'] is not None
+            else None
+        ),
+        'rapira_rate_side': financing['rapira_rate_side'],
+        'rapira_rate_source': financing['rapira_rate_source'],
+    })
+    deposit.metadata_json = metadata
     await record_fee(
         db, merchant_id, merchant_fee, operation_id,
         f'deposit-confirm:{operation_id}:merchant-fee',
@@ -101,4 +117,15 @@ async def settle_deposit_credit(
         'executor_rate_rule_id': str(snapshot.executor_rate_rule_id),
         'fee_snapshot_id': str(snapshot.id),
         'executor_ledger_entry_id': str(executor_entry.id) if executor_entry else None,
+        'settlement_mode': financing['settlement_mode'],
+        'rolling_applied_usdt': str(financing['rolling_applied_usdt']),
+        'rolling_applied_rub': str(financing['rolling_applied_rub']),
+        'settle_credited_rub': str(financing['settle_credited_rub']),
+        'rapira_rate_rub': (
+            str(financing['rapira_rate_rub'])
+            if financing['rapira_rate_rub'] is not None
+            else None
+        ),
+        'rapira_rate_side': financing['rapira_rate_side'],
+        'rapira_rate_source': financing['rapira_rate_source'],
     }

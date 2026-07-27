@@ -22,6 +22,37 @@ class DepositStatus(StrEnum):
     appeal_opened = 'appeal_opened'
 
 
+class MerchantSettlementMode(StrEnum):
+    postpaid = 'postpaid'
+    rolling = 'rolling'
+
+
+class RollingAccountStatus(StrEnum):
+    active = 'active'
+    exhausted = 'exhausted'
+    suspended = 'suspended'
+    closed = 'closed'
+
+
+class RollingAllocationStatus(StrEnum):
+    pending = 'pending'
+    paid = 'paid'
+    released = 'released'
+    reversed = 'reversed'
+
+
+class RollingLedgerType(StrEnum):
+    funding = 'funding'
+    topup = 'topup'
+    pending_added = 'pending_added'
+    pending_released = 'pending_released'
+    recovery = 'recovery'
+    settle_overflow = 'settle_overflow'
+    reversal = 'reversal'
+    manual_adjustment = 'manual_adjustment'
+    write_off = 'write_off'
+
+
 class PayoutStatus(StrEnum):
     created = 'created'
     pending = 'pending'

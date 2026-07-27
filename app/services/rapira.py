@@ -17,6 +17,8 @@ _cache_value: Decimal | None = None
 _cache_expires_at: datetime | None = None
 _last_success_value: Decimal | None = None
 _last_success_at: datetime | None = None
+_strict_rolling_cache: RollingRapiraQuote | None = None
+_PROVIDER_FUTURE_SKEW = timedelta(seconds=5)
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,26 @@ class RapiraRateQuote:
     updated_at: datetime
     stale: bool
     cache_seconds: int
+
+
+@dataclass(frozen=True)
+class RollingRapiraQuote:
+    symbol: str
+    rate: Decimal
+    side: str
+    source: str
+    received_at: datetime
+    market_updated_at: datetime | None
+    stale: bool
+    provider_field: str
+
+    @property
+    def updated_at(self) -> datetime:
+        return self.market_updated_at or self.received_at
+
+
+class RollingRateUnavailable(ValueError):
+    code = 'rolling_rate_unavailable'
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -48,6 +70,90 @@ def _pick_price(row: dict[str, Any]) -> Decimal | None:
 
 def _normalize_symbol(value: Any) -> str:
     return str(value or '').upper().replace('-', '/').strip()
+
+
+def _payload_rows(payload: Any) -> list[dict[str, Any]]:
+    rows = payload.get('data') if isinstance(payload, dict) else payload
+    if isinstance(rows, dict):
+        rows = rows.get('items') or rows.get('rates') or rows.get('data') or list(rows.values())
+    if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _provider_datetime(value: Any) -> datetime | None:
+    if value in (None, ''):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_strict_rolling_ask_quote(
+    payload: Any,
+    *,
+    received_at: datetime | None = None,
+) -> RollingRapiraQuote | None:
+    received_at = received_at or datetime.now(timezone.utc)
+    if received_at.tzinfo is None:
+        return None
+    received_at = received_at.astimezone(timezone.utc)
+    max_age = timedelta(seconds=settings.ROLLING_RAPIRA_MAX_AGE_SECONDS)
+    for row in _payload_rows(payload):
+        symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+        compact = symbol.replace('/', '')
+        base = _normalize_symbol(row.get('baseCurrency'))
+        quote = _normalize_symbol(row.get('quoteCurrency'))
+        direct_pair = (
+            symbol in RAPIRA_SYMBOLS
+            or compact in RAPIRA_SYMBOLS
+            or (base == 'USDT' and quote == 'RUB')
+        )
+        inverse_pair = (
+            symbol in RUB_USDT_SYMBOLS
+            or compact in RUB_USDT_SYMBOLS
+            or (base == 'RUB' and quote == 'USDT')
+        )
+        if not direct_pair and not inverse_pair:
+            continue
+        ask = _to_decimal(row.get('askPrice'))
+        if not ask:
+            continue
+        rate = ask if direct_pair else Decimal('1') / ask
+        market_updated_at = _provider_datetime(
+            row.get('updatedAt')
+            or row.get('updated_at')
+            or row.get('timestamp')
+            or row.get('time')
+        )
+        if market_updated_at is None:
+            continue
+        age = received_at - market_updated_at
+        if age > max_age or age < -_PROVIDER_FUTURE_SKEW:
+            continue
+        return RollingRapiraQuote(
+            symbol='USDT/RUB',
+            rate=rate,
+            side='ask',
+            source='Rapira',
+            received_at=received_at,
+            market_updated_at=market_updated_at,
+            stale=False,
+            provider_field='askPrice',
+        )
+    return None
 
 
 def parse_rapira_rub_usdt_rate(payload: Any) -> Decimal | None:
@@ -104,6 +210,48 @@ async def fetch_rapira_rub_usdt_rate() -> Decimal | None:
         _cache_expires_at = now + timedelta(seconds=max(5, settings.RAPIRA_RATES_CACHE_SECONDS))
         return parsed
     return None
+
+
+async def get_strict_rolling_ask_quote() -> RollingRapiraQuote:
+    """Return a fresh direct USDT/RUB Rapira ask without any fallback."""
+    global _strict_rolling_cache
+    now = datetime.now(timezone.utc)
+    max_age = timedelta(seconds=settings.ROLLING_RAPIRA_MAX_AGE_SECONDS)
+    if _strict_rolling_cache:
+        quote_age = now - _strict_rolling_cache.updated_at
+        cache_age = now - _strict_rolling_cache.received_at
+        if (
+            -_PROVIDER_FUTURE_SKEW <= quote_age <= max_age
+            and cache_age <= timedelta(seconds=max(1, settings.RAPIRA_RATES_CACHE_SECONDS))
+        ):
+            return _strict_rolling_cache
+
+    url = settings.RAPIRA_RATES_URL.strip()
+    if not settings.RAPIRA_RATES_ENABLED or not url:
+        raise RollingRateUnavailable('rolling_rate_unavailable')
+    timeout = httpx.Timeout(settings.RAPIRA_RATES_TIMEOUT_SECONDS)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            response = await client.get(url, headers={'accept': 'application/json'})
+            response.raise_for_status()
+            received_at = datetime.now(timezone.utc)
+            quote = parse_strict_rolling_ask_quote(
+                response.json(),
+                received_at=received_at,
+            )
+    except (httpx.HTTPError, ValueError) as exc:
+        logging.getLogger('app.finance').warning(
+            'rolling_rapira_quote_unavailable',
+            extra={'error_type': type(exc).__name__},
+        )
+        raise RollingRateUnavailable('rolling_rate_unavailable') from exc
+    if not quote:
+        raise RollingRateUnavailable('rolling_rate_unavailable')
+    quote_age = quote.received_at - quote.updated_at
+    if quote_age > max_age or quote_age < -_PROVIDER_FUTURE_SKEW:
+        raise RollingRateUnavailable('rolling_rate_unavailable')
+    _strict_rolling_cache = quote
+    return quote
 
 
 def _configured_fallback_rate() -> Decimal:

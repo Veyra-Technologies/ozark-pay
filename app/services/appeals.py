@@ -13,6 +13,7 @@ from app.services.antiscam import check_payment_result_for_risk
 from app.services.fees import settle_deposit_credit
 from app.services.ledger import LedgerError, trader_debit_available, trader_debit_frozen, trader_release_hold
 from app.services.requisites import deposit_trader_hold_amount, deposit_trader_settlement_amount
+from app.services.rolling import reopen_released_allocation
 from app.services.webhooks import queue_webhook
 from app.services.webhook_payloads import build_deposit_webhook_payload
 
@@ -153,18 +154,62 @@ async def settle_trader_for_approved_appeal(db: AsyncSession, dep: Deposit, trad
     return trader
 
 
+async def _lock_deposit_then_appeal(
+    db: AsyncSession,
+    appeal: Appeal,
+) -> tuple[Deposit, Appeal]:
+    """Use the global Deposit -> Appeal lock order for every resolution."""
+    appeal_id = appeal.id
+    operation_id = appeal.operation_id
+    dep = (await db.execute(
+        select(Deposit)
+        .where(Deposit.id == operation_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if not dep:
+        raise ValueError('deposit not found')
+    locked_appeal = (await db.execute(
+        select(Appeal)
+        .where(Appeal.id == appeal_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one_or_none()
+    if (
+        not locked_appeal
+        or locked_appeal.operation_type != 'deposit'
+        or locked_appeal.operation_id != dep.id
+    ):
+        raise ValueError('appeal target changed while it was being resolved')
+    return dep, locked_appeal
+
+
 async def approve_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id=None, automatic: bool = False) -> object | None:
     if appeal.operation_type != 'deposit':
         raise ValueError('only deposit appeals can be approved from cabinet')
-    dep = (await db.execute(select(Deposit).where(Deposit.id == appeal.operation_id).with_for_update())).scalar_one_or_none()
-    if not dep:
-        raise ValueError('deposit not found')
+    dep, appeal = await _lock_deposit_then_appeal(db, appeal)
+    if appeal.status not in {
+        AppealStatus.opened.value,
+        AppealStatus.in_review.value,
+    }:
+        raise ValueError('appeal has already been resolved')
 
     meta = metadata(appeal)
+    if automatic and (
+        meta.get('trader_decision')
+        or appeal_deadline(appeal) > utcnow()
+    ):
+        raise ValueError('appeal is not eligible for automatic approval')
     if meta.get('finance_applied') is True:
         raise ValueError('appeal finance has already been applied')
     trader_id = meta.get('trader_id')
     await settle_trader_for_approved_appeal(db, dep, trader_id)
+    await reopen_released_allocation(
+        db,
+        dep,
+        reason='appeal approved',
+        idempotency_suffix=str(appeal.id),
+    )
     settlement = await settle_deposit_credit(
         db,
         merchant_id=dep.merchant_id,
@@ -190,15 +235,20 @@ async def approve_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id=N
         author_id=actor_id,
         message='Апелляция автоматически одобрена по истечению таймера.' if automatic else 'Апелляция одобрена.',
     ))
+    await db.flush()
+    await db.refresh(dep)
     return await queue_webhook(db, dep.merchant_id, 'deposit.paid', deposit_payload(dep, appeal))
 
 
 async def reject_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id, decision: str = 'rejected') -> object | None:
     if appeal.operation_type != 'deposit':
         raise ValueError('only deposit appeals can be rejected from cabinet')
-    dep = (await db.execute(select(Deposit).where(Deposit.id == appeal.operation_id).with_for_update())).scalar_one_or_none()
-    if not dep:
-        raise ValueError('deposit not found')
+    dep, appeal = await _lock_deposit_then_appeal(db, appeal)
+    if appeal.status not in {
+        AppealStatus.opened.value,
+        AppealStatus.in_review.value,
+    }:
+        raise ValueError('appeal has already been resolved')
     meta = metadata(appeal)
     previous_status = meta.get('previous_deposit_status') or DepositStatus.failed.value
     if dep.status == DepositStatus.appeal_opened.value:
@@ -208,6 +258,8 @@ async def reject_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id, d
     appeal.decision = decision[:64]
     set_metadata(appeal, rejected_at=utcnow().isoformat(), rejected_by=str(actor_id), finance_applied=False)
     db.add(AppealMessage(appeal_id=appeal.id, author_id=actor_id, message='Апелляция отклонена.'))
+    await db.flush()
+    await db.refresh(dep)
     return await queue_webhook(db, dep.merchant_id, 'deposit.failed', deposit_payload(dep, appeal))
 
 
@@ -217,7 +269,6 @@ async def approve_expired_appeals(db: AsyncSession) -> list:
         .where(Appeal.status == AppealStatus.opened.value)
         .order_by(Appeal.created_at.asc())
         .limit(200)
-        .with_for_update()
     )).scalars().all()
     events = []
     now = utcnow()
