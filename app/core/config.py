@@ -9,6 +9,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
     APP_NAME: str = 'Processing Platform'
+    APP_VERSION: str = '2.0.0-rc1'
     BRAND_CONFIG_PATH: str = 'branding/default.yml'
     ENV: str = 'local'
     DEBUG: bool = False

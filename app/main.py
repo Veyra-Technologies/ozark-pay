@@ -29,7 +29,7 @@ class CustomORJSONResponse(ORJSONResponse):
 
 app=FastAPI(
     title=brand.api_docs_title,
-    version='1.0.0',
+    version=settings.APP_VERSION,
     default_response_class=CustomORJSONResponse,
     docs_url=None,
     redoc_url=None,
@@ -96,7 +96,13 @@ async def protected_openapi(request: Request):
     return CustomORJSONResponse(app.openapi())
 
 @app.get('/health')
-async def health(): return {'status':'ok'}
+async def health():
+    return {'status': 'ok', 'version': settings.APP_VERSION}
+
+
+@app.get('/version')
+async def version():
+    return {'version': settings.APP_VERSION}
 
 @app.get('/ready')
 async def ready():
