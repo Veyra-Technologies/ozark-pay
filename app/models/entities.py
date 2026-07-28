@@ -1192,6 +1192,179 @@ class ReportExport(Base, TimestampMixin):
     filters: Mapped[dict]=mapped_column(JSON, default=dict)
 
 
+class PlatformCryptoWallet(Base):
+    __tablename__ = 'platform_crypto_wallets'
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    asset: Mapped[str] = mapped_column(String(16), default='USDT')
+    network: Mapped[str] = mapped_column(String(16), default='TRC20')
+    address: Mapped[str] = mapped_column(String(128))
+    label: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    version: Mapped[int] = mapped_column(Integer)
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('users.id', ondelete='RESTRICT'),
+        nullable=False,
+    )
+    deactivated_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text('now()'), nullable=False
+    )
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    change_reason: Mapped[str] = mapped_column(String(500))
+    __table_args__ = (
+        UniqueConstraint(
+            'version',
+            name='uq_platform_crypto_wallets_version',
+        ),
+        CheckConstraint(
+            "asset = 'USDT'",
+            name='ck_platform_crypto_wallet_asset',
+        ),
+        CheckConstraint(
+            "network = 'TRC20'",
+            name='ck_platform_crypto_wallet_network',
+        ),
+        CheckConstraint(
+            'version > 0',
+            name='ck_platform_crypto_wallet_version',
+        ),
+        CheckConstraint(
+            '(is_active AND deactivated_at IS NULL '
+            'AND deactivated_by IS NULL) OR '
+            '(NOT is_active AND deactivated_at IS NOT NULL)',
+            name='ck_platform_crypto_wallet_lifecycle',
+        ),
+        Index(
+            'uq_platform_crypto_wallet_active',
+            'asset',
+            'network',
+            unique=True,
+            postgresql_where=text('is_active'),
+        ),
+    )
+
+
+class AIIntegrationConfig(Base, TimestampMixin):
+    __tablename__ = 'ai_integration_configs'
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    provider: Mapped[str] = mapped_column(
+        String(64), default='veyra_ai_office'
+    )
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    environment: Mapped[str] = mapped_column(String(16), default='local')
+    base_url: Mapped[str] = mapped_column(String(500), default='')
+    health_path: Mapped[str] = mapped_column(
+        String(255), default='/api/health'
+    )
+    api_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    auth_type: Mapped[str] = mapped_column(String(16), default='none')
+    encrypted_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encrypted_bearer_token: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    encrypted_hmac_secret: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
+    timeout_seconds: Mapped[Decimal] = mapped_column(
+        Numeric(8, 3), default=Decimal('5.000')
+    )
+    connect_timeout_seconds: Mapped[Decimal] = mapped_column(
+        Numeric(8, 3), default=Decimal('2.000')
+    )
+    max_retries: Mapped[int] = mapped_column(Integer, default=0)
+    verify_tls: Mapped[bool] = mapped_column(Boolean, default=True)
+    selected_events: Mapped[list] = mapped_column(JSON, default=list)
+    inbound_commands_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False
+    )
+    last_connection_test_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_connection_test_status: Mapped[str | None] = mapped_column(
+        String(32), nullable=True
+    )
+    last_connection_test_latency_ms: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+    last_success_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_error_code: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    last_error_message_redacted: Mapped[str | None] = mapped_column(
+        String(500), nullable=True
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            'provider',
+            name='uq_ai_integration_configs_provider',
+        ),
+        CheckConstraint(
+            "provider = 'veyra_ai_office'",
+            name='ck_ai_integration_config_provider',
+        ),
+        CheckConstraint(
+            "environment IN ('local','staging','production')",
+            name='ck_ai_integration_config_environment',
+        ),
+        CheckConstraint(
+            "auth_type IN ('none','bearer','api_key','hmac')",
+            name='ck_ai_integration_config_auth_type',
+        ),
+        CheckConstraint(
+            'timeout_seconds >= 1 AND timeout_seconds <= 60',
+            name='ck_ai_integration_config_timeout',
+        ),
+        CheckConstraint(
+            'connect_timeout_seconds >= 0.1 '
+            'AND connect_timeout_seconds <= timeout_seconds',
+            name='ck_ai_integration_config_connect_timeout',
+        ),
+        CheckConstraint(
+            'max_retries >= 0 AND max_retries <= 5',
+            name='ck_ai_integration_config_retries',
+        ),
+        CheckConstraint(
+            'inbound_commands_enabled = false',
+            name='ck_ai_integration_config_no_inbound_commands',
+        ),
+        CheckConstraint(
+            "last_connection_test_status IS NULL OR "
+            "last_connection_test_status IN ('success','failed')",
+            name='ck_ai_integration_config_test_status',
+        ),
+        CheckConstraint(
+            'last_connection_test_latency_ms IS NULL '
+            'OR last_connection_test_latency_ms >= 0',
+            name='ck_ai_integration_config_latency',
+        ),
+    )
+
+
 def _encrypt_sensitive_attribute(target, value, oldvalue, initiator):
     del target, oldvalue, initiator
     return encrypt_secret(value)
@@ -1204,5 +1377,8 @@ for _sensitive_attribute in (
     AggregatorAccount.secret_hash,
     AggregatorMerchant.merchant_secret_hash,
     KycProfile.tax_id_encrypted,
+    AIIntegrationConfig.encrypted_api_key,
+    AIIntegrationConfig.encrypted_bearer_token,
+    AIIntegrationConfig.encrypted_hmac_secret,
 ):
     event.listen(_sensitive_attribute, 'set', _encrypt_sensitive_attribute, retval=True)

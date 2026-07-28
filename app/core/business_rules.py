@@ -21,6 +21,9 @@ ROLE_PERMISSIONS = {
         'teamlead.finance',
         'teamlead.create',
         'teamlead.read_basic',
+        'platform_wallet.manage',
+        'platform_wallet.read',
+        'ai_office.manage',
     ],
     Role.admin.value: [
         'users.manage_operational',
@@ -38,6 +41,7 @@ ROLE_PERMISSIONS = {
         'reports.export',
         'teamlead.create',
         'teamlead.read_basic',
+        'platform_wallet.read',
     ],
     Role.support.value: [
         'operations.read_all',
@@ -62,12 +66,14 @@ ROLE_PERMISSIONS = {
         'operations.confirm',
         'sms.confirm',
         'appeals.reply',
+        'platform_wallet.read',
     ],
     Role.trader.value: [
         'requisites.manage_own',
         'operations.confirm',
         'sms.confirm',
         'appeals.reply',
+        'platform_wallet.read',
     ],
 }
 
