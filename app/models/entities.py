@@ -15,6 +15,9 @@ from app.core.enums import (
     RollingAccountStatus,
     RollingAllocationStatus,
     Role,
+    TeamLeadAccrualStatus,
+    TeamLeadLedgerType,
+    TeamLeadSettlementStatus,
 )
 from app.core.security import encrypt_secret
 
@@ -233,6 +236,340 @@ class PlatformLedgerEntry(Base, TimestampMixin):
     currency: Mapped[str]=mapped_column(String(8), default='RUB')
     description: Mapped[str]=mapped_column(String(500), default='')
     idempotency_key: Mapped[str|None]=mapped_column(String(160), unique=True, nullable=True)
+
+
+class TeamLeadTraderAssignment(Base, TimestampMixin):
+    __tablename__ = 'teamlead_trader_assignments'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    teamlead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='RESTRICT'), index=True
+    )
+    trader_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='RESTRICT'), index=True
+    )
+    commission_percent: Mapped[Decimal] = mapped_column(Numeric(10, 6))
+    effective_from: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    effective_to: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True
+    )
+    closed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True
+    )
+    creation_reason: Mapped[str] = mapped_column(String(500))
+    close_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    __table_args__ = (
+        CheckConstraint(
+            'commission_percent >= 0 AND commission_percent <= 100',
+            name='ck_teamlead_assignment_percent',
+        ),
+        CheckConstraint(
+            'effective_to IS NULL OR effective_to > effective_from',
+            name='ck_teamlead_assignment_effective_period',
+        ),
+        Index(
+            'uq_teamlead_assignment_active_trader',
+            'trader_id',
+            unique=True,
+            postgresql_where=text('effective_to IS NULL'),
+            sqlite_where=text('effective_to IS NULL'),
+        ),
+    )
+
+
+@event.listens_for(TeamLeadTraderAssignment, 'before_update')
+def protect_teamlead_assignment_history(mapper, connection, target):
+    allowed = {'effective_to', 'closed_by', 'close_reason', 'updated_at'}
+    changed = {
+        attribute.key
+        for attribute in inspect(target).attrs
+        if attribute.history.has_changes()
+    }
+    forbidden = changed.difference(allowed)
+    if forbidden:
+        raise ValueError(
+            'teamlead assignment history is immutable: '
+            + ', '.join(sorted(forbidden))
+        )
+    effective_history = inspect(target).attrs.effective_to.history
+    previous = effective_history.deleted[0] if effective_history.deleted else None
+    closing_now = (
+        'effective_to' in changed
+        and previous is None
+        and target.effective_to is not None
+    )
+    if target.effective_to is not None and not closing_now:
+        raise ValueError('closed teamlead assignment is immutable')
+
+
+class TeamLeadBalance(Base, TimestampMixin):
+    __tablename__ = 'teamlead_balances'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    teamlead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='RESTRICT'), index=True
+    )
+    available_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal('0.00'))
+    frozen_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal('0.00'))
+    debt_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal('0.00'))
+    total_earned_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal('0.00'))
+    total_paid_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2), default=Decimal('0.00'))
+    __table_args__ = (
+        UniqueConstraint(
+            'teamlead_id',
+            name='uq_teamlead_balances_teamlead_id',
+        ),
+        CheckConstraint('available_rub >= 0', name='ck_teamlead_balance_available'),
+        CheckConstraint('frozen_rub >= 0', name='ck_teamlead_balance_frozen'),
+        CheckConstraint('debt_rub >= 0', name='ck_teamlead_balance_debt'),
+        CheckConstraint('total_earned_rub >= 0', name='ck_teamlead_balance_earned'),
+        CheckConstraint('total_paid_rub >= 0', name='ck_teamlead_balance_paid'),
+    )
+
+
+class TeamLeadAccrual(Base, TimestampMixin):
+    __tablename__ = 'teamlead_accruals'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    teamlead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='RESTRICT'), index=True
+    )
+    trader_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='RESTRICT'), index=True
+    )
+    assignment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('teamlead_trader_assignments.id', ondelete='RESTRICT'), index=True
+    )
+    deposit_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT'), index=True
+    )
+    gross_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    commission_percent_snapshot: Mapped[Decimal] = mapped_column(Numeric(10, 6))
+    accrual_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    credited_to_available_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    applied_to_debt_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    status: Mapped[str] = mapped_column(
+        String(16), default=TeamLeadAccrualStatus.credited.value, index=True
+    )
+    reversed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reversal_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    __table_args__ = (
+        UniqueConstraint(
+            'deposit_id',
+            name='uq_teamlead_accruals_deposit_id',
+        ),
+        CheckConstraint('gross_rub >= 0', name='ck_teamlead_accrual_gross'),
+        CheckConstraint(
+            'commission_percent_snapshot >= 0 AND commission_percent_snapshot <= 100',
+            name='ck_teamlead_accrual_percent',
+        ),
+        CheckConstraint('accrual_rub >= 0', name='ck_teamlead_accrual_amount'),
+        CheckConstraint('credited_to_available_rub >= 0', name='ck_teamlead_accrual_credited'),
+        CheckConstraint('applied_to_debt_rub >= 0', name='ck_teamlead_accrual_debt_offset'),
+        CheckConstraint(
+            'credited_to_available_rub + applied_to_debt_rub = accrual_rub',
+            name='ck_teamlead_accrual_distribution',
+        ),
+        CheckConstraint(
+            "status IN ('credited','reversed')",
+            name='ck_teamlead_accrual_status',
+        ),
+    )
+
+
+@event.listens_for(TeamLeadAccrual, 'before_update')
+def protect_teamlead_accrual_history(mapper, connection, target):
+    allowed = {'status', 'reversed_at', 'reversal_reason', 'updated_at'}
+    changed = {
+        attribute.key
+        for attribute in inspect(target).attrs
+        if attribute.history.has_changes()
+    }
+    forbidden = changed.difference(allowed)
+    if forbidden:
+        raise ValueError(
+            'teamlead accrual snapshot is immutable: '
+            + ', '.join(sorted(forbidden))
+        )
+    status_history = inspect(target).attrs.status.history
+    previous = status_history.deleted[0] if status_history.deleted else None
+    reversing_now = (
+        'status' in changed
+        and previous == TeamLeadAccrualStatus.credited.value
+        and target.status == TeamLeadAccrualStatus.reversed.value
+    )
+    if changed.difference({'updated_at'}) and not reversing_now:
+        raise ValueError('reversed teamlead accrual is immutable')
+
+
+class TeamLeadSettlement(Base, TimestampMixin):
+    __tablename__ = 'teamlead_settlements'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    teamlead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='RESTRICT'), index=True
+    )
+    requested_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    fee_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6), default=Decimal('5.000000'))
+    total_debit_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    rapira_rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8))
+    rate_symbol: Mapped[str] = mapped_column(String(16))
+    rate_source: Mapped[str] = mapped_column(String(64))
+    rate_side: Mapped[str] = mapped_column(String(8), default='ask')
+    provider_timestamp: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    freshness_basis: Mapped[str] = mapped_column(String(32))
+    requested_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    fee_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    total_debit_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    network: Mapped[str] = mapped_column(String(16), default='TRC20')
+    wallet_address: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(
+        String(16), default=TeamLeadSettlementStatus.pending.value, index=True
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    processed_by: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True
+    )
+    tx_hash: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    __table_args__ = (
+        CheckConstraint('requested_usdt > 0', name='ck_teamlead_settlement_requested'),
+        CheckConstraint("fee_usdt = 5.000000", name='ck_teamlead_settlement_fee'),
+        CheckConstraint(
+            'total_debit_usdt = requested_usdt + fee_usdt',
+            name='ck_teamlead_settlement_total_usdt',
+        ),
+        CheckConstraint(
+            'total_debit_rub = requested_rub + fee_rub',
+            name='ck_teamlead_settlement_total_rub',
+        ),
+        CheckConstraint('rapira_rate_rub > 0', name='ck_teamlead_settlement_rate'),
+        CheckConstraint("rate_side = 'ask'", name='ck_teamlead_settlement_side'),
+        CheckConstraint("rate_source = 'rapira_live'", name='ck_teamlead_settlement_source'),
+        CheckConstraint(
+            "freshness_basis IN ('provider_timestamp','fetched_at')",
+            name='ck_teamlead_settlement_freshness',
+        ),
+        CheckConstraint("network = 'TRC20'", name='ck_teamlead_settlement_network'),
+        CheckConstraint(
+            "status IN ('pending','completed','rejected')",
+            name='ck_teamlead_settlement_status',
+        ),
+        CheckConstraint(
+            "(status = 'pending' AND completed_at IS NULL "
+            "AND rejected_at IS NULL AND tx_hash IS NULL "
+            "AND reject_reason IS NULL) OR "
+            "(status = 'completed' AND completed_at IS NOT NULL "
+            "AND rejected_at IS NULL AND tx_hash IS NOT NULL "
+            "AND trim(tx_hash) <> '' AND reject_reason IS NULL) OR "
+            "(status = 'rejected' AND rejected_at IS NOT NULL "
+            "AND completed_at IS NULL AND tx_hash IS NULL "
+            "AND reject_reason IS NOT NULL AND trim(reject_reason) <> '')",
+            name='ck_teamlead_settlement_state',
+        ),
+        Index(
+            'uq_teamlead_settlement_pending',
+            'teamlead_id',
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        Index(
+            'uq_teamlead_settlement_completed_tx',
+            'network',
+            'tx_hash',
+            unique=True,
+            postgresql_where=text("status = 'completed' AND tx_hash IS NOT NULL"),
+            sqlite_where=text("status = 'completed' AND tx_hash IS NOT NULL"),
+        ),
+    )
+
+
+@event.listens_for(TeamLeadSettlement, 'before_update')
+def protect_teamlead_settlement_snapshot(mapper, connection, target):
+    allowed = {
+        'status',
+        'completed_at',
+        'rejected_at',
+        'processed_by',
+        'tx_hash',
+        'reject_reason',
+        'updated_at',
+    }
+    changed = {
+        attribute.key
+        for attribute in inspect(target).attrs
+        if attribute.history.has_changes()
+    }
+    forbidden = changed.difference(allowed)
+    if forbidden:
+        raise ValueError(
+            'teamlead settlement snapshot is immutable: '
+            + ', '.join(sorted(forbidden))
+        )
+    status_history = inspect(target).attrs.status.history
+    previous = status_history.deleted[0] if status_history.deleted else None
+    finalizing_now = (
+        'status' in changed
+        and previous == TeamLeadSettlementStatus.pending.value
+        and target.status in {
+            TeamLeadSettlementStatus.completed.value,
+            TeamLeadSettlementStatus.rejected.value,
+        }
+    )
+    if changed.difference({'updated_at'}) and not finalizing_now:
+        raise ValueError('final teamlead settlement is immutable')
+
+
+class TeamLeadLedgerEntry(Base, TimestampMixin):
+    __tablename__ = 'teamlead_ledger_entries'
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    teamlead_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='RESTRICT'), index=True
+    )
+    accrual_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('teamlead_accruals.id', ondelete='RESTRICT'), nullable=True
+    )
+    settlement_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('teamlead_settlements.id', ondelete='RESTRICT'), nullable=True
+    )
+    deposit_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT'), nullable=True
+    )
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True
+    )
+    entry_type: Mapped[str] = mapped_column(String(32), index=True)
+    amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    available_after: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    frozen_after: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    debt_after: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    idempotency_key: Mapped[str] = mapped_column(String(180), unique=True)
+    reason: Mapped[str] = mapped_column(String(500))
+    __table_args__ = (
+        CheckConstraint('amount_rub >= 0', name='ck_teamlead_ledger_amount'),
+        CheckConstraint('available_after >= 0', name='ck_teamlead_ledger_available'),
+        CheckConstraint('frozen_after >= 0', name='ck_teamlead_ledger_frozen'),
+        CheckConstraint('debt_after >= 0', name='ck_teamlead_ledger_debt'),
+        CheckConstraint(
+            "entry_type IN ('accrual_credit','debt_offset','accrual_reversal',"
+            "'settlement_freeze','settlement_release','settlement_complete',"
+            "'manual_adjustment','write_off')",
+            name='ck_teamlead_ledger_type',
+        ),
+        Index(
+            'ix_teamlead_ledger_teamlead_created',
+            'teamlead_id',
+            'created_at',
+        ),
+    )
+
+
+@event.listens_for(TeamLeadLedgerEntry, 'before_update')
+@event.listens_for(TeamLeadLedgerEntry, 'before_delete')
+def protect_teamlead_ledger(mapper, connection, target):
+    raise ValueError('teamlead ledger entries are immutable')
 
 
 class MerchantRollingAccount(Base, TimestampMixin):

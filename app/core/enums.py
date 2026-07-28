@@ -5,6 +5,7 @@ class Role(StrEnum):
     superadmin = 'superadmin'
     admin = 'admin'
     support = 'support'
+    teamlead = 'teamlead'
     merchant = 'merchant'
     aggregator = 'aggregator'
     operator = 'operator'
@@ -49,6 +50,28 @@ class RollingLedgerType(StrEnum):
     recovery = 'recovery'
     settle_overflow = 'settle_overflow'
     reversal = 'reversal'
+    manual_adjustment = 'manual_adjustment'
+    write_off = 'write_off'
+
+
+class TeamLeadAccrualStatus(StrEnum):
+    credited = 'credited'
+    reversed = 'reversed'
+
+
+class TeamLeadSettlementStatus(StrEnum):
+    pending = 'pending'
+    completed = 'completed'
+    rejected = 'rejected'
+
+
+class TeamLeadLedgerType(StrEnum):
+    accrual_credit = 'accrual_credit'
+    debt_offset = 'debt_offset'
+    accrual_reversal = 'accrual_reversal'
+    settlement_freeze = 'settlement_freeze'
+    settlement_release = 'settlement_release'
+    settlement_complete = 'settlement_complete'
     manual_adjustment = 'manual_adjustment'
     write_off = 'write_off'
 
