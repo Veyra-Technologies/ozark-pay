@@ -196,6 +196,72 @@ async def record_platform_income(db, merchant_id, amount: Decimal, operation_id=
     return entry
 
 
+async def record_platform_teamlead_expense(
+    db,
+    merchant_id,
+    amount: Decimal,
+    operation_id=None,
+    idempotency_key=None,
+    description='',
+):
+    amount = _money(amount, allow_zero=True)
+    if amount == 0:
+        return None
+    existing = await _find_platform_entry(db, idempotency_key)
+    if existing:
+        _assert_platform_entry(
+            existing,
+            merchant_id=merchant_id,
+            amount=amount,
+            entry_type='teamlead_expense',
+            operation_id=operation_id,
+        )
+        return existing
+    entry = PlatformLedgerEntry(
+        merchant_id=merchant_id,
+        operation_id=operation_id,
+        entry_type='teamlead_expense',
+        amount=amount,
+        idempotency_key=idempotency_key,
+        description=description,
+    )
+    db.add(entry)
+    return entry
+
+
+async def record_platform_teamlead_expense_reversal(
+    db,
+    merchant_id,
+    amount: Decimal,
+    operation_id=None,
+    idempotency_key=None,
+    description='',
+):
+    amount = _money(amount, allow_zero=True)
+    if amount == 0:
+        return None
+    existing = await _find_platform_entry(db, idempotency_key)
+    if existing:
+        _assert_platform_entry(
+            existing,
+            merchant_id=merchant_id,
+            amount=amount,
+            entry_type='teamlead_expense_reversal',
+            operation_id=operation_id,
+        )
+        return existing
+    entry = PlatformLedgerEntry(
+        merchant_id=merchant_id,
+        operation_id=operation_id,
+        entry_type='teamlead_expense_reversal',
+        amount=amount,
+        idempotency_key=idempotency_key,
+        description=description,
+    )
+    db.add(entry)
+    return entry
+
+
 async def record_platform_executor_fee(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description=''):
     amount = _money(amount, allow_zero=True)
     if amount == 0:

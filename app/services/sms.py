@@ -162,8 +162,8 @@ async def confirm_deposit_from_sms(
             )
             return sms, dep, False, finalization
         await settle_trader_deposit_balance(db, dep)
-        await settle_deposit_credit(db, merchant_id=dep.merchant_id, method=dep.method, amount=dep.amount, operation_id=dep.id, description='manual SMS confirmation')
         dep.status = DepositStatus.paid.value
+        await settle_deposit_credit(db, merchant_id=dep.merchant_id, method=dep.method, amount=dep.amount, operation_id=dep.id, description='manual SMS confirmation')
         await check_payment_result_for_risk(db, dep)
     elif dep.status != DepositStatus.paid.value:
         raise ValueError(f'deposit status {dep.status} cannot be confirmed by sms')

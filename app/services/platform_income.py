@@ -7,7 +7,15 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import AggregatorAccount, Deposit, Merchant, OperationFeeSnapshot, PlatformLedgerEntry, User
+from app.models import (
+    AggregatorAccount,
+    Deposit,
+    Merchant,
+    OperationFeeSnapshot,
+    PlatformLedgerEntry,
+    TeamLeadAccrual,
+    User,
+)
 from app.services.fee_tiers import money
 
 
@@ -128,7 +136,67 @@ async def platform_income_dashboard(
             )
         )).scalar_one())
     snapshot_income = money(financial_aggregate[4])
-    reconciliation_delta = money(snapshot_income - ledger_income)
+    expected_teamlead_expense = Decimal('0.00')
+    expected_teamlead_expense_reversal = Decimal('0.00')
+    teamlead_expense = Decimal('0.00')
+    teamlead_expense_reversal = Decimal('0.00')
+    if settled_operation_ids:
+        accrual_rows = (await db.execute(
+            select(
+                TeamLeadAccrual.status,
+                func.coalesce(func.sum(TeamLeadAccrual.accrual_rub), 0),
+            ).where(
+                TeamLeadAccrual.deposit_id.in_(settled_operation_ids),
+            ).group_by(TeamLeadAccrual.status)
+        )).all()
+        accrual_totals = {row[0]: money(row[1]) for row in accrual_rows}
+        expected_teamlead_expense = money(sum(
+            accrual_totals.values(),
+            Decimal('0.00'),
+        ))
+        expected_teamlead_expense_reversal = accrual_totals.get(
+            'reversed', Decimal('0.00')
+        )
+        expense_rows = (await db.execute(
+            select(
+                PlatformLedgerEntry.entry_type,
+                func.coalesce(func.sum(PlatformLedgerEntry.amount), 0),
+            ).where(
+                PlatformLedgerEntry.operation_id.in_(settled_operation_ids),
+                PlatformLedgerEntry.entry_type.in_(
+                    ('teamlead_expense', 'teamlead_expense_reversal')
+                ),
+            ).group_by(PlatformLedgerEntry.entry_type)
+        )).all()
+        expense_totals = {row[0]: money(row[1]) for row in expense_rows}
+        teamlead_expense = expense_totals.get(
+            'teamlead_expense', Decimal('0.00')
+        )
+        teamlead_expense_reversal = expense_totals.get(
+            'teamlead_expense_reversal', Decimal('0.00')
+        )
+    expected_net_teamlead_expense = money(
+        expected_teamlead_expense - expected_teamlead_expense_reversal
+    )
+    net_teamlead_expense = money(teamlead_expense - teamlead_expense_reversal)
+    teamlead_expense_gross_delta = money(
+        expected_teamlead_expense - teamlead_expense
+    )
+    teamlead_expense_reversal_delta = money(
+        expected_teamlead_expense_reversal - teamlead_expense_reversal
+    )
+    teamlead_expense_reconciliation_delta = money(
+        expected_net_teamlead_expense - net_teamlead_expense
+    )
+    net_platform_income = money(snapshot_income - net_teamlead_expense)
+    net_snapshot_platform_income = money(
+        snapshot_income - expected_net_teamlead_expense
+    )
+    net_ledger_platform_income = money(ledger_income - net_teamlead_expense)
+    gross_reconciliation_delta = money(snapshot_income - ledger_income)
+    reconciliation_delta = money(
+        net_snapshot_platform_income - net_ledger_platform_income
+    )
     successful_turnover = money(financial_aggregate[1])
     average_margin_percent = Decimal('0.0000')
     if successful_turnover:
@@ -229,12 +297,36 @@ async def platform_income_dashboard(
             'merchant_fee': money(financial_aggregate[2]),
             'executor_fee': money(financial_aggregate[3]),
             'platform_income': snapshot_income,
+            'expected_teamlead_expense': expected_teamlead_expense,
+            'expected_teamlead_expense_reversal': (
+                expected_teamlead_expense_reversal
+            ),
+            'expected_net_teamlead_expense': expected_net_teamlead_expense,
+            'teamlead_expense': teamlead_expense,
+            'teamlead_expense_reversal': teamlead_expense_reversal,
+            'net_teamlead_expense': net_teamlead_expense,
+            'teamlead_expense_gross_delta': teamlead_expense_gross_delta,
+            'teamlead_expense_reversal_delta': (
+                teamlead_expense_reversal_delta
+            ),
+            'teamlead_expense_reconciliation_delta': (
+                teamlead_expense_reconciliation_delta
+            ),
+            'net_platform_income': net_platform_income,
+            'net_snapshot_platform_income': net_snapshot_platform_income,
+            'net_ledger_platform_income': net_ledger_platform_income,
+            'loss_making_after_teamlead': net_platform_income < Decimal('0.00'),
             'average_platform_margin_percent': average_margin_percent,
             'successful_operations_count': int(financial_aggregate[0]),
             'failed_operations_count': failed_count,
             'ledger_platform_income': ledger_income,
+            'gross_reconciliation_delta': gross_reconciliation_delta,
             'reconciliation_delta': reconciliation_delta,
-            'reconciled': reconciliation_delta == Decimal('0.00'),
+            'reconciled': (
+                gross_reconciliation_delta == Decimal('0.00')
+                and teamlead_expense_gross_delta == Decimal('0.00')
+                and teamlead_expense_reversal_delta == Decimal('0.00')
+            ),
         },
         'rows': [
             {

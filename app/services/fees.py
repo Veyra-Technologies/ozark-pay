@@ -15,6 +15,7 @@ from app.services.ledger import (
     record_platform_income,
 )
 from app.services.rolling import apply_merchant_financing
+from app.services.teamlead import accrue_teamlead_commission
 
 
 async def settle_deposit_credit(
@@ -97,6 +98,18 @@ async def settle_deposit_credit(
         f'deposit-confirm:{operation_id}:platform-income',
         f'platform income for {description}',
     )
+    teamlead_accrual = await accrue_teamlead_commission(
+        db,
+        deposit=deposit,
+        snapshot=snapshot,
+        platform_income_rub=platform_income,
+    )
+    if teamlead_accrual:
+        metadata.update({
+            'teamlead_accrual_id': str(teamlead_accrual.id),
+            'teamlead_expense_amount': str(teamlead_accrual.accrual_rub),
+        })
+        deposit.metadata_json = metadata
     await db.flush()
     snapshot.settlement_status = 'settled'
     snapshot.settled_at = datetime.now(timezone.utc)
@@ -117,6 +130,14 @@ async def settle_deposit_credit(
         'executor_rate_rule_id': str(snapshot.executor_rate_rule_id),
         'fee_snapshot_id': str(snapshot.id),
         'executor_ledger_entry_id': str(executor_entry.id) if executor_entry else None,
+        'teamlead_accrual_id': (
+            str(teamlead_accrual.id) if teamlead_accrual else None
+        ),
+        'teamlead_expense_amount': (
+            str(teamlead_accrual.accrual_rub)
+            if teamlead_accrual
+            else '0.00'
+        ),
         'settlement_mode': financing['settlement_mode'],
         'rolling_applied_usdt': str(financing['rolling_applied_usdt']),
         'rolling_applied_rub': str(financing['rolling_applied_rub']),

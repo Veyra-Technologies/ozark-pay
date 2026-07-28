@@ -210,6 +210,7 @@ async def approve_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id=N
         reason='appeal approved',
         idempotency_suffix=str(appeal.id),
     )
+    dep.status = DepositStatus.paid.value
     settlement = await settle_deposit_credit(
         db,
         merchant_id=dep.merchant_id,
@@ -218,7 +219,6 @@ async def approve_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id=N
         operation_id=dep.id,
         description='appeal approved deposit confirmation',
     )
-    dep.status = DepositStatus.paid.value
     await check_payment_result_for_risk(db, dep)
     appeal.status = AppealStatus.approved.value
     appeal.decision = 'approved_auto' if automatic else 'approved'

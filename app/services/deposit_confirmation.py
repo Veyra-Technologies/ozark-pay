@@ -122,6 +122,7 @@ async def confirm_deposit_payment(
             )
 
         await settle_trader_deposit_balance(db, deposit)
+        deposit.status = DepositStatus.paid.value
         settlement = await settle_deposit_credit(
             db,
             merchant_id=deposit.merchant_id,
@@ -130,7 +131,6 @@ async def confirm_deposit_payment(
             operation_id=deposit.id,
             description=description,
         )
-        deposit.status = DepositStatus.paid.value
         await check_payment_result_for_risk(db, deposit)
         # Keep all payload fields loaded before the synchronous snapshot
         # builder; server-generated updated_at is expired by PostgreSQL flush.
