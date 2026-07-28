@@ -198,6 +198,11 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 .appeal-open{min-height:var(--control-height-sm)}
 @media(max-width:1440px){.wrap{max-width:1500px}.table-wrap table,.table-wrapper table,.data-table{min-width:820px}.aggregator-account-table table{min-width:1260px}.actions-cell{width:260px;min-width:220px}.primary,.secondary,.dangerbtn,.button,.btn,.btn-primary,.btn-secondary,.btn-danger,.reset-link{font-size:13px;padding:0 12px}.actions-cell .actions-row>button,.actions-cell .actions-row>form>button,.actions-cell .actions-row>a.button{font-size:12px;padding:0 8px}}
 @media(max-width:850px){.wrap{display:block;padding:16px}.nav{position:static;max-height:none;margin-bottom:16px}.section-head{display:flex;align-items:flex-start}.table-wrap table,.table-wrapper table,.data-table{min-width:780px}.actions-cell{width:150px}.modal-form-grid{grid-template-columns:1fr}}
+.platform-wallet-card{display:grid;grid-template-columns:minmax(180px,240px) minmax(0,1fr);gap:18px;align-items:center}
+.platform-wallet-qr{width:220px;max-width:100%;border-radius:16px;padding:10px;background:#fff}
+.platform-wallet-address{overflow-wrap:anywhere;word-break:break-all;font-size:16px}
+.release-footer{max-width:1680px;margin:0 auto;padding:0 24px 24px;color:var(--muted);font-size:12px;text-align:right}
+@media(max-width:700px){.platform-wallet-card{grid-template-columns:1fr}.platform-wallet-qr{width:190px}}
 </style>
 </head>
 <body>
@@ -878,8 +883,114 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   <h3>История settle</h3>
   <div class="table-wrap"><table><tr><th>Дата</th><th>USDT</th><th>Комиссия</th><th>Списание RUB</th><th>TRC20</th><th>Статус</th></tr>{% for st in merchant_settlements %}<tr><td><span class="text-date" title="{{ st.created_at|dt_full }}">{{ st.created_at|dt_compact }}</span></td><td><span class="text-amount">{{ st.amount_usdt }} USDT</span></td><td><span class="text-amount">{{ st.fee_usdt }} USDT</span></td><td><span class="text-amount">{{ st.total_debit_rub }} RUB</span></td><td><span class="cell-mono cell-ellipsis" title="{{ st.trc20_address }}">{{ st.trc20_address }}</span></td><td>{% if st.status == 'completed' %}<span class="status-pill status-ok">completed</span>{% elif st.status == 'pending' %}<span class="status-pill status-wait">pending</span>{% else %}<span class="status-pill status-bad">{{ st.status }}</span>{% endif %}</td></tr>{% else %}<tr><td colspan="6">Settle-запросов пока нет</td></tr>{% endfor %}</table></div>
   {% else %}
+  {% if role in ['superadmin','admin','operator','trader'] %}
+  <div class="panel">
+    <h3>Статический кошелёк платформы</h3>
+    {% if platform_wallet %}
+    <div class="platform-wallet-card">
+      <img class="platform-wallet-qr" src="{{ platform_wallet_qr_url }}" alt="QR активного USDT TRC20 кошелька">
+      <div>
+        <div class="detail-grid">
+          <div class="detail-card"><b>Актив</b>{{ platform_wallet.asset }}</div>
+          <div class="detail-card"><b>Сеть</b>{{ platform_wallet.network }}</div>
+          <div class="detail-card"><b>Версия</b>{{ platform_wallet.version }}</div>
+          <div class="detail-card"><b>Обновлён</b>{{ platform_wallet.created_at|dt_full }}</div>
+        </div>
+        <p class="platform-wallet-address mono" data-platform-wallet-address>{{ platform_wallet.address }}</p>
+        {% if platform_wallet.label %}<p><b>Label:</b> {{ platform_wallet.label }}</p>{% endif %}
+        <button class="secondary" type="button" data-copy-platform-wallet="{{ platform_wallet.address }}">Копировать адрес</button>
+      </div>
+    </div>
+    <div class="note">Отправляйте только USDT в сети TRC20. Переводы в другой сети могут быть потеряны.</div>
+    {% else %}
+    <div class="metric"><p>Кошелёк временно не указан.</p></div>
+    {% endif %}
+
+    {% if user.role == 'superadmin' %}
+    <form method="post" action="{{ cabinet_base }}/platform-wallet" class="panel" data-confirm="Закрыть текущую версию кошелька и создать новую?">
+      {{ csrf_input(request) }}
+      <h3>Добавить или заменить кошелёк</h3>
+      <label>USDT TRC20 address</label>
+      <input name="address" minlength="34" maxlength="34" required value="{{ platform_wallet.address if platform_wallet else '' }}" placeholder="T...">
+      <label>Label</label>
+      <input name="label" maxlength="160" value="{{ platform_wallet.label if platform_wallet and platform_wallet.label else '' }}" placeholder="Основной кошелёк">
+      <label>Причина изменения</label>
+      <input name="change_reason" maxlength="500" required placeholder="Причина для audit/history">
+      <button class="primary" type="submit">Сохранить новую версию</button>
+    </form>
+    {% endif %}
+
+    {% if user.role in ['superadmin','admin'] %}
+    <h3>История версий</h3>
+    <div class="table-wrap"><table><tr><th>Версия</th><th>Address</th><th>Label</th><th>Создан</th><th>Деактивирован</th><th>Причина</th><th>Статус</th></tr>
+      {% for wallet in platform_wallet_history %}
+      <tr><td>{{ wallet.version }}</td><td class="mono cell-wrap">{{ wallet.address }}</td><td>{{ wallet.label or '—' }}</td><td>{{ wallet.created_at|dt_full }}</td><td>{{ wallet.deactivated_at|dt_full if wallet.deactivated_at else '—' }}</td><td>{{ wallet.change_reason }}</td><td>{% if wallet.is_active %}<span class="status-pill status-ok">active</span>{% else %}<span class="status-pill status-neutral">history</span>{% endif %}</td></tr>
+      {% else %}<tr><td colspan="7">История кошельков пуста.</td></tr>{% endfor %}
+    </table></div>
+    {% endif %}
+  </div>
+  {% endif %}
   <div class="grid"><div class="metric"><b>Доступно</b><p>{% if role in ['operator','trader'] %}{{ user.trader_balance }}{% else %}{{ balance.available if balance else '0.00' }}{% endif %} RUB</p></div><div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ user.trader_hold }}{% else %}{{ balance.frozen if balance else '0.00' }}{% endif %} RUB</p></div></div>
   {% endif %}
+  {% elif s == 'Интеграция с AI-офисом' %}
+  {% if user.role == 'superadmin' %}
+  {% set ai = ai_office_config %}
+  <div class="note">Интеграция не должна включаться в production до настройки M2M-аутентификации и разрешений AI-офиса. В v2.0-rc1 доступны только безопасное хранение конфигурации и ручной GET Test connection; события и входящие команды не отправляются.</div>
+  <div class="detail-grid">
+    <div class="detail-card"><b>Enabled</b>{{ 'yes' if ai.enabled else 'no' }}</div>
+    <div class="detail-card"><b>Environment</b>{{ ai.environment }}</div>
+    <div class="detail-card"><b>Auth</b>{{ ai.auth_type }}</div>
+    <div class="detail-card"><b>API key</b>{{ 'configured' if ai.api_key_configured else 'not configured' }}</div>
+    <div class="detail-card"><b>Bearer</b>{{ 'configured' if ai.bearer_token_configured else 'not configured' }}</div>
+    <div class="detail-card"><b>HMAC</b>{{ 'configured' if ai.hmac_secret_configured else 'not configured' }}</div>
+    <div class="detail-card"><b>Last connection</b>{{ ai.last_connection_test_status or 'not tested' }}{% if ai.last_connection_test_latency_ms is not none %} · {{ ai.last_connection_test_latency_ms }} ms{% endif %}</div>
+    <div class="detail-card"><b>Last success</b>{{ ai.last_success_at|dt_full if ai.last_success_at else '—' }}</div>
+  </div>
+  {% if ai.last_error_code %}<div class="note"><b>{{ ai.last_error_code }}</b>: {{ ai.last_error_message_redacted }}</div>{% endif %}
+  <form method="post" action="{{ cabinet_base }}/ai-office/config" class="panel" data-confirm="Сохранить настройки AI Office без запуска интеграции?">
+    {{ csrf_input(request) }}
+    <h3>Интеграция с AI-офисом</h3>
+    <label><input class="check-inline" type="checkbox" name="enabled" {% if ai.enabled %}checked{% endif %}> Enabled</label>
+    <div class="row">
+      <div><label>Environment</label><select name="environment">{% for env_name in ['local','staging','production'] %}<option value="{{ env_name }}" {% if ai.environment == env_name %}selected{% endif %}>{{ env_name }}</option>{% endfor %}</select></div>
+      <div><label>Auth type</label><select name="auth_type">{% for auth_name in ['none','bearer','api_key','hmac'] %}<option value="{{ auth_name }}" {% if ai.auth_type == auth_name %}selected{% endif %}>{{ auth_name }}</option>{% endfor %}</select></div>
+    </div>
+    <label>Base URL</label><input name="base_url" type="url" maxlength="500" value="{{ ai.base_url }}" placeholder="https://ai-office.example">
+    <div class="row">
+      <div><label>Health path</label><input name="health_path" maxlength="255" value="{{ ai.health_path }}"></div>
+      <div><label>API version</label><input name="api_version" maxlength="64" value="{{ ai.api_version }}"></div>
+    </div>
+    <div class="row">
+      <div><label>API key</label><input name="api_key" type="password" autocomplete="new-password" value="" placeholder="{{ 'configured — пустое поле сохраняет текущее' if ai.api_key_configured else 'not configured' }}"></div>
+      <div><label>Bearer token</label><input name="bearer_token" type="password" autocomplete="new-password" value="" placeholder="{{ 'configured — пустое поле сохраняет текущее' if ai.bearer_token_configured else 'not configured' }}"></div>
+      <div><label>HMAC secret</label><input name="hmac_secret" type="password" autocomplete="new-password" value="" placeholder="{{ 'configured — пустое поле сохраняет текущее' if ai.hmac_secret_configured else 'not configured' }}"></div>
+    </div>
+    <div class="row">
+      <div><label>Request timeout, sec</label><input name="timeout_seconds" type="number" min="1" max="60" step="0.1" value="{{ ai.timeout_seconds }}"></div>
+      <div><label>Connect timeout, sec</label><input name="connect_timeout_seconds" type="number" min="0.1" max="60" step="0.1" value="{{ ai.connect_timeout_seconds }}"></div>
+      <div><label>Retries</label><input name="max_retries" type="number" min="0" max="5" value="{{ ai.max_retries }}"></div>
+    </div>
+    <label><input class="check-inline" type="checkbox" name="verify_tls" {% if ai.verify_tls %}checked{% endif %}> Verify TLS</label>
+    <h3>Подготовленные события — доставка не активна</h3>
+    {% for event_name in ai_office_event_options %}<label><input class="check-inline" type="checkbox" name="selected_events" value="{{ event_name }}" {% if event_name in ai.selected_events %}checked{% endif %}> {{ event_name }}</label>{% endfor %}
+    <p class="muted">Inbound commands: disabled и недоступны в этой ветке.</p>
+    <label>Причина изменения</label><input name="change_reason" maxlength="500" required>
+    <button class="primary" type="submit">Сохранить конфигурацию</button>
+  </form>
+  {% if ai.exists %}
+  <div class="actions">
+    <form method="post" action="{{ cabinet_base }}/ai-office/test-connection" data-confirm="Выполнить один безопасный GET к сохранённому health endpoint?">{{ csrf_input(request) }}<button class="primary" type="submit">Проверить соединение</button></form>
+  </div>
+  <h3>Удаление credentials</h3>
+  <div class="grid">
+    {% for secret_kind, secret_label, configured in [('api_key','API key',ai.api_key_configured),('bearer_token','Bearer token',ai.bearer_token_configured),('hmac_secret','HMAC secret',ai.hmac_secret_configured)] %}
+    <form method="post" action="{{ cabinet_base }}/ai-office/config/secrets/{{ secret_kind }}/clear" class="panel" data-confirm="Отдельно удалить {{ secret_label }}?">
+      {{ csrf_input(request) }}<b>{{ secret_label }}</b><p>{{ 'configured' if configured else 'not configured' }}</p><input name="change_reason" maxlength="500" required placeholder="Причина удаления"><button class="dangerbtn" type="submit" {% if not configured %}disabled{% endif %}>Удалить</button>
+    </form>
+    {% endfor %}
+  </div>
+  {% endif %}
+  {% else %}<p class="muted">Нет доступа.</p>{% endif %}
   {% elif 'Risk Control' in s %}
   {% set gs = antiscam.get('global_settings') %}
   <div class="risk-tabs">
@@ -1198,6 +1309,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 </section>
 {% endfor %}
 </main></div>
+{% if user.role == 'superadmin' %}<footer class="release-footer">Ozark Pay {{ app_version }}</footer>{% endif %}
 <div id="technicalDetailsModal" class="modal technical-details-modal">
   <div class="modalbox">
     <h2 id="technicalDetailsTitle">Details</h2>
@@ -1262,6 +1374,25 @@ function closeModal(id){const e=document.getElementById(id); if(e)e.classList.re
 document.querySelectorAll('[data-modal-open]').forEach(b=>b.addEventListener('click',()=>openModal(b.dataset.modalOpen)));
 document.querySelectorAll('[data-modal-close]').forEach(b=>b.addEventListener('click',()=>closeModal(b.dataset.modalClose)));
 document.querySelectorAll('form[data-confirm]').forEach(f=>f.addEventListener('submit',e=>{if(!confirm(f.dataset.confirm)){e.preventDefault();}}));
+document.querySelectorAll('[data-copy-platform-wallet]').forEach(button=>button.addEventListener('click',async()=>{
+  const address=button.dataset.copyPlatformWallet||'';
+  if(!address){return;}
+  try{
+    await navigator.clipboard.writeText(address);
+    button.textContent='Скопировано';
+  }catch(error){
+    const input=document.createElement('textarea');
+    input.value=address;
+    input.setAttribute('readonly','');
+    input.style.position='fixed';
+    input.style.opacity='0';
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand('copy');
+    input.remove();
+    button.textContent='Скопировано';
+  }
+}));
 document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('active');}));
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){document.querySelectorAll('.modal.active').forEach(m=>m.classList.remove('active'));}});
 if(SESSION_VIEW_TOKEN){

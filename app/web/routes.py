@@ -14,7 +14,7 @@ from markupsafe import Markup, escape
 import pyotp
 import qrcode
 from fastapi import APIRouter, Request, Depends, Form, HTTPException, File, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.db.session import get_db
-from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment
+from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
@@ -105,6 +105,24 @@ from app.services.teamlead import (
     reconcile_teamlead_account,
     reject_teamlead_settlement,
     reverse_teamlead_accrual,
+)
+from app.services.platform_wallet import (
+    PlatformWalletError,
+    get_active_platform_wallet,
+    list_platform_wallet_history,
+    platform_wallet_qr_png,
+    set_active_platform_wallet,
+)
+from app.services.ai_office import (
+    AIIntegrationError,
+    AI_OFFICE_EVENT_OPTIONS,
+    ai_config_view,
+    ai_connection_snapshot,
+    clear_ai_integration_secret,
+    get_ai_integration_config,
+    record_ai_connection_result,
+    run_ai_connection_test_without_transaction,
+    save_ai_integration_config,
 )
 from app.services.merchant_api_keys import (
     MerchantApiKeyError,
@@ -272,7 +290,7 @@ ROLE_DESCRIPTIONS = {
     'trader': 'Кабинет трейдера: подключение реквизитов и обработка платежей.',
 }
 ROLE_SECTIONS = {
-    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Rolling', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Audit log', 'Risk / AML'],
+    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Rolling', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Интеграция с AI-офисом', 'Безопасность', 'Audit log', 'Risk / AML'],
     'admin': ['Обзор', 'Создать кабинет', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Risk / AML'],
     'support': ['Обзор', 'Площадки/агрегаторы', 'Aggregators', 'Трейдеры', 'Все пополнения', 'Все выплаты', 'Апелляции', 'Смс хаб', 'История обращений', 'Безопасность'],
     'teamlead': ['TeamLead', 'Безопасность'],
@@ -2154,6 +2172,292 @@ async def _require_superadmin_web(request: Request, db: AsyncSession) -> User | 
     return actor
 
 
+async def _require_platform_wallet_reader(
+    request: Request,
+    db: AsyncSession,
+) -> User:
+    actor = await get_current_web_user(request, db)
+    if not actor:
+        raise HTTPException(401, 'authentication_required')
+    if actor.role not in {
+        Role.superadmin.value,
+        Role.admin.value,
+        Role.operator.value,
+        Role.trader.value,
+    }:
+        raise HTTPException(403, 'platform_wallet_access_denied')
+    if actor.role in STAFF_2FA_ROLES:
+        if staff_2fa_setup_required(actor):
+            raise HTTPException(403, '2FA setup required')
+        if not request.scope.get('session', {}).get('twofa_verified'):
+            raise HTTPException(403, 'fresh 2FA session required')
+    return actor
+
+
+@router.get('/cabinet/platform-wallet/qr')
+async def cabinet_platform_wallet_qr(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    await _require_platform_wallet_reader(request, db)
+    wallet = await get_active_platform_wallet(db)
+    if wallet is None:
+        raise HTTPException(404, 'platform_wallet_not_configured')
+    etag = f'"platform-wallet-v{wallet.version}"'
+    headers = {
+        'Cache-Control': 'private, max-age=300, must-revalidate',
+        'ETag': etag,
+        'X-Platform-Wallet-Version': str(wallet.version),
+        'X-Content-Type-Options': 'nosniff',
+    }
+    if request.headers.get('if-none-match') == etag:
+        return Response(status_code=304, headers=headers)
+    return Response(
+        content=platform_wallet_qr_png(wallet),
+        media_type='image/png',
+        headers=headers,
+    )
+
+
+@router.post('/cabinet/platform-wallet')
+async def cabinet_platform_wallet_update(
+    request: Request,
+    address: str = Form(...),
+    label: str = Form(''),
+    change_reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        change = await set_active_platform_wallet(
+            db,
+            address=address,
+            label=label,
+            actor_id=actor.id,
+            change_reason=change_reason,
+        )
+        await audit(
+            db,
+            (
+                'platform_wallet_replaced'
+                if change.changed
+                else 'platform_wallet_submit_idempotent'
+            ),
+            'platform_crypto_wallet',
+            actor.id,
+            change.wallet.id,
+            client_ip(request),
+            {
+                'asset': change.wallet.asset,
+                'network': change.wallet.network,
+                'version': change.wallet.version,
+                'previous_wallet_id': (
+                    str(change.previous_wallet_id)
+                    if change.previous_wallet_id
+                    else None
+                ),
+                'address_suffix': change.wallet.address[-6:],
+                'label_configured': bool(change.wallet.label),
+                'reason': change_reason.strip()[:500],
+            },
+        )
+        await db.commit()
+    except PlatformWalletError as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'wallet')
+    except IntegrityError:
+        await db.rollback()
+        return _redirect('platform_wallet_concurrent_update', 'wallet')
+    return _redirect(
+        (
+            'Кошелёк USDT TRC20 обновлён с сохранением истории'
+            if change.changed
+            else 'Кошелёк уже содержит эти данные'
+        ),
+        'wallet',
+    )
+
+
+@router.post('/cabinet/ai-office/config')
+async def cabinet_ai_office_save_config(
+    request: Request,
+    enabled: bool = Form(False),
+    environment: str = Form('local'),
+    base_url: str = Form(''),
+    health_path: str = Form('/api/health'),
+    api_version: str = Form(''),
+    auth_type: str = Form('none'),
+    api_key: str = Form(''),
+    bearer_token: str = Form(''),
+    hmac_secret: str = Form(''),
+    timeout_seconds: str = Form('5'),
+    connect_timeout_seconds: str = Form('2'),
+    max_retries: int = Form(0),
+    verify_tls: bool = Form(False),
+    selected_events: list[str] = Form([]),
+    change_reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    reason = change_reason.strip()
+    if not reason:
+        return _redirect(
+            'ai_office_change_reason_required',
+            'ai-office',
+        )
+    try:
+        config = await save_ai_integration_config(
+            db,
+            actor_id=actor.id,
+            enabled=enabled,
+            environment=environment,
+            base_url=base_url,
+            health_path=health_path,
+            api_version=api_version,
+            auth_type=auth_type,
+            api_key=api_key,
+            bearer_token=bearer_token,
+            hmac_secret=hmac_secret,
+            timeout_seconds=timeout_seconds,
+            connect_timeout_seconds=connect_timeout_seconds,
+            max_retries=max_retries,
+            verify_tls=verify_tls,
+            selected_events=selected_events,
+        )
+        await audit(
+            db,
+            'ai_office_config_updated',
+            'ai_integration_config',
+            actor.id,
+            config.id,
+            client_ip(request),
+            {
+                'provider': config.provider,
+                'enabled': config.enabled,
+                'environment': config.environment,
+                'auth_type': config.auth_type,
+                'verify_tls': config.verify_tls,
+                'selected_events': list(config.selected_events or []),
+                'api_key_updated': bool(api_key.strip()),
+                'bearer_token_updated': bool(bearer_token.strip()),
+                'hmac_secret_updated': bool(hmac_secret.strip()),
+                'reason': reason[:500],
+            },
+        )
+        await db.commit()
+    except (AIIntegrationError, ValueError) as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'ai-office')
+    return _redirect('Настройки AI Office сохранены', 'ai-office')
+
+
+@router.post('/cabinet/ai-office/config/secrets/{secret_kind}/clear')
+async def cabinet_ai_office_clear_secret(
+    secret_kind: str,
+    request: Request,
+    change_reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    reason = change_reason.strip()
+    if not reason:
+        return _redirect(
+            'ai_office_change_reason_required',
+            'ai-office',
+        )
+    try:
+        config = await clear_ai_integration_secret(
+            db,
+            actor_id=actor.id,
+            secret_kind=secret_kind,
+        )
+        await audit(
+            db,
+            'ai_office_secret_cleared',
+            'ai_integration_config',
+            actor.id,
+            config.id,
+            client_ip(request),
+            {
+                'provider': config.provider,
+                'secret_kind': secret_kind,
+                'reason': reason[:500],
+            },
+        )
+        await db.commit()
+    except AIIntegrationError as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'ai-office')
+    return _redirect('Credential удалён отдельным действием', 'ai-office')
+
+
+@router.post('/cabinet/ai-office/test-connection')
+async def cabinet_ai_office_test_connection(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    config = await get_ai_integration_config(db)
+    if config is None:
+        return _redirect('ai_office_config_not_found', 'ai-office')
+    actor_id = actor.id
+    config_id = config.id
+    try:
+        snapshot = ai_connection_snapshot(config)
+        result = await run_ai_connection_test_without_transaction(
+            db,
+            snapshot,
+        )
+    except AIIntegrationError as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'ai-office')
+
+    config = (
+        await db.execute(
+            select(AIIntegrationConfig)
+            .where(AIIntegrationConfig.id == config_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if config is None:
+        await db.rollback()
+        return _redirect('ai_office_config_not_found', 'ai-office')
+    record_ai_connection_result(config, result)
+    config.updated_by = actor_id
+    await audit(
+        db,
+        'ai_office_connection_tested',
+        'ai_integration_config',
+        actor_id,
+        config.id,
+        client_ip(request),
+        {
+            'provider': config.provider,
+            'environment': config.environment,
+            'status': result.status,
+            'latency_ms': result.latency_ms,
+            'error_code': result.error_code,
+        },
+    )
+    await db.commit()
+    return _redirect(
+        (
+            f'AI Office connection OK ({result.latency_ms} ms)'
+            if result.success
+            else f'AI Office connection failed: {result.error_code}'
+        ),
+        'ai-office',
+    )
+
+
 @router.post('/cabinet/antiscam/settings')
 async def cabinet_antiscam_save_settings(
     request: Request,
@@ -3602,6 +3906,28 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     merchant_rolling_ledger = []
     rolling_admin_rows = []
     teamlead_admin_rows = []
+    platform_wallet = None
+    platform_wallet_history = []
+    platform_wallet_qr_url = ''
+    ai_office_config = ai_config_view(None)
+    if user.role in {
+        Role.superadmin.value,
+        Role.admin.value,
+        Role.operator.value,
+        Role.trader.value,
+    }:
+        platform_wallet = await get_active_platform_wallet(db)
+        if platform_wallet:
+            platform_wallet_qr_url = (
+                f'{cabinet_base}/platform-wallet/qr'
+                f'?v={platform_wallet.version}'
+            )
+        if user.role in {Role.superadmin.value, Role.admin.value}:
+            platform_wallet_history = await list_platform_wallet_history(db)
+    if user.role == Role.superadmin.value:
+        ai_office_config = ai_config_view(
+            await get_ai_integration_config(db)
+        )
     if user.role in {Role.superadmin.value, Role.admin.value}:
         fee_rules = (await db.execute(
             select(FeeRule).order_by(FeeRule.is_active.desc(), FeeRule.created_at.desc()).limit(500)
@@ -4356,6 +4682,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant': merchant,
         'merchant_api_keys': merchant_api_keys,
         'environment_name': settings.ENV,
+        'app_version': settings.APP_VERSION,
         'is_production_environment': settings.is_production,
         'allow_sandbox_keys_in_production': settings.ALLOW_SANDBOX_KEYS_IN_PRODUCTION,
         'merchant_api_base_url': merchant_api_base_url,
@@ -4372,6 +4699,11 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant_rolling_ledger': merchant_rolling_ledger,
         'rolling_admin_rows': rolling_admin_rows,
         'teamlead_admin_rows': teamlead_admin_rows,
+        'platform_wallet': platform_wallet,
+        'platform_wallet_history': platform_wallet_history,
+        'platform_wallet_qr_url': platform_wallet_qr_url,
+        'ai_office_config': ai_office_config,
+        'ai_office_event_options': sorted(AI_OFFICE_EVENT_OPTIONS),
         'merchant_traders': merchant_traders,
         'merchant_filter_trader_id': merchant_filter_trader_id,
         'merchant_deal_id': merchant_deal_id,
