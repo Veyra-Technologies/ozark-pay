@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.db.session import get_db
-from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry
+from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
@@ -69,7 +69,7 @@ from app.services.deposit_lifecycle import (
     finalize_unsuccessful_deposit,
 )
 from app.services.deposit_ttl import deposit_deadline
-from app.services.rapira import get_rapira_rub_usdt_quote
+from app.services.rapira import RollingRateUnavailable, get_rapira_rub_usdt_quote, get_strict_rolling_ask_quote
 from app.services.settlements import SETTLEMENT_STATUS_COMPLETED, SETTLEMENT_STATUS_PENDING, SETTLEMENT_STATUS_REJECTED, create_merchant_settlement, merchant_settlement_quote, settlement_rate_rub
 from app.services.webhook_enqueue import enqueue_webhook_delivery
 from app.services.webhooks import queue_webhook
@@ -93,6 +93,18 @@ from app.services.rolling import (
     rolling_overview,
     set_merchant_settlement_mode,
     set_rolling_suspension,
+)
+from app.services.teamlead import (
+    TEAMLEAD_SETTLEMENT_COOLDOWN,
+    TeamLeadError,
+    adjust_teamlead_balance,
+    complete_teamlead_settlement,
+    create_or_replace_assignment,
+    create_teamlead_settlement,
+    get_teamlead_balance,
+    reconcile_teamlead_account,
+    reject_teamlead_settlement,
+    reverse_teamlead_accrual,
 )
 from app.services.merchant_api_keys import (
     MerchantApiKeyError,
@@ -243,6 +255,7 @@ ROLE_TITLES = {
     'superadmin': 'Superadmin кабинет',
     'admin': 'Admin кабинет',
     'support': 'Support кабинет',
+    'teamlead': 'TeamLead кабинет',
     'merchant': 'Merchant кабинет казино',
     'aggregator': 'Aggregator кабинет',
     'operator': 'Трейдер кабинет',
@@ -252,15 +265,17 @@ ROLE_DESCRIPTIONS = {
     'superadmin': 'Главный кабинет: создание Admin/Support/Merchant/Trader, полный контроль площадки, платежи, реквизиты, аудит, риски.',
     'admin': 'Операционное управление: создание Support/Merchant/Trader, заявки, мерчанты, трейдеры, лимиты, статистика.',
     'support': 'Только просмотр и поддержка: заявки пополнений/выплат, статусы, апелляции, SMS. Без доступа к деньгам и созданию кабинетов.',
+    'teamlead': 'Собственный кабинет TeamLead: назначенные трейдеры, начисления от gross, баланс и вывод USDT TRC20.',
     'merchant': 'Кабинет казино: API-интеграция, баланс, пополнения/выплаты, webhook, статистика.',
     'aggregator': 'Кабинет агрегатора с изолированной авторизацией.',
     'operator': 'Кабинет трейдера: подключение реквизитов, обработка платежей и работа с SMS-подтверждениями.',
     'trader': 'Кабинет трейдера: подключение реквизитов и обработка платежей.',
 }
 ROLE_SECTIONS = {
-    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Rolling', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Audit log', 'Risk / AML'],
-    'admin': ['Обзор', 'Создать кабинет', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Risk / AML'],
+    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Rolling', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Audit log', 'Risk / AML'],
+    'admin': ['Обзор', 'Создать кабинет', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Risk / AML'],
     'support': ['Обзор', 'Площадки/агрегаторы', 'Aggregators', 'Трейдеры', 'Все пополнения', 'Все выплаты', 'Апелляции', 'Смс хаб', 'История обращений', 'Безопасность'],
+    'teamlead': ['TeamLead', 'Безопасность'],
     'merchant': ['Обзор', 'Пополнение', 'Выплаты', 'Кошелек', 'Статистика', 'API ключи', 'Webhook', 'Интеграция казино', 'Апелляции', 'Безопасность'],
     'aggregator': ['Обзор', 'Безопасность'],
     'operator': ['Мои реквизиты', 'Пополнения', 'Статистика', 'Выплаты', 'SMS подтверждения', 'Баланс', 'Апелляции', 'Безопасность'],
@@ -371,7 +386,7 @@ def _twofa_redirect() -> RedirectResponse:
     return RedirectResponse('/cabinet?msg=' + quote_plus('Сначала включите 2FA в разделе Безопасность'), status_code=303)
 
 
-MANAGED_USER_ROLES = {Role.admin.value, Role.support.value, Role.merchant.value, Role.operator.value, Role.trader.value}
+MANAGED_USER_ROLES = {Role.admin.value, Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value}
 TRADER_ROLES = {Role.operator.value, Role.trader.value}
 
 DEPOSIT_ACTIVE_FOR_TRADER = {
@@ -822,9 +837,9 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
         return _twofa_redirect()
     allowed = []
     if actor.role == Role.superadmin.value:
-        allowed = [Role.admin.value, Role.support.value, Role.merchant.value, Role.operator.value, Role.trader.value]
+        allowed = [Role.admin.value, Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value]
     elif actor.role == Role.admin.value:
-        allowed = [Role.support.value, Role.merchant.value, Role.operator.value, Role.trader.value]
+        allowed = [Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value]
     if role not in allowed:
         return RedirectResponse('/cabinet?msg=Недостаточно+прав+для+создания+этой+роли', status_code=303)
     email = email.strip().lower()
@@ -2533,6 +2548,281 @@ async def cabinet_rolling_suspension(
     return _redirect(f'Rolling status: {account.status}', 'rolling')
 
 
+def _teamlead_redirect(message: str) -> RedirectResponse:
+    return RedirectResponse(
+        '/cabinet?msg=' + quote_plus(message),
+        status_code=303,
+    )
+
+
+async def _require_teamlead_finance_web(
+    request: Request,
+    db: AsyncSession,
+) -> User | RedirectResponse:
+    actor = await get_current_web_user(request, db)
+    if not actor:
+        return RedirectResponse('/login', status_code=303)
+    if actor.role != Role.teamlead.value:
+        return _teamlead_redirect('Недостаточно прав')
+    if staff_2fa_setup_required(actor):
+        return _twofa_redirect()
+    if not request.scope.get('session', {}).get('twofa_verified'):
+        return _teamlead_redirect('Для финансового действия требуется подтверждённая 2FA-сессия')
+    return actor
+
+
+@router.post('/cabinet/teamlead/assignments')
+async def teamlead_assignment_create(
+    request: Request,
+    teamlead_id: str = Form(...),
+    trader_id: str = Form(...),
+    commission_percent: str = Form(...),
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        assignment = await create_or_replace_assignment(
+            db,
+            teamlead_id=UUID(teamlead_id),
+            trader_id=UUID(trader_id),
+            commission_percent=Decimal(commission_percent.replace(',', '.')),
+            actor_id=actor.id,
+            reason=reason,
+        )
+        await audit(
+            db,
+            'teamlead_assignment_created',
+            'teamlead_assignment',
+            actor.id,
+            assignment.id,
+            client_ip(request),
+            {
+                'teamlead_id': str(assignment.teamlead_id),
+                'trader_id': str(assignment.trader_id),
+                'commission_percent': str(assignment.commission_percent),
+                'effective_from': assignment.effective_from.isoformat(),
+                'reason': reason[:500],
+            },
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return _teamlead_redirect('teamlead_assignment_conflict')
+    except (TeamLeadError, ValueError, InvalidOperation) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect('Назначение TeamLead сохранено с историей')
+
+
+@router.post('/cabinet/teamlead/settlements/request')
+async def teamlead_settlement_request(
+    request: Request,
+    requested_usdt: str = Form(...),
+    wallet_address: str = Form(...),
+    idempotency_key: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_teamlead_finance_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        # No database row is locked while Rapira performs HTTP I/O.
+        quote = await get_strict_rolling_ask_quote()
+        settlement = await create_teamlead_settlement(
+            db,
+            teamlead_id=actor.id,
+            requested_usdt=Decimal(requested_usdt.replace(',', '.')),
+            wallet_address=wallet_address,
+            idempotency_key=idempotency_key,
+            quote=quote,
+        )
+        await audit(
+            db,
+            'teamlead_settlement_requested',
+            'teamlead_settlement',
+            actor.id,
+            settlement.id,
+            client_ip(request),
+            {
+                'requested_usdt': str(settlement.requested_usdt),
+                'fee_usdt': str(settlement.fee_usdt),
+                'total_debit_rub': str(settlement.total_debit_rub),
+                'rate_symbol': settlement.rate_symbol,
+                'rate_side': settlement.rate_side,
+                'rate_source': settlement.rate_source,
+                'provider_timestamp': (
+                    settlement.provider_timestamp.isoformat()
+                    if settlement.provider_timestamp
+                    else None
+                ),
+                'fetched_at': settlement.fetched_at.isoformat(),
+                'freshness_basis': settlement.freshness_basis,
+            },
+        )
+        await db.commit()
+    except RollingRateUnavailable:
+        await db.rollback()
+        return _teamlead_redirect('teamlead_rate_unavailable')
+    except IntegrityError:
+        await db.rollback()
+        return _teamlead_redirect('teamlead_settlement_conflict')
+    except (TeamLeadError, ValueError, InvalidOperation) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect('Запрос TeamLead settle создан, средства заморожены')
+
+
+@router.post('/cabinet/teamlead/settlements/{settlement_id}/reject')
+async def teamlead_settlement_reject(
+    request: Request,
+    settlement_id: str,
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        settlement = await reject_teamlead_settlement(
+            db,
+            settlement_id=UUID(settlement_id),
+            actor_id=actor.id,
+            reason=reason,
+        )
+        await audit(
+            db,
+            'teamlead_settlement_rejected',
+            'teamlead_settlement',
+            actor.id,
+            settlement.id,
+            client_ip(request),
+            {'reason': reason[:500]},
+        )
+        await db.commit()
+    except (TeamLeadError, ValueError) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect('TeamLead settle отклонён, frozen возвращён в available')
+
+
+@router.post('/cabinet/teamlead/settlements/{settlement_id}/complete')
+async def teamlead_settlement_complete(
+    request: Request,
+    settlement_id: str,
+    tx_hash: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        settlement = await complete_teamlead_settlement(
+            db,
+            settlement_id=UUID(settlement_id),
+            actor_id=actor.id,
+            tx_hash=tx_hash,
+        )
+        await audit(
+            db,
+            'teamlead_settlement_completed',
+            'teamlead_settlement',
+            actor.id,
+            settlement.id,
+            client_ip(request),
+            {'tx_hash': settlement.tx_hash},
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return _teamlead_redirect('teamlead_settlement_tx_hash_duplicate')
+    except (TeamLeadError, ValueError) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect('TeamLead settle выполнен, cooldown 168 часов запущен')
+
+
+@router.post('/cabinet/teamlead/accruals/{deposit_id}/reverse')
+async def teamlead_accrual_reverse(
+    request: Request,
+    deposit_id: str,
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        accrual = await reverse_teamlead_accrual(
+            db,
+            deposit_id=UUID(deposit_id),
+            actor_id=actor.id,
+            reason=reason,
+        )
+        if accrual is None:
+            raise TeamLeadError('teamlead_accrual_not_found')
+        await audit(
+            db,
+            'teamlead_accrual_reversed',
+            'teamlead_accrual',
+            actor.id,
+            accrual.id,
+            client_ip(request),
+            {'deposit_id': deposit_id, 'reason': reason[:500]},
+        )
+        await db.commit()
+    except (TeamLeadError, ValueError) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect('TeamLead accrual компенсирован')
+
+
+@router.post('/cabinet/teamlead/{teamlead_id}/adjust')
+async def teamlead_balance_adjust(
+    request: Request,
+    teamlead_id: str,
+    adjustment_type: str = Form(...),
+    amount_rub: str = Form(...),
+    reason: str = Form(...),
+    idempotency_key: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        entry = await adjust_teamlead_balance(
+            db,
+            teamlead_id=UUID(teamlead_id),
+            actor_id=actor.id,
+            adjustment_type=adjustment_type,
+            amount_rub=Decimal(amount_rub.replace(',', '.')),
+            idempotency_key=idempotency_key,
+            reason=reason,
+        )
+        await audit(
+            db,
+            'teamlead_balance_adjusted',
+            'teamlead_ledger_entry',
+            actor.id,
+            entry.id,
+            client_ip(request),
+            {
+                'teamlead_id': teamlead_id,
+                'adjustment_type': adjustment_type,
+                'amount_rub': str(entry.amount_rub),
+                'reason': reason[:500],
+            },
+        )
+        await db.commit()
+    except (TeamLeadError, ValueError, InvalidOperation) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect('Финансовая корректировка TeamLead записана в immutable ledger')
+
+
 @router.get('/cabinet', response_class=HTMLResponse)
 async def cabinet(request: Request, db: AsyncSession = Depends(get_db)):
     if await _session_identity_changed(request):
@@ -3092,8 +3382,162 @@ async def cabinet_deposit_rows(request: Request, db: AsyncSession = Depends(get_
     )
 
 
+async def _teamlead_own_cabinet(
+    request: Request,
+    user: User,
+    db: AsyncSession,
+) -> HTMLResponse:
+    auth_realm = request_auth_realm(request) or realm_for_role(user.role)
+    cabinet_base = realm_cabinet_path(auth_realm) if auth_realm else '/cabinet'
+    balance = (await db.execute(
+        select(TeamLeadBalance).where(TeamLeadBalance.teamlead_id == user.id)
+    )).scalar_one_or_none()
+    if balance is None:
+        balance = TeamLeadBalance(
+            teamlead_id=user.id,
+            available_rub=Decimal('0.00'),
+            frozen_rub=Decimal('0.00'),
+            debt_rub=Decimal('0.00'),
+            total_earned_rub=Decimal('0.00'),
+            total_paid_rub=Decimal('0.00'),
+        )
+    assignments = (await db.execute(
+        select(TeamLeadTraderAssignment)
+        .where(
+            TeamLeadTraderAssignment.teamlead_id == user.id,
+            TeamLeadTraderAssignment.effective_to.is_(None),
+        )
+        .order_by(TeamLeadTraderAssignment.effective_from)
+    )).scalars().all()
+    trader_ids = {row.trader_id for row in assignments}
+    traders = []
+    if trader_ids:
+        traders = (await db.execute(
+            select(User.id, User.email, User.is_active, User.is_locked)
+            .where(User.id.in_(trader_ids))
+            .order_by(User.email)
+        )).all()
+    trader_labels = {row[0]: row[1] for row in traders}
+    accruals = (await db.execute(
+        select(TeamLeadAccrual)
+        .where(TeamLeadAccrual.teamlead_id == user.id)
+        .order_by(TeamLeadAccrual.created_at.desc())
+        .limit(500)
+    )).scalars().all()
+    settlements = (await db.execute(
+        select(TeamLeadSettlement)
+        .where(TeamLeadSettlement.teamlead_id == user.id)
+        .order_by(TeamLeadSettlement.requested_at.desc())
+        .limit(200)
+    )).scalars().all()
+    ledger = (await db.execute(
+        select(TeamLeadLedgerEntry)
+        .where(TeamLeadLedgerEntry.teamlead_id == user.id)
+        .order_by(TeamLeadLedgerEntry.created_at.desc())
+        .limit(300)
+    )).scalars().all()
+    stats_by_trader: dict[str, dict] = {}
+    for accrual in accruals:
+        item = stats_by_trader.setdefault(
+            str(accrual.trader_id),
+            {
+                'gross_rub': Decimal('0.00'),
+                'accrual_rub': Decimal('0.00'),
+                'operations': 0,
+            },
+        )
+        item['gross_rub'] += Decimal(accrual.gross_rub)
+        if accrual.status == 'credited':
+            item['accrual_rub'] += Decimal(accrual.accrual_rub)
+        item['operations'] += 1
+    trader_rows = [
+        {
+            'id': str(assignment.trader_id),
+            'email': trader_labels.get(assignment.trader_id, 'Archived trader'),
+            'commission_percent': assignment.commission_percent,
+            **stats_by_trader.get(
+                str(assignment.trader_id),
+                {
+                    'gross_rub': Decimal('0.00'),
+                    'accrual_rub': Decimal('0.00'),
+                    'operations': 0,
+                },
+            ),
+        }
+        for assignment in assignments
+    ]
+    completed_times = [
+        row.completed_at
+        for row in settlements
+        if row.status == 'completed' and row.completed_at is not None
+    ]
+    next_settlement_at = (
+        max(completed_times) + TEAMLEAD_SETTLEMENT_COOLDOWN
+        if completed_times
+        else None
+    )
+    pending_settlement = next(
+        (row for row in settlements if row.status == 'pending'),
+        None,
+    )
+    reconciliation = (
+        await reconcile_teamlead_account(db, user.id)
+        if getattr(balance, 'id', None)
+        else {
+            'reconciled': True,
+            'checks': {},
+            'totals': {},
+            'balance_cache': {
+                'available_rub': Decimal('0.00'),
+                'frozen_rub': Decimal('0.00'),
+                'debt_rub': Decimal('0.00'),
+                'total_earned_rub': Decimal('0.00'),
+                'total_paid_rub': Decimal('0.00'),
+            },
+        }
+    )
+    return templates.TemplateResponse(
+        'teamlead.html',
+        {
+            'request': request,
+            **branding_context(),
+            'user': user,
+            'role': Role.teamlead.value,
+            'title': ROLE_TITLES[Role.teamlead.value],
+            'description': ROLE_DESCRIPTIONS[Role.teamlead.value],
+            'auth_realm': auth_realm,
+            'cabinet_base': cabinet_base,
+            'logout_path': f'/{auth_realm}/logout' if auth_realm else '/logout',
+            'msg': request.query_params.get('msg'),
+            'balance': balance,
+            'trader_rows': trader_rows,
+            'teamlead_trader_labels': trader_labels,
+            'accruals': accruals,
+            'settlements': settlements,
+            'ledger': ledger,
+            'pending_settlement': pending_settlement,
+            'next_settlement_at': next_settlement_at,
+            'total_gross_rub': sum(
+                (Decimal(row.gross_rub) for row in accruals),
+                Decimal('0.00'),
+            ),
+            'reconciliation': reconciliation,
+            'settlement_idempotency_key': (
+                f'teamlead-settlement:{user.id}:{secrets.token_urlsafe(18)}'
+            ),
+        },
+        headers={'Cache-Control': 'no-store'},
+    )
+
+
 async def role_cabinet(request: Request, role: str, db: AsyncSession):
     user = await get_current_web_user(request, db)
+    if (
+        role == Role.teamlead.value
+        and user.role == Role.teamlead.value
+        and not staff_2fa_setup_required(user)
+    ):
+        return await _teamlead_own_cabinet(request, user, db)
     auth_realm = request_auth_realm(request) or realm_for_role(user.role)
     cabinet_base = realm_cabinet_path(auth_realm) if auth_realm else '/cabinet'
     sections = [section for section in ROLE_SECTIONS.get(role, []) if section not in HIDDEN_CABINET_SECTIONS]
@@ -3157,6 +3601,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     merchant_rolling_allocations = []
     merchant_rolling_ledger = []
     rolling_admin_rows = []
+    teamlead_admin_rows = []
     if user.role in {Role.superadmin.value, Role.admin.value}:
         fee_rules = (await db.execute(
             select(FeeRule).order_by(FeeRule.is_active.desc(), FeeRule.created_at.desc()).limit(500)
@@ -3244,6 +3689,88 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     users = (await db.execute(select(User).where(User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value] else []
     merchant_users = [u for u in users if u.role == Role.merchant.value]
     trader_users = (await db.execute(select(User).where(User.role.in_([Role.operator.value, Role.trader.value]), User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else []
+    if user.role in {Role.superadmin.value, Role.admin.value}:
+        teamlead_users = [row for row in users if row.role == Role.teamlead.value]
+        teamlead_ids = {row.id for row in teamlead_users}
+        assignment_rows = []
+        if teamlead_ids:
+            assignment_rows = (await db.execute(
+                select(TeamLeadTraderAssignment)
+                .where(TeamLeadTraderAssignment.teamlead_id.in_(teamlead_ids))
+                .order_by(
+                    TeamLeadTraderAssignment.effective_from.desc(),
+                    TeamLeadTraderAssignment.id.desc(),
+                )
+            )).scalars().all()
+        teamlead_trader_ids = {row.trader_id for row in assignment_rows}
+        teamlead_trader_labels = {}
+        if teamlead_trader_ids:
+            teamlead_trader_labels = dict((await db.execute(
+                select(User.id, User.email).where(User.id.in_(teamlead_trader_ids))
+            )).all())
+        balances_by_teamlead = {}
+        accruals_by_teamlead: dict[UUID, list] = {}
+        settlements_by_teamlead: dict[UUID, list] = {}
+        ledger_by_teamlead: dict[UUID, list] = {}
+        if user.role == Role.superadmin.value and teamlead_ids:
+            balances_by_teamlead = {
+                row.teamlead_id: row
+                for row in (await db.execute(
+                    select(TeamLeadBalance).where(
+                        TeamLeadBalance.teamlead_id.in_(teamlead_ids)
+                    )
+                )).scalars().all()
+            }
+            for row in (await db.execute(
+                select(TeamLeadAccrual)
+                .where(TeamLeadAccrual.teamlead_id.in_(teamlead_ids))
+                .order_by(TeamLeadAccrual.created_at.desc())
+                .limit(1000)
+            )).scalars().all():
+                accruals_by_teamlead.setdefault(row.teamlead_id, []).append(row)
+            for row in (await db.execute(
+                select(TeamLeadSettlement)
+                .where(TeamLeadSettlement.teamlead_id.in_(teamlead_ids))
+                .order_by(TeamLeadSettlement.requested_at.desc())
+                .limit(1000)
+            )).scalars().all():
+                settlements_by_teamlead.setdefault(row.teamlead_id, []).append(row)
+            for row in (await db.execute(
+                select(TeamLeadLedgerEntry)
+                .where(TeamLeadLedgerEntry.teamlead_id.in_(teamlead_ids))
+                .order_by(TeamLeadLedgerEntry.created_at.desc())
+                .limit(2000)
+            )).scalars().all():
+                ledger_by_teamlead.setdefault(row.teamlead_id, []).append(row)
+        for teamlead_user in teamlead_users:
+            assignments = [
+                row
+                for row in assignment_rows
+                if row.teamlead_id == teamlead_user.id
+            ]
+            current_assignments = [
+                row for row in assignments if row.effective_to is None
+            ]
+            balance_row = balances_by_teamlead.get(teamlead_user.id)
+            reconciliation = None
+            if user.role == Role.superadmin.value and balance_row is not None:
+                reconciliation = await reconcile_teamlead_account(
+                    db, teamlead_user.id
+                )
+            teamlead_admin_rows.append({
+                'user': teamlead_user,
+                'assignments': assignments,
+                'current_assignments': current_assignments,
+                'trader_labels': teamlead_trader_labels,
+                'balance': balance_row,
+                'accruals': accruals_by_teamlead.get(teamlead_user.id, []),
+                'settlements': settlements_by_teamlead.get(teamlead_user.id, []),
+                'ledger': ledger_by_teamlead.get(teamlead_user.id, []),
+                'reconciliation': reconciliation,
+                'adjustment_idempotency_key': (
+                    f'teamlead-adjust:{teamlead_user.id}:{secrets.token_urlsafe(12)}'
+                ),
+            })
     if role == Role.merchant.value and merchant:
         all_traders_for_merchant = (await db.execute(select(User).where(User.role.in_([Role.operator.value, Role.trader.value]), User.is_archived.is_(False)).order_by(User.email.asc()).limit(500))).scalars().all()
         merchant_traders = [
@@ -3844,6 +4371,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant_rolling_allocations': merchant_rolling_allocations,
         'merchant_rolling_ledger': merchant_rolling_ledger,
         'rolling_admin_rows': rolling_admin_rows,
+        'teamlead_admin_rows': teamlead_admin_rows,
         'merchant_traders': merchant_traders,
         'merchant_filter_trader_id': merchant_filter_trader_id,
         'merchant_deal_id': merchant_deal_id,

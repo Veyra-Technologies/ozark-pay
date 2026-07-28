@@ -34,6 +34,7 @@ ROLE_REALMS = {
     "superadmin": "staff",
     "admin": "staff",
     "support": "staff",
+    "teamlead": "staff",
     "merchant": "merchant",
     "operator": "trader",
     "trader": "trader",

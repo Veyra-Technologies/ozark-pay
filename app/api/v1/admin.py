@@ -307,7 +307,7 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
         raise HTTPException(403, 'superadmin is created only by seed')
     if (await db.execute(select(User).where(User.email==data.email))).scalar_one_or_none():
         raise HTTPException(409, 'email exists')
-    needs_2fa = data.role in [Role.admin, Role.support]
+    needs_2fa = data.role in [Role.admin, Role.support, Role.teamlead]
     user=User(email=data.email, password_hash=hash_password(data.password), role=data.role.value, twofa_enabled=False, twofa_secret=encrypt_secret(pyotp.random_base32()) if needs_2fa else None)
     db.add(user); await db.flush()
     result={'user_id':user.id,'email':user.email,'role':user.role,'twofa_setup_required':needs_2fa}

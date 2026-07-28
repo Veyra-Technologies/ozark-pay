@@ -240,11 +240,65 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <div class="note">2FA по умолчанию включена только у Superadmin. Остальные роли подключают 2FA в разделе «Безопасность».</div>
     <label>Email</label><input name="email" type="email" required placeholder="new@example.com">
     <label>Пароль</label><input name="password" type="password" required minlength="12" placeholder="Введите новый пароль">
-    <label>Роль</label><select name="role">{% if user.role=='superadmin' %}<option value="admin">Admin</option>{% endif %}<option value="support">Support</option><option value="merchant">Merchant</option><option value="operator">Трейдер</option></select>
+    <label>Роль</label><select name="role">{% if user.role=='superadmin' %}<option value="admin">Admin</option>{% endif %}<option value="support">Support</option><option value="teamlead">TeamLead</option><option value="merchant">Merchant</option><option value="operator">Трейдер</option></select>
     <label>Название мерчанта/казино, только для Merchant</label><input name="merchant_name" placeholder="Casino Brand">
     <button class="primary" type="submit">Создать кабинет</button>
   </form>
   {% else %}<p class="muted">Нет доступа.</p>{% endif %}
+
+  {% elif s == 'TeamLead' %}
+  <div class="note">TeamLead получает отдельный расход платформы от gross успешного Deposit. Начисление не уменьшает Trader income, Merchant net, settle или Rolling recovery.</div>
+  <div class="note">Для супер-админа: процент TeamLead может превысить маржу сделки, что приведет к warning в finance-monitoring.</div>
+  {% if user.role == 'superadmin' %}
+  <form method="post" action="{{ cabinet_base }}/teamlead/assignments" class="panel" data-confirm="Закрыть текущее назначение трейдера, если оно есть, и создать новую историческую запись?">{{ csrf_input(request) }}
+    <h3>Назначить / переназначить трейдера</h3>
+    <label>TeamLead</label><select name="teamlead_id" required>{% for row in teamlead_admin_rows %}<option value="{{ row.user.id }}">{{ row.user.email }}</option>{% endfor %}</select>
+    <label>Трейдер</label><select name="trader_id" required>{% for trader in trader_users %}<option value="{{ trader.id }}">{{ trader.email }}</option>{% endfor %}</select>
+    <label>Процент от gross</label><input type="number" name="commission_percent" min="0" max="100" step="0.000001" required>
+    <label>Причина</label><input name="reason" maxlength="500" required>
+    <button class="primary" type="submit">Сохранить историческое назначение</button>
+  </form>
+  {% endif %}
+  {% for row in teamlead_admin_rows %}
+  {% set tl = row.user %}{% set bal = row.balance %}
+  <div class="panel">
+    <div class="section-head"><h3>{{ tl.email }}</h3>{% if tl.is_locked %}<span class="status-pill status-bad">locked</span>{% elif tl.is_active %}<span class="status-pill status-ok">active</span>{% else %}<span class="status-pill status-bad">disabled</span>{% endif %}</div>
+    <p class="muted">TeamLead ID: <span class="cell-mono">{{ tl.id }}</span> · активных трейдеров: {{ row.current_assignments|length }} · 2FA: {{ 'on' if tl.twofa_enabled else 'setup required' }}</p>
+    <div class="table-wrap"><table><tr><th>Текущий трейдер</th>{% if user.role == 'superadmin' %}<th>Процент</th><th>Effective from</th><th>Изменить процент</th>{% endif %}</tr>
+      {% for assignment in row.current_assignments %}<tr><td>{{ row.trader_labels.get(assignment.trader_id, 'Archived trader') }}</td>{% if user.role == 'superadmin' %}<td>{{ assignment.commission_percent }}%</td><td>{{ assignment.effective_from|dt_full }}</td><td><form method="post" action="{{ cabinet_base }}/teamlead/assignments" data-confirm="Закрыть текущую запись и создать новую с новым процентом?">{{ csrf_input(request) }}<input type="hidden" name="teamlead_id" value="{{ tl.id }}"><input type="hidden" name="trader_id" value="{{ assignment.trader_id }}"><input type="number" name="commission_percent" min="0" max="100" step="0.000001" required><input name="reason" maxlength="500" required placeholder="Причина изменения"><button class="secondary" type="submit">Изменить</button></form></td>{% endif %}</tr>
+      {% else %}<tr><td colspan="{{ 4 if user.role == 'superadmin' else 1 }}">Нет активных назначений.</td></tr>{% endfor %}
+    </table></div>
+    {% if user.role == 'superadmin' %}
+    <div class="detail-grid">
+      <div class="detail-card"><b>Available</b>{{ bal.available_rub if bal else '0.00' }} RUB</div>
+      <div class="detail-card"><b>Frozen</b>{{ bal.frozen_rub if bal else '0.00' }} RUB</div>
+      <div class="detail-card"><b>Debt</b>{{ bal.debt_rub if bal else '0.00' }} RUB</div>
+      <div class="detail-card"><b>Total earned</b>{{ bal.total_earned_rub if bal else '0.00' }} RUB</div>
+      <div class="detail-card"><b>Total paid TeamLead (без fee)</b>{{ bal.total_paid_rub if bal else '0.00' }} RUB</div>
+      <div class="detail-card"><b>Reconciliation</b>{% if row.reconciliation %}{{ 'OK' if row.reconciliation.reconciled else 'РАСХОЖДЕНИЕ' }}{% else %}нет финансовых записей{% endif %}</div>
+    </div>
+    {% if row.reconciliation %}<div class="note">{{ row.reconciliation.checks }}</div>{% endif %}
+    <div class="row">
+      <form method="post" action="{{ cabinet_base }}/teamlead/{{ tl.id }}/adjust" class="panel" data-confirm="Записать финансовую корректировку в immutable ledger?">{{ csrf_input(request) }}
+        <h3>Корректировка</h3>
+        <input type="hidden" name="idempotency_key" value="{{ row.adjustment_idempotency_key }}">
+        <label>Тип</label><select name="adjustment_type"><option value="available_credit">available credit</option><option value="available_debit">available debit</option><option value="debt_increase">debt increase</option><option value="debt_write_off">debt write-off</option></select>
+        <label>Сумма RUB</label><input type="number" name="amount_rub" min="0.01" step="0.01" required>
+        <label>Причина</label><input name="reason" maxlength="500" required>
+        <button class="primary" type="submit">Записать корректировку</button>
+      </form>
+    </div>
+    <h3>История назначений</h3>
+    <div class="table-wrap"><table><tr><th>Трейдер</th><th>%</th><th>From</th><th>To</th><th>Создание</th><th>Закрытие</th></tr>{% for assignment in row.assignments %}<tr><td>{{ row.trader_labels.get(assignment.trader_id, 'Archived trader') }}</td><td>{{ assignment.commission_percent }}</td><td>{{ assignment.effective_from|dt_full }}</td><td>{{ assignment.effective_to|dt_full if assignment.effective_to else 'active' }}</td><td>{{ assignment.creation_reason }}</td><td>{{ assignment.close_reason or '—' }}</td></tr>{% else %}<tr><td colspan="6">История пуста.</td></tr>{% endfor %}</table></div>
+    <h3>Accrual history</h3>
+    <div class="table-wrap"><table><tr><th>Дата</th><th>Deposit</th><th>Трейдер</th><th>Gross</th><th>% snapshot</th><th>Accrual</th><th>Available/debt</th><th>Status</th><th>Действие</th></tr>{% for accrual in row.accruals %}<tr><td>{{ accrual.created_at|dt_compact }}</td><td class="cell-mono">{{ accrual.deposit_id }}</td><td>{{ row.trader_labels.get(accrual.trader_id, 'Archived trader') }}</td><td>{{ accrual.gross_rub }}</td><td>{{ accrual.commission_percent_snapshot }}</td><td>{{ accrual.accrual_rub }}</td><td>{{ accrual.credited_to_available_rub }} / {{ accrual.applied_to_debt_rub }}</td><td>{{ accrual.status }}</td><td>{% if accrual.status == 'credited' %}<form method="post" action="{{ cabinet_base }}/teamlead/accruals/{{ accrual.deposit_id }}/reverse" data-confirm="Создать компенсирующий reversal?">{{ csrf_input(request) }}<input name="reason" maxlength="500" required placeholder="Причина reversal"><button class="dangerbtn" type="submit">Reverse</button></form>{% else %}{{ accrual.reversal_reason }}{% endif %}</td></tr>{% else %}<tr><td colspan="9">Начислений нет.</td></tr>{% endfor %}</table></div>
+    <h3>Settlement queue и история</h3>
+    <div class="table-wrap"><table><tr><th>Дата</th><th>Wallet</th><th>Requested + fee</th><th>Rate snapshot</th><th>Total RUB</th><th>Status</th><th>Обработка</th></tr>{% for settlement in row.settlements %}<tr><td>{{ settlement.requested_at|dt_compact }}</td><td class="cell-mono cell-wrap">{{ settlement.wallet_address }}</td><td>{{ settlement.requested_usdt }} + {{ settlement.fee_usdt }}</td><td>{{ settlement.rapira_rate_rub }} {{ settlement.rate_symbol }} {{ settlement.rate_side }}<br>{{ settlement.rate_source }} / {{ settlement.freshness_basis }}<br>fetched {{ settlement.fetched_at|dt_full }}{% if settlement.provider_timestamp %}<br>provider {{ settlement.provider_timestamp|dt_full }}{% endif %}</td><td>{{ settlement.total_debit_rub }}</td><td>{{ settlement.status }}</td><td>{% if settlement.status == 'pending' %}<form method="post" action="{{ cabinet_base }}/teamlead/settlements/{{ settlement.id }}/complete" data-confirm="Подтвердить выплату и запустить cooldown 168 часов?">{{ csrf_input(request) }}<input name="tx_hash" maxlength="160" required placeholder="TRC20 tx hash"><button class="primary" type="submit">Complete</button></form><form method="post" action="{{ cabinet_base }}/teamlead/settlements/{{ settlement.id }}/reject" data-confirm="Отклонить и вернуть frozen в available?">{{ csrf_input(request) }}<input name="reason" maxlength="500" required placeholder="Причина отказа"><button class="dangerbtn" type="submit">Reject</button></form>{% elif settlement.status == 'completed' %}<span class="cell-mono">{{ settlement.tx_hash }}</span>{% else %}{{ settlement.reject_reason }}{% endif %}</td></tr>{% else %}<tr><td colspan="7">Settlements нет.</td></tr>{% endfor %}</table></div>
+    <h3>Immutable ledger</h3>
+    <div class="table-wrap"><table><tr><th>Дата</th><th>Type</th><th>Amount</th><th>Available</th><th>Frozen</th><th>Debt</th><th>Reason</th></tr>{% for entry in row.ledger %}<tr><td>{{ entry.created_at|dt_compact }}</td><td>{{ entry.entry_type }}</td><td>{{ entry.amount_rub }}</td><td>{{ entry.available_after }}</td><td>{{ entry.frozen_after }}</td><td>{{ entry.debt_after }}</td><td>{{ entry.reason }}</td></tr>{% else %}<tr><td colspan="7">Ledger пуст.</td></tr>{% endfor %}</table></div>
+    {% endif %}
+  </div>
+  {% else %}<div class="muted">TeamLead ещё не созданы.</div>{% endfor %}
 
   {% elif s == 'Площадки/агрегаторы' %}
   <p class="muted">Площадки подключаются к процессингу через Merchant API, HMAC-подпись и webhook.</p>
@@ -273,7 +327,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <td>{{ 'on' if u.twofa_enabled else 'off' }}</td>
     <td>{% if u.is_locked %}<span class="status-pill status-bad">locked</span>{% elif u.is_active %}<span class="status-pill status-ok">active</span>{% else %}<span class="status-pill status-bad">disabled</span>{% endif %}</td>
     <td>
-      {% if user.role == 'superadmin' and u.role in ['admin','support','merchant','operator','trader'] and u.id != user.id %}
+      {% if user.role == 'superadmin' and u.role in ['admin','support','teamlead','merchant','operator','trader'] and u.id != user.id %}
       <div class="actions-row">
         <form method="post" action="{{ cabinet_base }}/users/{{ u.id }}/lock" data-confirm="{{ 'Разблокировать пользователя?' if u.is_locked else 'Заблокировать пользователя?' }}">{{ csrf_input(request) }}<input type="hidden" name="locked" value="{{ 'false' if u.is_locked else 'true' }}"><button class="secondary" type="submit">{{ 'Разблокировать' if u.is_locked else 'Заблокировать' }}</button></form>
         <button class="primary" type="button" data-modal-open="userPassword{{ u.id }}">Сменить пароль</button>
@@ -284,7 +338,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% else %}<tr><td colspan="5">Пользователей нет</td></tr>{% endfor %}
   </table></div>
   {% for u in users %}
-  {% if user.role == 'superadmin' and u.role in ['admin','support','merchant','operator','trader'] and u.id != user.id %}
+  {% if user.role == 'superadmin' and u.role in ['admin','support','teamlead','merchant','operator','trader'] and u.id != user.id %}
   <div id="userPassword{{ u.id }}" class="modal"><div class="modalbox"><h2>Сменить пароль</h2>
     <form method="post" action="{{ cabinet_base }}/users/{{ u.id }}/password" data-confirm="Сменить пароль пользователя?">{{ csrf_input(request) }}
       <div class="modal-note"><b>{{ u.email }}</b><div class="compact-note">Роль: {{ 'trader' if u.role in ['operator','trader'] else u.role }}</div></div>
@@ -1111,6 +1165,8 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <div class="detail-card"><b>Комиссия мерчантов</b>{{ totals.get('merchant_fee','0.00') }} RUB</div>
     <div class="detail-card"><b>Комиссия исполнителей</b>{{ totals.get('executor_fee','0.00') }} RUB</div>
     <div class="detail-card"><b>Доход площадки</b>{{ totals.get('platform_income','0.00') }} RUB</div>
+    <div class="detail-card"><b>TeamLead expense</b>{{ totals.get('net_teamlead_expense','0.00') }} RUB</div>
+    <div class="detail-card"><b>Net после TeamLead</b>{{ totals.get('net_platform_income','0.00') }} RUB {% if totals.get('loss_making_after_teamlead') %}<span class="status-pill status-bad">loss-making</span>{% endif %}</div>
     <div class="detail-card"><b>Средняя маржа</b>{{ totals.get('average_platform_margin_percent','0.0000') }}%</div>
     <div class="detail-card"><b>Сверка ledger</b>{% if totals.get('reconciled') %}<span class="status-pill status-ok">OK</span>{% else %}<span class="status-pill status-bad">Δ {{ totals.get('reconciliation_delta','0.00') }}</span>{% endif %}</div>
   </div>

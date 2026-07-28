@@ -18,7 +18,12 @@ from app.core.enums import Role
 from app.services.merchant_api_keys import normalize_api_key_mode, sandbox_key_allowed_for_merchant
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl='/api/v1/auth/login')
-STAFF_2FA_ROLES = {Role.superadmin.value, Role.admin.value, Role.support.value}
+STAFF_2FA_ROLES = {
+    Role.superadmin.value,
+    Role.admin.value,
+    Role.support.value,
+    Role.teamlead.value,
+}
 REPLAY_HEADER_NAMES = ('X-Request-ID', 'X-Nonce', 'Idempotency-Key', 'X-Idempotency-Key')
 HMAC_REPLAY_PROTECTED_METHODS = {'POST', 'PUT', 'PATCH', 'DELETE'}
 

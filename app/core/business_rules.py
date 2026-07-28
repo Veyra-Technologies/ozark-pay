@@ -17,6 +17,10 @@ ROLE_PERMISSIONS = {
         'blacklist.manage',
         'audit.read',
         'reports.export',
+        'teamlead.manage',
+        'teamlead.finance',
+        'teamlead.create',
+        'teamlead.read_basic',
     ],
     Role.admin.value: [
         'users.manage_operational',
@@ -32,6 +36,8 @@ ROLE_PERMISSIONS = {
         'limits.manage',
         'blacklist.manage',
         'reports.export',
+        'teamlead.create',
+        'teamlead.read_basic',
     ],
     Role.support.value: [
         'operations.read_all',
@@ -39,6 +45,10 @@ ROLE_PERMISSIONS = {
         'appeals.reply',
         'risk.read',
         'webhooks.retry',
+    ],
+    Role.teamlead.value: [
+        'teamlead.read_own',
+        'teamlead.settlement.create_own',
     ],
     Role.merchant.value: [
         'merchant_api.use',
