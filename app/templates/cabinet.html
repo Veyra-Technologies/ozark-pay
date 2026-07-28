@@ -221,14 +221,15 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   <div class="status"><b>{{ title }}</b><br><span class="muted">Статус:</span> <span class="badge">{{ 'trader' if role in ['operator','trader'] else role }}</span><br><span class="muted">2FA:</span> <b>{{ 'включена' if user.twofa_enabled else 'выключена' }}</b></div>
   <b>Разделы</b>
   <!-- Hidden until AML module is implemented: Risk / AML is filtered server-side. -->
-  {% for s in sections %}<button class="{% if loop.first %}active{% endif %}" data-target="sec{{ loop.index }}">{{ s }}</button>{% endfor %}
+  {% for s in sections %}{% set section_id = 'wallet' if s == 'Кошелёк' else 'sec' ~ loop.index %}<button class="{% if loop.first %}active{% endif %}" data-target="{{ section_id }}">{{ s }}</button>{% endfor %}
 </aside>
 <main class="card">
 <datalist id="rfBanks">{% for bank in bank_options %}<option value="{{ bank.display_name }}" label="{{ bank.aliases|join(', ') }}" data-code="{{ bank.code }}">{% endfor %}</datalist>
 <datalist id="mobileOperators">{% for operator in mobile_operator_options %}<option value="{{ operator.display_name }}" label="{{ operator.aliases|join(', ') }}" data-code="{{ operator.code }}">{% endfor %}</datalist>
 {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
 {% for s in sections %}
-<section id="sec{{ loop.index }}" class="section {% if loop.first %}active{% endif %}">
+{% set section_id = 'wallet' if s == 'Кошелёк' else 'sec' ~ loop.index %}
+<section id="{{ section_id }}" class="section {% if loop.first %}active{% endif %}">
   <div class="section-head"><h1>{{ s if s != 'Обзор' else title }}</h1></div>
 
   {% if s == 'Обзор' %}
@@ -854,7 +855,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% endif %}
   <h3>Выплаты</h3>
   <div class="table-wrap"><table><tr><th>ID</th>{% if role not in ['operator','trader'] %}<th>External</th>{% endif %}<th>Сумма</th><th>Получатель</th><th>Статус</th></tr>{% for p in payouts %}<tr><td><span class="cell-mono cell-ellipsis" title="{{ p.id }}">{{ p.id }}</span></td>{% if role not in ['operator','trader'] %}<td><span class="cell-mono cell-ellipsis" title="{{ p.external_id }}">{{ p.external_id }}</span></td>{% endif %}<td><span class="text-amount">{{ p.amount }} {{ p.currency }}</span></td><td><span class="cell-ellipsis" title="{{ p.destination }}">{{ p.destination }}</span></td><td>{{ p.status }}</td></tr>{% else %}<tr><td colspan="{{ 4 if role in ['operator','trader'] else 5 }}">Пока нет выплат</td></tr>{% endfor %}</table></div>
-  {% elif s == 'Кошелек' or s == 'Баланс' %}
+  {% elif s in ['Кошелек', 'Кошелёк', 'Баланс'] %}
   {% if role == 'merchant' %}
   <h3>SETTLE</h3>
   <div class="grid"><div class="metric"><b>Доступно</b><p>{{ balance.available if balance else '0.00' }} RUB</p></div><div class="metric"><b>Холд</b><p>{{ balance.frozen if balance else '0.00' }} RUB</p></div><div class="metric"><b>В ожидании settle</b><p>{{ settlement_quote.get('pending_rub','0.00') }} RUB</p></div><div class="metric"><b>Можно запросить</b><p>{{ settlement_quote.get('available_rub','0.00') }} RUB</p></div></div>
@@ -883,9 +884,9 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   <h3>История settle</h3>
   <div class="table-wrap"><table><tr><th>Дата</th><th>USDT</th><th>Комиссия</th><th>Списание RUB</th><th>TRC20</th><th>Статус</th></tr>{% for st in merchant_settlements %}<tr><td><span class="text-date" title="{{ st.created_at|dt_full }}">{{ st.created_at|dt_compact }}</span></td><td><span class="text-amount">{{ st.amount_usdt }} USDT</span></td><td><span class="text-amount">{{ st.fee_usdt }} USDT</span></td><td><span class="text-amount">{{ st.total_debit_rub }} RUB</span></td><td><span class="cell-mono cell-ellipsis" title="{{ st.trc20_address }}">{{ st.trc20_address }}</span></td><td>{% if st.status == 'completed' %}<span class="status-pill status-ok">completed</span>{% elif st.status == 'pending' %}<span class="status-pill status-wait">pending</span>{% else %}<span class="status-pill status-bad">{{ st.status }}</span>{% endif %}</td></tr>{% else %}<tr><td colspan="6">Settle-запросов пока нет</td></tr>{% endfor %}</table></div>
   {% else %}
-  {% if role in ['superadmin','admin','operator','trader'] %}
+  {% if (s == 'Кошелёк' and role in ['superadmin','admin']) or (s == 'Баланс' and role in ['operator','trader']) %}
   <div class="panel">
-    <h3>Статический кошелёк платформы</h3>
+    <h3>{% if s == 'Кошелёк' %}Платформенный USDT TRC20{% else %}USDT TRC20 для пополнения{% endif %}</h3>
     {% if platform_wallet %}
     <div class="platform-wallet-card">
       <img class="platform-wallet-qr" src="{{ platform_wallet_qr_url }}" alt="QR активного USDT TRC20 кошелька">
@@ -894,16 +895,22 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
           <div class="detail-card"><b>Актив</b>{{ platform_wallet.asset }}</div>
           <div class="detail-card"><b>Сеть</b>{{ platform_wallet.network }}</div>
           <div class="detail-card"><b>Версия</b>{{ platform_wallet.version }}</div>
-          <div class="detail-card"><b>Обновлён</b>{{ platform_wallet.created_at|dt_full }}</div>
+          <div class="detail-card"><b>Статус</b>active</div>
+          <div class="detail-card"><b>Активирован</b>{{ platform_wallet.created_at|dt_full }}</div>
+          <div class="detail-card"><b>Последнее изменение</b>{{ platform_wallet.created_at|dt_full }}</div>
+          {% if s == 'Кошелёк' %}
+          <div class="detail-card"><b>Кем изменён</b>{{ platform_wallet_actor_labels.get(platform_wallet.created_by, platform_wallet.created_by) }}</div>
+          {% endif %}
         </div>
         <p class="platform-wallet-address mono" data-platform-wallet-address>{{ platform_wallet.address }}</p>
         {% if platform_wallet.label %}<p><b>Label:</b> {{ platform_wallet.label }}</p>{% endif %}
         <button class="secondary" type="button" data-copy-platform-wallet="{{ platform_wallet.address }}">Копировать адрес</button>
       </div>
     </div>
-    <div class="note">Отправляйте только USDT в сети TRC20. Переводы в другой сети могут быть потеряны.</div>
+    <p class="muted">QR-код создаётся автоматически из активного адреса и отдельно не загружается.</p>
+    <div class="note">Убедитесь, что указан адрес USDT в сети TRC20. Переводы в другой сети могут быть потеряны.</div>
     {% else %}
-    <div class="metric"><p>Кошелёк временно не указан.</p></div>
+    <div class="metric"><p>Платформенный кошелёк пока не указан.</p></div>
     {% endif %}
 
     {% if user.role == 'superadmin' %}
@@ -922,15 +929,17 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 
     {% if user.role in ['superadmin','admin'] %}
     <h3>История версий</h3>
-    <div class="table-wrap"><table><tr><th>Версия</th><th>Address</th><th>Label</th><th>Создан</th><th>Деактивирован</th><th>Причина</th><th>Статус</th></tr>
+    <div class="table-wrap"><table><tr><th>Версия</th><th>Address</th><th>Label</th><th>Network</th><th>Статус</th><th>Активирован</th><th>Деактивирован</th><th>Создал</th><th>Деактивировал</th><th>Причина</th></tr>
       {% for wallet in platform_wallet_history %}
-      <tr><td>{{ wallet.version }}</td><td class="mono cell-wrap">{{ wallet.address }}</td><td>{{ wallet.label or '—' }}</td><td>{{ wallet.created_at|dt_full }}</td><td>{{ wallet.deactivated_at|dt_full if wallet.deactivated_at else '—' }}</td><td>{{ wallet.change_reason }}</td><td>{% if wallet.is_active %}<span class="status-pill status-ok">active</span>{% else %}<span class="status-pill status-neutral">history</span>{% endif %}</td></tr>
-      {% else %}<tr><td colspan="7">История кошельков пуста.</td></tr>{% endfor %}
+      <tr><td>{{ wallet.version }}</td><td class="mono cell-wrap">{{ wallet.address }}</td><td>{{ wallet.label or '—' }}</td><td>{{ wallet.network }}</td><td>{% if wallet.is_active %}<span class="status-pill status-ok">active</span>{% else %}<span class="status-pill status-neutral">inactive</span>{% endif %}</td><td>{{ wallet.created_at|dt_full }}</td><td>{{ wallet.deactivated_at|dt_full if wallet.deactivated_at else '—' }}</td><td>{{ platform_wallet_actor_labels.get(wallet.created_by, wallet.created_by) }}</td><td>{{ platform_wallet_actor_labels.get(wallet.deactivated_by, wallet.deactivated_by) if wallet.deactivated_by else '—' }}</td><td>{{ wallet.change_reason }}</td></tr>
+      {% else %}<tr><td colspan="10">История кошельков пуста.</td></tr>{% endfor %}
     </table></div>
     {% endif %}
   </div>
   {% endif %}
+  {% if s == 'Баланс' %}
   <div class="grid"><div class="metric"><b>Доступно</b><p>{% if role in ['operator','trader'] %}{{ user.trader_balance }}{% else %}{{ balance.available if balance else '0.00' }}{% endif %} RUB</p></div><div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ user.trader_hold }}{% else %}{{ balance.frozen if balance else '0.00' }}{% endif %} RUB</p></div></div>
+  {% endif %}
   {% endif %}
   {% elif s == 'Интеграция с AI-офисом' %}
   {% if user.role == 'superadmin' %}

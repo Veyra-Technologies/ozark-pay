@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import io
 import logging
 import os
 import re
@@ -10,6 +11,8 @@ from datetime import timedelta
 import httpx
 import pyotp
 import pytest
+import qrcode
+from PIL import Image
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -79,9 +82,25 @@ def _base58check_address(
     return _base58_encode(payload + checksum)
 
 
+def _decode_known_qr_png(png: bytes, candidates: tuple[str, ...]) -> str:
+    actual = Image.open(io.BytesIO(png)).convert('1')
+    for candidate in candidates:
+        expected = qrcode.make(
+            candidate,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            border=4,
+        ).convert('1')
+        if actual.size == expected.size and actual.tobytes() == expected.tobytes():
+            return candidate
+    raise AssertionError('QR image does not encode any expected wallet address')
+
+
 WALLET_A = _base58check_address()
 WALLET_B = _base58check_address(
     seed=bytes.fromhex('1122334455667788990011223344556677889900')
+)
+WALLET_C = _base58check_address(
+    seed=bytes.fromhex('ffeeddccbbaa99887766554433221100ffeeddcc')
 )
 WRONG_NETWORK_WALLET = _base58check_address(version=0x42)
 BAD_CHECKSUM_WALLET = WALLET_A[:-1] + ('1' if WALLET_A[-1] != '1' else '2')
@@ -275,6 +294,56 @@ def test_platform_wallet_history_checksum_and_database_uniqueness():
     asyncio.run(scenario())
 
 
+def test_concurrent_platform_wallet_replacements_keep_one_active_version():
+    async def scenario():
+        engine = create_async_engine(_database_url())
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as setup:
+                actors = await _actors(setup)
+                actor_id = actors['superadmin'].id
+                await set_active_platform_wallet(
+                    setup,
+                    address=WALLET_A,
+                    label='Initial',
+                    actor_id=actor_id,
+                    change_reason='concurrency baseline',
+                )
+                await setup.commit()
+
+            async def replace(address: str, label: str):
+                async with AsyncSession(engine, expire_on_commit=False) as db:
+                    change = await set_active_platform_wallet(
+                        db,
+                        address=address,
+                        label=label,
+                        actor_id=actor_id,
+                        change_reason=f'concurrent replacement {label}',
+                    )
+                    await db.commit()
+                    return change.wallet.version
+
+            versions = await asyncio.gather(
+                replace(WALLET_B, 'B'),
+                replace(WALLET_C, 'C'),
+            )
+            assert sorted(versions) == [2, 3]
+
+            async with AsyncSession(engine) as verify:
+                history = await list_platform_wallet_history(verify)
+                assert [wallet.version for wallet in history] == [3, 2, 1]
+                assert sum(wallet.is_active for wallet in history) == 1
+                assert history[0].address in {WALLET_B, WALLET_C}
+                assert {wallet.address for wallet in history} == {
+                    WALLET_A,
+                    WALLET_B,
+                    WALLET_C,
+                }
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
 def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row():
     async def scenario():
         engine = create_async_engine(_database_url())
@@ -308,8 +377,12 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                 assert login.status_code == 303
                 empty = await trader_client.get('/trader/cabinet')
                 assert empty.status_code == 200
-                assert 'Кошелёк временно не указан' in empty.text
+                assert 'Платформенный кошелёк пока не указан' in empty.text
                 assert '<img class="platform-wallet-qr"' not in empty.text
+                missing_qr = await trader_client.get(
+                    '/trader/cabinet/platform-wallet/qr'
+                )
+                assert missing_qr.status_code == 404
 
             async with httpx.AsyncClient(
                 transport=transport,
@@ -323,6 +396,9 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                 )
                 assert login.status_code == 303
                 cabinet = await super_client.get('/staff/cabinet')
+                assert 'data-target="wallet">Кошелёк</button>' in cabinet.text
+                assert '<section id="wallet"' in cabinet.text
+                assert 'Платформенный USDT TRC20' in cabinet.text
                 missing_csrf = await super_client.post(
                     '/staff/cabinet/platform-wallet',
                     data={
@@ -332,6 +408,20 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                     },
                 )
                 assert missing_csrf.status_code == 403
+                missing_reason = await super_client.post(
+                    '/staff/cabinet/platform-wallet',
+                    data={
+                        'csrf_token': _csrf_from_html(cabinet),
+                        'address': WALLET_A,
+                        'label': 'QA wallet',
+                        'change_reason': ' ',
+                    },
+                )
+                assert missing_reason.status_code == 303
+                assert (
+                    'platform_wallet_change_reason_required'
+                    in missing_reason.headers['location']
+                )
                 saved = await super_client.post(
                     '/staff/cabinet/platform-wallet',
                     data={
@@ -343,6 +433,13 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                 )
                 assert saved.status_code == 303
                 assert 'wallet' in saved.headers['location']
+                configured = await super_client.get('/staff/cabinet#wallet')
+                assert WALLET_A in configured.text
+                assert actors['superadmin'].email in configured.text
+                assert (
+                    'QR-код создаётся автоматически из активного адреса'
+                    in configured.text
+                )
 
             async with AsyncSession(engine) as verify:
                 wallet = await get_active_platform_wallet(verify)
@@ -367,10 +464,16 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                     assert 'TRC20' in cabinet.text
                     assert 'Переводы в другой сети могут быть потеряны' in cabinet.text
                     if name == 'admin':
+                        assert 'Платформенный USDT TRC20' in cabinet.text
+                        assert 'История версий' in cabinet.text
+                        assert actors['superadmin'].email in cabinet.text
                         assert (
                             'action="/staff/cabinet/platform-wallet"'
                             not in cabinet.text
                         )
+                    else:
+                        assert 'Платформенный USDT TRC20' not in cabinet.text
+                        assert 'История версий' not in cabinet.text
                     qr = await client.get(
                         f'/{realm}/cabinet/platform-wallet/qr?v=1'
                     )
@@ -379,6 +482,15 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                     assert qr.headers['x-platform-wallet-version'] == '1'
                     assert qr.headers['cache-control'].startswith('private')
                     assert qr.content.startswith(b'\x89PNG')
+                    assert _decode_known_qr_png(
+                        qr.content,
+                        (WALLET_A, WALLET_B),
+                    ) == WALLET_A
+                    not_modified = await client.get(
+                        f'/{realm}/cabinet/platform-wallet/qr?v=1',
+                        headers={'If-None-Match': qr.headers['etag']},
+                    )
+                    assert not_modified.status_code == 304
                     denied = await client.post(
                         f'/{realm}/cabinet/platform-wallet',
                         data={
@@ -388,7 +500,7 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                             'change_reason': 'denied',
                         },
                     )
-                    assert denied.status_code == 303
+                    assert denied.status_code == 403
 
             for name in ('support', 'merchant', 'teamlead'):
                 actor = actors[name]
@@ -406,7 +518,7 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                     assert login.status_code == 303
                     cabinet = await client.get(f'/{realm}/cabinet')
                     assert cabinet.status_code == 200
-                    assert 'Статический кошелёк платформы' not in cabinet.text
+                    assert 'Платформенный USDT TRC20' not in cabinet.text
                     qr = await client.get(
                         f'/{realm}/cabinet/platform-wallet/qr'
                     )
@@ -432,13 +544,53 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                 assert denied.status_code == 303
                 assert '2FA' in denied.headers['location']
 
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url='https://localhost',
+                follow_redirects=False,
+            ) as super_client:
+                login = await _login(
+                    super_client,
+                    actors['superadmin'],
+                    name='superadmin',
+                )
+                assert login.status_code == 303
+                cabinet = await super_client.get('/staff/cabinet#wallet')
+                replaced = await super_client.post(
+                    '/staff/cabinet/platform-wallet',
+                    data={
+                        'csrf_token': _csrf_from_html(cabinet),
+                        'address': WALLET_B,
+                        'label': 'QA replacement',
+                        'change_reason': 'route QR replacement QA',
+                    },
+                )
+                assert replaced.status_code == 303
+                current_qr = await super_client.get(
+                    '/staff/cabinet/platform-wallet/qr?v=2'
+                )
+                assert current_qr.status_code == 200
+                assert current_qr.headers['etag'] == '"platform-wallet-v2"'
+                assert current_qr.headers['x-platform-wallet-version'] == '2'
+                assert _decode_known_qr_png(
+                    current_qr.content,
+                    (WALLET_A, WALLET_B),
+                ) == WALLET_B
+                history_page = await super_client.get(
+                    '/staff/cabinet#wallet'
+                )
+                assert WALLET_A in history_page.text
+                assert WALLET_B in history_page.text
+                assert 'route QR replacement QA' in history_page.text
+                assert 'inactive' in history_page.text
+
             async with AsyncSession(engine) as verify:
                 active = await get_active_platform_wallet(verify)
-                assert active.address == WALLET_A
-                assert active.version == 1
+                assert active.address == WALLET_B
+                assert active.version == 2
                 assert await verify.scalar(
                     select(func.count(PlatformCryptoWallet.id))
-                ) == 1
+                ) == 2
         finally:
             await application_engine.dispose()
             await engine.dispose()

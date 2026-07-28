@@ -290,8 +290,8 @@ ROLE_DESCRIPTIONS = {
     'trader': 'Кабинет трейдера: подключение реквизитов и обработка платежей.',
 }
 ROLE_SECTIONS = {
-    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Rolling', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Интеграция с AI-офисом', 'Безопасность', 'Audit log', 'Risk / AML'],
-    'admin': ['Обзор', 'Создать кабинет', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелек', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Risk / AML'],
+    'superadmin': ['Обзор', 'Создать кабинет', 'Пользователи', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Rolling', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелёк', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Интеграция с AI-офисом', 'Безопасность', 'Audit log', 'Risk / AML'],
+    'admin': ['Обзор', 'Создать кабинет', 'TeamLead', 'Площадки/агрегаторы', 'Aggregators', 'Мерчанты', 'Трейдеры', 'Пополнения', 'Выплаты', 'Кошелёк', 'Статистика', 'Реквизиты', 'Апелляции', 'Смс хаб', 'Безопасность', 'Risk / AML'],
     'support': ['Обзор', 'Площадки/агрегаторы', 'Aggregators', 'Трейдеры', 'Все пополнения', 'Все выплаты', 'Апелляции', 'Смс хаб', 'История обращений', 'Безопасность'],
     'teamlead': ['TeamLead', 'Безопасность'],
     'merchant': ['Обзор', 'Пополнение', 'Выплаты', 'Кошелек', 'Статистика', 'API ключи', 'Webhook', 'Интеграция казино', 'Апелляции', 'Безопасность'],
@@ -2227,6 +2227,9 @@ async def cabinet_platform_wallet_update(
     change_reason: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
+    current_user = await get_current_web_user(request, db)
+    if current_user and current_user.role != Role.superadmin.value:
+        raise HTTPException(403, 'platform_wallet_manage_forbidden')
     actor = await _require_superadmin_web(request, db)
     if isinstance(actor, RedirectResponse):
         return actor
@@ -3908,6 +3911,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     teamlead_admin_rows = []
     platform_wallet = None
     platform_wallet_history = []
+    platform_wallet_actor_labels = {}
     platform_wallet_qr_url = ''
     ai_office_config = ai_config_view(None)
     if user.role in {
@@ -3924,6 +3928,24 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             )
         if user.role in {Role.superadmin.value, Role.admin.value}:
             platform_wallet_history = await list_platform_wallet_history(db)
+            actor_ids = {
+                actor_id
+                for wallet in platform_wallet_history
+                for actor_id in (wallet.created_by, wallet.deactivated_by)
+                if actor_id is not None
+            }
+            if actor_ids:
+                actor_rows = (
+                    await db.execute(
+                        select(User.id, User.email).where(
+                            User.id.in_(actor_ids)
+                        )
+                    )
+                ).all()
+                platform_wallet_actor_labels = {
+                    actor_id: email
+                    for actor_id, email in actor_rows
+                }
     if user.role == Role.superadmin.value:
         ai_office_config = ai_config_view(
             await get_ai_integration_config(db)
@@ -4701,6 +4723,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'teamlead_admin_rows': teamlead_admin_rows,
         'platform_wallet': platform_wallet,
         'platform_wallet_history': platform_wallet_history,
+        'platform_wallet_actor_labels': platform_wallet_actor_labels,
         'platform_wallet_qr_url': platform_wallet_qr_url,
         'ai_office_config': ai_office_config,
         'ai_office_event_options': sorted(AI_OFFICE_EVENT_OPTIONS),
