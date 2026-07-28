@@ -201,6 +201,29 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 .platform-wallet-card{display:grid;grid-template-columns:minmax(180px,240px) minmax(0,1fr);gap:18px;align-items:center}
 .platform-wallet-qr{width:220px;max-width:100%;border-radius:16px;padding:10px;background:#fff}
 .platform-wallet-address{overflow-wrap:anywhere;word-break:break-all;font-size:16px}
+.rolling-card{display:grid;gap:14px}
+.rolling-header{display:flex;flex-wrap:wrap;justify-content:space-between;align-items:flex-start;gap:10px}
+.rolling-header .heading{display:flex;flex-direction:column;gap:6px;min-width:0}
+.rolling-header h3{margin:0}
+.rolling-meta-note{font-size:12px;color:var(--muted);margin-top:3px}
+.rolling-status{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.rolling-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--gap-md)}
+.rolling-metric{background:var(--panel-muted);border:1px solid var(--border);border-radius:var(--radius-md);padding:11px 12px}
+.rolling-metric b{display:block;color:#9ecfe0;font-size:12px;text-transform:uppercase;margin-bottom:6px}
+.rolling-metric .value{display:block;font-size:16px;font-weight:650}
+.rolling-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:var(--gap-md)}
+.rolling-form-card{padding:14px;background:var(--panel-soft);display:flex;flex-direction:column;gap:10px}
+.rolling-form-card h3{margin:0;font-size:15px}
+.rolling-reconcile{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}
+.rolling-reconcile-item{border:1px solid var(--border);border-radius:var(--radius-md);padding:10px;background:rgba(4,21,35,.72);min-width:0}
+.rolling-reconcile-item b{display:block;font-size:12px;text-transform:uppercase;color:#a5d2e6;margin-bottom:4px}
+.rolling-reconcile-item .value{display:block;word-break:break-word}
+.rolling-copy-wrap{display:flex;align-items:center;gap:8px;max-width:100%}
+.rolling-copy-btn{min-height:28px!important;padding:0 10px!important;font-size:12px!important;border-radius:8px!important}
+.rolling-copy-value{max-width:calc(100% - 96px);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dff9ff}
+.rolling-details-preview{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d7f2fa}
+.rolling-hidden{display:none}
+.rolling-empty{padding:18px;color:var(--muted);background:rgba(8,22,36,.54);text-align:center}
 .release-footer{max-width:1680px;margin:0 auto;padding:0 24px 24px;color:var(--muted);font-size:12px;text-align:right}
 @media(max-width:700px){.platform-wallet-card{grid-template-columns:1fr}.platform-wallet-qr{width:190px}}
 </style>
@@ -381,56 +404,176 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </div></div>
   {% endfor %}{% endif %}
   {% elif s == 'Rolling' %}
-  <div class="note">Rolling — отдельный контур обязательств мерчанта перед Ozark. Финансовые изменения создают новые ledger entries и не переписывают историю.</div>
+  <div class="note">Rolling — отдельный контур баланса мерчанта перед Ozark. Карточка показывает только operational summary и immutable журналы (без перезаписи).</div>
   {% for row in rolling_admin_rows %}
   {% set rm = row.merchant %}{% set ro = row.overview.get('rolling') %}{% set mode = row.overview.get('settlement_mode', 'postpaid') %}
-  <div class="panel">
-    <div class="section-head"><h3>{{ rm.name }}</h3><span class="badge">{{ mode }}</span></div>
-    <div class="detail-grid">
-      <div class="detail-card"><b>Principal</b>{{ ro.get('principal_usdt','0.000000') if ro else '0.000000' }} USDT</div>
-      <div class="detail-card"><b>Recovered</b>{{ ro.get('recovered_usdt','0.000000') if ro else '0.000000' }} USDT</div>
-      <div class="detail-card"><b>Outstanding</b>{{ ro.get('outstanding_usdt','0.000000') if ro else '0.000000' }} USDT</div>
-      <div class="detail-card"><b>Pending exposure</b>{{ ro.get('pending_exposure_usdt','0.000000') if ro else '0.000000' }} USDT</div>
-      <div class="detail-card"><b>Covered pending</b>{{ ro.get('covered_pending_usdt','0.000000') if ro else '0.000000' }} USDT</div>
-      <div class="detail-card"><b>Uncovered pending</b>{{ ro.get('uncovered_pending_usdt','0.000000') if ro else '0.000000' }} USDT</div>
-      <div class="detail-card"><b>Settle overflow</b>{{ row.settle_overflow_rub }} RUB</div>
-      <div class="detail-card"><b>Status</b>{{ ro.get('status','—') if ro else '—' }}</div>
+  {% if rm %}
+  {% set status = ro.get('status','—') if ro else '—' %}
+  <div class="panel rolling-card">
+    <div class="rolling-header">
+      <div class="heading">
+        <h3>{{ rm.name }}</h3>
+        <div class="rolling-meta-note">
+          Merchant ID: <span class="cell-mono">{{ rm.id }}</span>
+          · Last updated: {{ row.account.updated_at|dt_compact if row.account and row.account.updated_at else '—' }}
+        </div>
+      </div>
+      <div class="rolling-status">
+        <span class="badge">{{ mode }}</span>
+        <span class="status-pill {{ 'status-ok' if status == 'active' else 'status-bad' if status == 'suspended' else 'status-neutral' if status != '—' else '' }}">{{ status }}</span>
+      </div>
     </div>
-    <div class="row">
-      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/mode" class="panel" data-confirm="Изменить финансовый режим мерчанта?">{{ csrf_input(request) }}
-        <label>Settlement mode</label><select name="settlement_mode"><option value="postpaid" {% if mode == 'postpaid' %}selected{% endif %}>postpaid</option><option value="rolling" {% if mode == 'rolling' %}selected{% endif %}>rolling</option></select>
-        <label>Причина</label><input name="reason" required maxlength="500">
-        <button class="primary" type="submit">Сохранить режим</button>
+    <div class="rolling-metrics">
+      <div class="rolling-metric"><b>Principal</b><span class="value">{{ ro.get('principal_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
+      <div class="rolling-metric"><b>Recovered</b><span class="value">{{ ro.get('recovered_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
+      <div class="rolling-metric"><b>Outstanding</b><span class="value">{{ ro.get('outstanding_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
+      <div class="rolling-metric"><b>Pending exposure</b><span class="value">{{ ro.get('pending_exposure_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
+      <div class="rolling-metric"><b>Covered pending</b><span class="value">{{ ro.get('covered_pending_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
+      <div class="rolling-metric"><b>Uncovered pending</b><span class="value">{{ ro.get('uncovered_pending_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
+      <div class="rolling-metric"><b>Settle overflow</b><span class="value">{{ row.settle_overflow_rub }} RUB</span></div>
+      <div class="rolling-metric"><b>Status</b><span class="value">{{ status }}</span></div>
+    </div>
+    <div class="rolling-actions">
+      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/mode" class="panel rolling-form-card" data-confirm="Изменить settlement mode мерчанта?">{{ csrf_input(request) }}
+        <h3>Settlement mode</h3>
+        <label>Mode</label>
+        <select name="settlement_mode"><option value="postpaid" {% if mode == 'postpaid' %}selected{% endif %}>postpaid</option><option value="rolling" {% if mode == 'rolling' %}selected{% endif %}>rolling</option></select>
+        <label>Reason</label>
+        <input name="reason" required maxlength="500" placeholder="Reason for change">
+        <button class="primary" type="submit">Save mode</button>
       </form>
       {% if mode == 'rolling' %}
-      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/funding" class="panel" data-confirm="Записать funding/top-up? Повтор с тем же network + tx hash будет идемпотентным.">{{ csrf_input(request) }}
-        <label>Сумма USDT</label><input name="amount_usdt" type="number" min="0.000001" step="0.000001" required>
-        <label>Network</label><input name="network" required maxlength="32" placeholder="TRC20">
-        <label>Destination address</label><input name="destination_address" required maxlength="160">
-        <label>Tx hash</label><input name="tx_hash" required maxlength="160">
-        <label>Funded at (UTC)</label><input name="funded_at" type="datetime-local" required>
-        <label>Причина / комментарий</label><input name="reason" required maxlength="500">
-        <button class="primary" type="submit">Записать funding/top-up</button>
+      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/funding" class="panel rolling-form-card" data-confirm="Создать funding/top-up? Повтор с тем же network + tx hash будет идемпотентным.">{{ csrf_input(request) }}
+        <h3>Funding (manual top-up)</h3>
+        <label>Amount, USDT</label>
+        <input name="amount_usdt" type="number" min="0.000001" step="0.000001" required>
+        <label>Network</label>
+        <input name="network" required maxlength="32" placeholder="TRC20">
+        <label>Destination address</label>
+        <input name="destination_address" required maxlength="160" placeholder="USDT wallet">
+        <label>Tx hash</label>
+        <input name="tx_hash" required maxlength="160" placeholder="transaction hash">
+        <label>Funded at (UTC)</label>
+        <input name="funded_at" type="datetime-local" required>
+        <label>Reason / comment</label>
+        <input name="reason" required maxlength="500" placeholder="Reason for top-up">
+        <button class="primary" type="submit">Add funding</button>
       </form>
-      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/suspension" class="panel" data-confirm="Изменить статус Rolling traffic?">{{ csrf_input(request) }}
-        <input type="hidden" name="suspended" value="{{ 'false' if ro and ro.get('status') == 'suspended' else 'true' }}">
-        <label>Причина</label><input name="reason" required maxlength="500">
-        <button class="{{ 'primary' if ro and ro.get('status') == 'suspended' else 'dangerbtn' }}" type="submit">{{ 'Resume' if ro and ro.get('status') == 'suspended' else 'Suspend' }}</button>
+      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/suspension" class="panel rolling-form-card" data-confirm="Изменить статус Rolling traffic?">{{ csrf_input(request) }}
+        <h3>Traffic state</h3>
+        <label>Reason</label>
+        <input name="reason" required maxlength="500" placeholder="Reason for toggle">
+        <input type="hidden" name="suspended" value="{{ 'false' if status == 'suspended' else 'true' }}">
+        <button class="{{ 'primary' if status == 'suspended' else 'dangerbtn' }}" type="submit">{{ 'Resume' if status == 'suspended' else 'Suspend' }}</button>
       </form>
       {% endif %}
     </div>
     <h3>Reconciliation</h3>
     {% if row.reconciliation %}
-    <div class="note"><b>{{ 'OK' if row.reconciliation.ok else 'РАСХОЖДЕНИЕ' }}</b> · expected principal {{ row.reconciliation.expected_principal_usdt }} · actual {{ row.reconciliation.actual_principal_usdt }} · expected recovered {{ row.reconciliation.expected_recovered_usdt }} · actual {{ row.reconciliation.actual_recovered_usdt }} · expected outstanding {{ row.reconciliation.expected_outstanding_usdt }} · actual {{ row.reconciliation.actual_outstanding_usdt }} · pending {{ row.reconciliation.pending_exposure_usdt }}{% if row.reconciliation.paid_split_mismatches %}<br>Paid split mismatches: {{ row.reconciliation.paid_split_mismatches|join(', ') }}{% endif %}</div>
-    {% else %}<div class="muted">Rolling account ещё не создан.</div>{% endif %}
+    <div class="rolling-reconcile">
+      <div class="rolling-reconcile-item"><b>Status</b><span class="value">{{ 'OK' if row.reconciliation.ok else 'Mismatch' }}</span></div>
+      <div class="rolling-reconcile-item"><b>Principal (exp / act)</b><span class="value">{{ row.reconciliation.expected_principal_usdt }} / {{ row.reconciliation.actual_principal_usdt }}</span></div>
+      <div class="rolling-reconcile-item"><b>Recovered (exp / act)</b><span class="value">{{ row.reconciliation.expected_recovered_usdt }} / {{ row.reconciliation.actual_recovered_usdt }}</span></div>
+      <div class="rolling-reconcile-item"><b>Outstanding (exp / act)</b><span class="value">{{ row.reconciliation.expected_outstanding_usdt }} / {{ row.reconciliation.actual_outstanding_usdt }}</span></div>
+      <div class="rolling-reconcile-item"><b>Pending</b><span class="value">{{ row.reconciliation.pending_exposure_usdt }}</span></div>
+    </div>
+    {% if row.reconciliation.paid_split_mismatches %}
+    <div class="note">Paid split mismatches: {{ row.reconciliation.paid_split_mismatches|join(', ') }}</div>
+    {% endif %}
+    {% else %}
+    <div class="rolling-empty">Rolling account еще не создан.</div>
+    {% endif %}
     <h3>Allocations</h3>
-    <div class="table-wrap"><table><tr><th>Дата</th><th>Deposit</th><th>Net RUB</th><th>Net USDT</th><th>Rate ask</th><th>Applied</th><th>Overflow</th><th>Status</th></tr>{% for a in row.allocations %}<tr><td>{{ a.created_at|dt_compact }}</td><td><span class="cell-mono">{{ a.deposit_id }}</span></td><td>{{ a.merchant_net_rub }}</td><td>{{ a.merchant_net_usdt }}</td><td>{{ a.rapira_rate_rub }} · {{ a.rapira_rate_source }} {{ a.rapira_rate_side }}</td><td>{{ a.rolling_applied_usdt }} USDT / {{ a.rolling_applied_rub }} RUB</td><td>{{ a.settle_credited_rub }} RUB</td><td>{{ a.status }}</td></tr>{% else %}<tr><td colspan="8">Нет allocations</td></tr>{% endfor %}</table></div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Дата</th><th>Deposit</th><th>Net RUB</th><th>Net USDT</th><th>Rate ask</th><th>Applied</th><th>Overflow</th><th>Status</th></tr>
+        {% for a in row.allocations %}
+        <tr>
+          <td><span class="text-date" title="{{ a.created_at|dt_full }}">{{ a.created_at|dt_compact }}</span></td>
+          <td><span class="cell-mono cell-ellipsis" title="{{ a.deposit_id }}">{{ a.deposit_id }}</span></td>
+          <td>{{ a.merchant_net_rub }}</td>
+          <td>{{ a.merchant_net_usdt }}</td>
+          <td>{{ a.rapira_rate_rub }} · {{ a.rapira_rate_source }} {{ a.rapira_rate_side }}</td>
+          <td><span class="cell-small">{{ a.rolling_applied_usdt }} USDT / {{ a.rolling_applied_rub }} RUB</span></td>
+          <td>{{ a.settle_credited_rub }} RUB</td>
+          <td>{{ a.status }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8">Нет allocations</td></tr>
+        {% endfor %}
+      </table>
+    </div>
     <h3>Immutable ledger</h3>
-    <div class="table-wrap"><table><tr><th>Дата</th><th>Тип</th><th>USDT</th><th>RUB</th><th>Rate</th><th>Network / tx hash</th><th>Destination</th><th>Reason</th></tr>{% for l in row.ledger %}<tr><td>{{ l.created_at|dt_compact }}</td><td>{{ l.entry_type }}</td><td>{{ l.amount_usdt or '—' }}</td><td>{{ l.amount_rub or '—' }}</td><td>{{ l.rate_rub or '—' }}</td><td>{{ l.network or '—' }}<br><span class="cell-mono cell-wrap">{{ l.tx_hash or '—' }}</span></td><td><span class="cell-mono cell-wrap">{{ l.destination_address or '—' }}</span></td><td class="cell-wrap">{{ l.reason }}</td></tr>{% else %}<tr><td colspan="8">Ledger пуст</td></tr>{% endfor %}</table></div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Дата</th><th>Тип</th><th>USDT</th><th>RUB</th><th>Rate</th><th>Network / tx hash</th><th>Destination</th><th>Reason</th></tr>
+        {% for l in row.ledger %}
+        <tr>
+          <td><span class="text-date" title="{{ l.created_at|dt_full }}">{{ l.created_at|dt_compact }}</span></td>
+          <td>{{ l.entry_type }}</td>
+          <td>{{ l.amount_usdt or '—' }}</td>
+          <td>{{ l.amount_rub or '—' }}</td>
+          <td>{{ l.rate_rub or '—' }}</td>
+          <td>
+            <div class="cell-stack">
+              <span class="cell-label">Network</span>
+              <span class="cell-value">{{ l.network or '—' }}</span>
+              {% if l.tx_hash %}
+              <div class="rolling-copy-wrap">
+                <span class="rolling-copy-value cell-mono" title="{{ l.tx_hash }}">{{ l.tx_hash }}</span>
+                <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ l.tx_hash }}">Copy</button>
+              </div>
+              {% else %}
+              <span class="muted">—</span>
+              {% endif %}
+            </div>
+          </td>
+          <td>
+            {% if l.destination_address %}
+            <div class="rolling-copy-wrap">
+              <span class="rolling-copy-value cell-mono" title="{{ l.destination_address }}">{{ l.destination_address }}</span>
+              <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ l.destination_address }}">Copy</button>
+            </div>
+            {% else %}
+            <span class="muted">—</span>
+            {% endif %}
+          </td>
+          <td class="cell-wrap">{{ l.reason }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8">Ledger пуст</td></tr>
+        {% endfor %}
+      </table>
+    </div>
     <h3>Audit history</h3>
-    <div class="table-wrap"><table><tr><th>Дата</th><th>Action</th><th>Actor</th><th>Details</th></tr>{% for log in row.audit %}<tr><td>{{ log.created_at|dt_compact }}</td><td>{{ log.action }}</td><td>{{ audit_actor_names.get(log.actor_id|string, 'system') }}</td><td class="cell-wrap">{{ log.details }}</td></tr>{% else %}<tr><td colspan="4">Нет audit events</td></tr>{% endfor %}</table></div>
+    <div class="table-wrap">
+      <table>
+        <tr><th>Дата</th><th>Action</th><th>Actor</th><th>Details</th></tr>
+        {% for log in row.audit %}
+        <tr>
+          <td><span class="text-date" title="{{ log.created_at|dt_full }}">{{ log.created_at|dt_compact }}</span></td>
+          <td>{{ log.action }}</td>
+          <td>{{ audit_actor_names.get(log.actor_id|string, 'system') }}</td>
+          <td class="cell-wrap">
+            {% if log.details %}
+            <span class="rolling-details-preview" title="{{ log.details }}">{{ log.details|truncate(100, True, '…') }}</span>
+            <button class="secondary details-button" type="button" data-open-rolling-details="rolling-audit-{{ rm.id }}-{{ loop.index0 }}">Подробнее</button>
+            <div id="rolling-audit-{{ rm.id }}-{{ loop.index0 }}" class="rolling-hidden" data-rolling-details>{{ log.details }}</div>
+            {% else %}
+            <span class="muted">—</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">Нет audit events</td></tr>
+        {% endfor %}
+      </table>
+    </div>
   </div>
-  {% else %}<div class="muted">Мерчантов нет.</div>{% endfor %}
+  {% else %}
+  <div class="muted">Мерчант отсутствует.</div>
+  {% endif %}
+  {% endfor %}
 
   {% elif s in ['Операторы','Трейдеры'] %}
   <div class="table-wrap"><table><tr><th>Email</th><th>Баланс</th><th>Доступно</th><th>Холд</th><th>Трафик</th><th>Активные</th><th>Конверсия</th><th>Статус</th><th></th></tr>
@@ -1383,15 +1526,15 @@ function closeModal(id){const e=document.getElementById(id); if(e)e.classList.re
 document.querySelectorAll('[data-modal-open]').forEach(b=>b.addEventListener('click',()=>openModal(b.dataset.modalOpen)));
 document.querySelectorAll('[data-modal-close]').forEach(b=>b.addEventListener('click',()=>closeModal(b.dataset.modalClose)));
 document.querySelectorAll('form[data-confirm]').forEach(f=>f.addEventListener('submit',e=>{if(!confirm(f.dataset.confirm)){e.preventDefault();}}));
-document.querySelectorAll('[data-copy-platform-wallet]').forEach(button=>button.addEventListener('click',async()=>{
-  const address=button.dataset.copyPlatformWallet||'';
-  if(!address){return;}
+async function copyValueToClipboard(rawValue, button){
+  const value=String(rawValue||'');
+  if(!value){return;}
   try{
-    await navigator.clipboard.writeText(address);
-    button.textContent='Скопировано';
+    await navigator.clipboard.writeText(value);
+    if(button){button.textContent='Скопировано';}
   }catch(error){
     const input=document.createElement('textarea');
-    input.value=address;
+    input.value=value;
     input.setAttribute('readonly','');
     input.style.position='fixed';
     input.style.opacity='0';
@@ -1399,9 +1542,21 @@ document.querySelectorAll('[data-copy-platform-wallet]').forEach(button=>button.
     input.select();
     document.execCommand('copy');
     input.remove();
-    button.textContent='Скопировано';
+    if(button){button.textContent='Скопировано';}
   }
-}));
+}
+document.querySelectorAll('[data-copy-platform-wallet]').forEach(button=>button.addEventListener('click',()=>copyValueToClipboard(button.dataset.copyPlatformWallet, button)));
+document.querySelectorAll('[data-copy-value]').forEach(button=>{
+  button.addEventListener('click',()=>copyValueToClipboard(button.dataset.copyValue, button));
+});
+document.querySelectorAll('[data-open-rolling-details]').forEach(button=>{
+  button.addEventListener('click',()=>{
+    const targetId=button.dataset.openRollingDetails||'';
+    const source=document.getElementById(targetId);
+    const value=source ? source.textContent || source.innerText || '' : '';
+    openTechnicalDetails(button.getAttribute('data-open-rolling-details-title') || 'Audit details', value);
+  });
+});
 document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('active');}));
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){document.querySelectorAll('.modal.active').forEach(m=>m.classList.remove('active'));}});
 if(SESSION_VIEW_TOKEN){
