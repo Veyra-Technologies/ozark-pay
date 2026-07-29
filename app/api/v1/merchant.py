@@ -235,11 +235,12 @@ async def _rolling_fields_for_deposit(db: AsyncSession, dep: Deposit) -> dict:
         )
     )).scalar_one_or_none()
     if not allocation:
-        return {'settlement_mode': 'postpaid', 'rolling': None}
+        return {'rolling_eligible': False, 'rolling': None}
+    rolling_eligible = allocation.eligibility_status == 'eligible'
     return {
-        'settlement_mode': 'rolling',
+        'rolling_eligible': rolling_eligible,
         'rolling': {
-            'merchant_net_usdt': str(allocation.merchant_net_usdt),
+            'merchant_payable_usdt': str(allocation.merchant_payable_usdt),
             'rolling_applied_usdt': str(allocation.rolling_applied_usdt),
             'rolling_applied_rub': str(allocation.rolling_applied_rub),
             'settle_credited_rub': str(allocation.settle_credited_rub),
@@ -254,6 +255,14 @@ async def _rolling_fields_for_deposit(db: AsyncSession, dep: Deposit) -> dict:
             ),
             'rapira_fetched_at': allocation.rapira_fetched_at.isoformat(),
             'rapira_freshness_basis': allocation.rapira_freshness_basis,
+            'eligibility_status': allocation.eligibility_status,
+            'eligibility_source': allocation.eligibility_source,
+            'eligible_transfer_sequence': allocation.eligible_transfer_sequence,
+            'rolling_eligible_at': (
+                allocation.rolling_eligible_at.isoformat()
+                if allocation.rolling_eligible_at
+                else None
+            ),
             'status': allocation.status,
         },
     }
@@ -301,8 +310,13 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
         await log_req(db, merchant, request, 409)
         await db.commit()
         raise merchant_error(409, code) from exc
+    deposit_created_at = datetime.now(timezone.utc)
     try:
-        rolling_quote = await rolling_quote_for_deposit_create(db, merchant.id)
+        rolling_quote = await rolling_quote_for_deposit_create(
+            db,
+            merchant.id,
+            created_at=deposit_created_at,
+        )
     except RollingRateUnavailable as exc:
         await audit(
             db,
@@ -344,7 +358,7 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
         await log_req(db,merchant,request,409); await db.commit()
         message = str(exc)
         raise merchant_error(409, _requisite_error_code(message), message)
-    dep=Deposit(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, amount=data.amount, currency=data.currency, method=data.method.value, status=DepositStatus.pending.value, requisites_id=selected_requisite.requisite.id, client_ip=ip, expires_at=new_deposit_expires_at(), metadata_json={**(data.metadata or {}), **selected_requisite.settlement_metadata(), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
+    dep=Deposit(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, amount=data.amount, currency=data.currency, method=data.method.value, status=DepositStatus.pending.value, requisites_id=selected_requisite.requisite.id, client_ip=ip, created_at=deposit_created_at, expires_at=new_deposit_expires_at(), metadata_json={**(data.metadata or {}), **selected_requisite.settlement_metadata(), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
     db.add(dep)
     try:
         await db.flush()
@@ -482,14 +496,14 @@ async def balance(request: Request, db: AsyncSession=Depends(get_db), merchant: 
     b=(await db.execute(select(Balance).where(Balance.merchant_id==merchant.id, Balance.currency=='RUB'))).scalar_one_or_none()
     finance = await rolling_overview(db, merchant.id)
     await log_req(db,merchant,request); await db.commit()
-    rolling_payload = finance['rolling']
-    if rolling_payload:
-        rolling_payload = {key: (str(value) if isinstance(value, Decimal) else value) for key, value in rolling_payload.items()}
+    rolling_payload = {
+        key: (str(value) if isinstance(value, Decimal) else value)
+        for key, value in finance.items()
+    }
     return {
         'available': str(b.available if b else Decimal('0.00')),
         'frozen': str(b.frozen if b else Decimal('0.00')),
         'currency': 'RUB',
-        'settlement_mode': finance['settlement_mode'],
         'rolling': rolling_payload,
     }
 

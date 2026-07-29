@@ -276,7 +276,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% else %}<p class="muted">Нет доступа.</p>{% endif %}
 
   {% elif s == 'TeamLead' %}
-  <div class="note">TeamLead получает отдельный расход платформы от gross успешного Deposit. Начисление не уменьшает Trader income, Merchant net, settle или Rolling recovery.</div>
+  <div class="note">TeamLead получает отдельный расход платформы от gross успешного Deposit. Начисление не уменьшает Trader income, сумму к выплате мерчанту, settle или Rolling recovery.</div>
   <div class="note">Для супер-админа: процент TeamLead может превысить маржу сделки, что приведет к warning в finance-monitoring.</div>
   {% if user.role == 'superadmin' %}
   <form method="post" action="{{ cabinet_base }}/teamlead/assignments" class="panel" data-confirm="Закрыть текущее назначение трейдера, если оно есть, и создать новую историческую запись?">{{ csrf_input(request) }}
@@ -387,6 +387,54 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   <div id="merchantModal{{ u.id }}" class="modal" {% if mc %}data-commission-modal="merchant:{{ mc.merchant_id }}"{% endif %}><div class="modalbox"><h2>{{ u.email }} <span class="badge">merchant</span></h2>
     <div class="grid"><div class="metric"><b>Название</b><p>{{ mc.name if mc else '—' }}</p></div><div class="metric"><b>Merchant ID</b><p class="cell-mono cell-ellipsis" title="{{ mc.merchant_id if mc else '—' }}">{{ mc.merchant_id if mc else '—' }}</p></div><div class="metric"><b>Статус</b><p>{{ 'active' if u.is_active and not u.is_locked else 'недоступен' }}</p></div><div class="metric"><b>Webhook</b><p class="cell-ellipsis" title="{{ mc.webhook_url if mc and mc.webhook_url else '—' }}">{{ mc.webhook_url if mc and mc.webhook_url else '—' }}</p></div></div>
     {% if mc and u.is_active and not u.is_locked %}{{ commission_tier_form('Комиссия мерчанта по чекам', 'merchant', mc.merchant_id, cabinet_base ~ '/merchants/' ~ mc.merchant_id ~ '/commission-tiers', commission_tiers_by_entity.get('merchant:' ~ mc.merchant_id, {})) }}{% else %}<div class="note">Комиссии доступны только для активного незаблокированного мерчанта.</div>{% endif %}
+    {% if mc and merchant_finance_rows.get(mc.merchant_id) %}
+    {% set finance = merchant_finance_rows.get(mc.merchant_id) %}
+    {% set fro = finance.overview %}
+    <div class="modal-section panel rolling-card">
+      <div class="rolling-header">
+        <div class="heading"><h3>Rolling</h3><div class="compact-note">Подтверждённый временный финансовый цикл поверх базового settle.</div></div>
+        <span class="status-pill {{ 'status-ok' if fro.status == 'active' else 'status-bad' if fro.status in ['disputed','suspended'] else 'status-neutral' }}">{{ fro.status }}</span>
+      </div>
+      <div class="rolling-metrics">
+        <div class="rolling-metric"><b>Settle available</b><span class="value">{{ finance.balance.available if finance.balance else '0.00' }} RUB</span></div>
+        <div class="rolling-metric"><b>Settle frozen</b><span class="value">{{ finance.balance.frozen if finance.balance else '0.00' }} RUB</span></div>
+        <div class="rolling-metric"><b>Confirmed principal</b><span class="value">{{ fro.principal }} USDT</span></div>
+        <div class="rolling-metric"><b>Recovered</b><span class="value">{{ fro.recovered }} USDT</span></div>
+        <div class="rolling-metric"><b>Outstanding</b><span class="value">{{ fro.outstanding }} USDT</span></div>
+        <div class="rolling-metric"><b>Pending / disputed</b><span class="value">{{ fro.pending_transfers }} / {{ fro.disputed_transfers }}</span></div>
+      </div>
+      {% if role == 'superadmin' %}
+      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ mc.merchant_id }}/transfers" class="panel rolling-form-card" data-confirm="Зарегистрировать отправленный Rolling transfer? Балансы изменятся только после подтверждения мерчантом.">{{ csrf_input(request) }}
+        <h3>Отправлен новый Rolling</h3>
+        <div class="row"><div><label>Amount, USDT</label><input name="amount_usdt" type="number" min="0.000001" step="0.000001" required></div><div><label>Network</label><input name="network" required maxlength="32" placeholder="TRC20"></div></div>
+        <label>Destination address</label><input name="destination_address" required maxlength="160" placeholder="USDT wallet">
+        <label>Tx hash</label><input name="tx_hash" required maxlength="160" placeholder="Transaction hash">
+        <label>Sent at (UTC)</label><input name="sent_at" type="datetime-local" required>
+        <label>Comment / reason</label><input name="comment" maxlength="500" placeholder="Основание отправки">
+        <label>Idempotency key</label><input name="idempotency_key" required maxlength="180" value="rolling-transfer:{{ mc.merchant_id }}:{{ range(100000,999999)|random }}">
+        <button class="primary" type="submit">Зарегистрировать отправку</button>
+      </form>
+      {% endif %}
+      <h3>Transfers history</h3>
+      <div class="table-wrap"><table><tr><th>#</th><th>Amount</th><th>Network / destination</th><th>Tx hash</th><th>Sent / confirmed</th><th>Status</th><th>Action</th></tr>
+      {% for transfer in finance.transfers %}
+      <tr>
+        <td>{{ transfer.sequence_no }}</td><td>{{ transfer.amount_usdt }} USDT</td>
+        <td><span class="badge">{{ transfer.network or 'legacy' }}</span><br><span class="cell-mono cell-ellipsis" title="{{ transfer.destination_address or '—' }}">{{ transfer.destination_address or '—' }}</span></td>
+        <td>{% if transfer.tx_hash %}<div class="rolling-copy-wrap"><span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash }}</span><button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}">Copy</button></div>{% else %}<span class="muted">legacy migration</span>{% endif %}</td>
+        <td>{{ transfer.sent_at|dt_compact }}{% if transfer.confirmed_at %}<br>{{ transfer.confirmed_at|dt_compact }}{% endif %}</td>
+        <td>{{ transfer.status }}{% if transfer.dispute_reason %}<br><span class="compact-note">{{ transfer.dispute_reason }}</span>{% endif %}</td>
+        <td>{% if role == 'superadmin' and transfer.status in ['pending_confirmation','disputed'] %}<form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/cancel" data-confirm="Отменить неподтверждённый transfer?">{{ csrf_input(request) }}<input name="reason" required maxlength="500" placeholder="Причина отмены"><button class="dangerbtn btn-small" type="submit">Cancel</button></form>{% else %}<span class="muted">—</span>{% endif %}</td>
+      </tr>
+      {% else %}<tr><td colspan="7">Rolling transfers отсутствуют</td></tr>{% endfor %}
+      </table></div>
+      <h3>Recovery history</h3>
+      <div class="table-wrap"><table><tr><th>Дата</th><th>Deposit</th><th>Transfer</th><th>Type</th><th>USDT</th><th>RUB</th><th>Rate</th></tr>
+      {% for item in finance.consumptions %}<tr><td>{{ item.created_at|dt_compact }}</td><td><span class="cell-mono cell-ellipsis" title="{{ item.deposit_id }}">{{ item.deposit_id }}</span></td><td><span class="cell-mono cell-ellipsis" title="{{ item.rolling_transfer_id }}">{{ item.rolling_transfer_id }}</span></td><td>{{ item.entry_type }}</td><td>{{ item.amount_usdt }}</td><td>{{ item.amount_rub }}</td><td>{{ item.rate_rub }}</td></tr>{% else %}<tr><td colspan="7">Погашений пока нет</td></tr>{% endfor %}
+      </table></div>
+      {% if finance.reconciliation %}<div class="note">Reconciliation: <b>{{ 'OK' if finance.reconciliation.ok else 'MISMATCH' }}</b></div>{% endif %}
+    </div>
+    {% endif %}
     <h3>API keys</h3>
     {% if mc and 'production' not in mc['active_key_modes'] %}<div class="note">У мерчанта нет активного Production key. Интеграция не готова к боевому трафику.</div>{% endif %}
     <div class="table-wrap"><table><tr><th>API key</th><th>Secret</th><th>Mode</th><th>Status</th><th>Created at</th><th>Last used at</th><th>Actions</th></tr>
@@ -404,11 +452,11 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </div></div>
   {% endfor %}{% endif %}
   {% elif s == 'Rolling' %}
-  <div class="note">Rolling — отдельный контур баланса мерчанта перед Ozark. Карточка показывает только operational summary и immutable журналы (без перезаписи).</div>
+  <div class="note">Сводный dashboard подтверждённых Rolling-циклов. Регистрация переводов и история конкретного мерчанта находятся в его профиле.</div>
   {% for row in rolling_admin_rows %}
-  {% set rm = row.merchant %}{% set ro = row.overview.get('rolling') %}{% set mode = row.overview.get('settlement_mode', 'postpaid') %}
+  {% set rm = row.merchant %}{% set ro = row.overview %}
   {% if rm %}
-  {% set status = ro.get('status','—') if ro else '—' %}
+  {% set status = ro.get('status','absent') %}
   <div class="panel rolling-card">
     <div class="rolling-header">
       <div class="heading">
@@ -419,55 +467,21 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
         </div>
       </div>
       <div class="rolling-status">
-        <span class="badge">{{ mode }}</span>
         <span class="status-pill {{ 'status-ok' if status == 'active' else 'status-bad' if status == 'suspended' else 'status-neutral' if status != '—' else '' }}">{{ status }}</span>
       </div>
     </div>
     <div class="rolling-metrics">
-      <div class="rolling-metric"><b>Principal</b><span class="value">{{ ro.get('principal_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
-      <div class="rolling-metric"><b>Recovered</b><span class="value">{{ ro.get('recovered_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
-      <div class="rolling-metric"><b>Outstanding</b><span class="value">{{ ro.get('outstanding_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
-      <div class="rolling-metric"><b>Pending exposure</b><span class="value">{{ ro.get('pending_exposure_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
-      <div class="rolling-metric"><b>Covered pending</b><span class="value">{{ ro.get('covered_pending_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
-      <div class="rolling-metric"><b>Uncovered pending</b><span class="value">{{ ro.get('uncovered_pending_usdt','0.000000') if ro else '0.000000' }} USDT</span></div>
-      <div class="rolling-metric"><b>Settle overflow</b><span class="value">{{ row.settle_overflow_rub }} RUB</span></div>
+      <div class="rolling-metric"><b>Confirmed outstanding</b><span class="value">{{ ro.get('outstanding','0.000000') }} USDT</span></div>
+      <div class="rolling-metric"><b>Pending confirmation</b><span class="value">{{ ro.get('pending_transfers',0) }}</span></div>
+      <div class="rolling-metric"><b>Disputed</b><span class="value">{{ ro.get('disputed_transfers',0) }}</span></div>
+      <div class="rolling-metric"><b>Recovered</b><span class="value">{{ ro.get('recovered','0.000000') }} USDT</span></div>
+      <div class="rolling-metric"><b>Settle balance</b><span class="value">{{ row.settle_balance_rub }} RUB</span></div>
       <div class="rolling-metric"><b>Status</b><span class="value">{{ status }}</span></div>
     </div>
     <div class="rolling-actions">
-      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/mode" class="panel rolling-form-card" data-confirm="Изменить settlement mode мерчанта?">{{ csrf_input(request) }}
-        <h3>Settlement mode</h3>
-        <label>Mode</label>
-        <select name="settlement_mode"><option value="postpaid" {% if mode == 'postpaid' %}selected{% endif %}>postpaid</option><option value="rolling" {% if mode == 'rolling' %}selected{% endif %}>rolling</option></select>
-        <label>Reason</label>
-        <input name="reason" required maxlength="500" placeholder="Reason for change">
-        <button class="primary" type="submit">Save mode</button>
-      </form>
-      {% if mode == 'rolling' %}
-      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/funding" class="panel rolling-form-card" data-confirm="Создать funding/top-up? Повтор с тем же network + tx hash будет идемпотентным.">{{ csrf_input(request) }}
-        <h3>Funding (manual top-up)</h3>
-        <label>Amount, USDT</label>
-        <input name="amount_usdt" type="number" min="0.000001" step="0.000001" required>
-        <label>Network</label>
-        <input name="network" required maxlength="32" placeholder="TRC20">
-        <label>Destination address</label>
-        <input name="destination_address" required maxlength="160" placeholder="USDT wallet">
-        <label>Tx hash</label>
-        <input name="tx_hash" required maxlength="160" placeholder="transaction hash">
-        <label>Funded at (UTC)</label>
-        <input name="funded_at" type="datetime-local" required>
-        <label>Reason / comment</label>
-        <input name="reason" required maxlength="500" placeholder="Reason for top-up">
-        <button class="primary" type="submit">Add funding</button>
-      </form>
-      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ rm.id }}/suspension" class="panel rolling-form-card" data-confirm="Изменить статус Rolling traffic?">{{ csrf_input(request) }}
-        <h3>Traffic state</h3>
-        <label>Reason</label>
-        <input name="reason" required maxlength="500" placeholder="Reason for toggle">
-        <input type="hidden" name="suspended" value="{{ 'false' if status == 'suspended' else 'true' }}">
-        <button class="{{ 'primary' if status == 'suspended' else 'dangerbtn' }}" type="submit">{{ 'Resume' if status == 'suspended' else 'Suspend' }}</button>
-      </form>
-      {% endif %}
+      <button class="secondary" type="button" data-modal-open="merchantModal{{ rm.owner_id }}">Открыть профиль мерчанта</button>
     </div>
+    {% if false %}
     <h3>Reconciliation</h3>
     {% if row.reconciliation %}
     <div class="rolling-reconcile">
@@ -486,13 +500,13 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <h3>Allocations</h3>
     <div class="table-wrap">
       <table>
-        <tr><th>Дата</th><th>Deposit</th><th>Net RUB</th><th>Net USDT</th><th>Rate ask</th><th>Applied</th><th>Overflow</th><th>Status</th></tr>
+        <tr><th>Дата</th><th>Deposit</th><th>К выплате, RUB</th><th>Эквивалент, USDT</th><th>Rate ask</th><th>Applied</th><th>Overflow</th><th>Status</th></tr>
         {% for a in row.allocations %}
         <tr>
           <td><span class="text-date" title="{{ a.created_at|dt_full }}">{{ a.created_at|dt_compact }}</span></td>
           <td><span class="cell-mono cell-ellipsis" title="{{ a.deposit_id }}">{{ a.deposit_id }}</span></td>
-          <td>{{ a.merchant_net_rub }}</td>
-          <td>{{ a.merchant_net_usdt }}</td>
+          <td>{{ a.merchant_payable_rub }}</td>
+          <td>{{ a.merchant_payable_usdt }}</td>
           <td>{{ a.rapira_rate_rub }} · {{ a.rapira_rate_source }} {{ a.rapira_rate_side }}</td>
           <td><span class="cell-small">{{ a.rolling_applied_usdt }} USDT / {{ a.rolling_applied_rub }} RUB</span></td>
           <td>{{ a.settle_credited_rub }} RUB</td>
@@ -569,6 +583,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
         {% endfor %}
       </table>
     </div>
+    {% endif %}
   </div>
   {% else %}
   <div class="muted">Мерчант отсутствует.</div>
@@ -701,7 +716,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% elif s == 'Статистика' and role == 'merchant' %}
   <div class="detail-grid">
     <div class="detail-card"><b>Общий оборот</b>{{ merchant_stats.get('total_turnover','0.00') }} RUB</div>
-    <div class="detail-card"><b>Net мерчанта</b>{{ merchant_stats.get('merchant_net','0.00') }} RUB</div>
+    <div class="detail-card"><b>К выплате мерчанту</b>{{ merchant_stats.get('merchant_payable','0.00') }} RUB</div>
     <div class="detail-card"><b>Комиссия площадки</b>{{ merchant_stats.get('merchant_fee','0.00') }} RUB</div>
     <div class="detail-card"><b>Доход площадки</b>{{ merchant_stats.get('platform_income','0.00') }} RUB</div>
     <div class="detail-card"><b>Успешные сделки</b>{{ merchant_stats.get('successful_count',0) }}</div>
@@ -1003,25 +1018,46 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   <h3>SETTLE</h3>
   <div class="grid"><div class="metric"><b>Доступно</b><p>{{ balance.available if balance else '0.00' }} RUB</p></div><div class="metric"><b>Холд</b><p>{{ balance.frozen if balance else '0.00' }} RUB</p></div><div class="metric"><b>В ожидании settle</b><p>{{ settlement_quote.get('pending_rub','0.00') }} RUB</p></div><div class="metric"><b>Можно запросить</b><p>{{ settlement_quote.get('available_rub','0.00') }} RUB</p></div></div>
   <h3>ROLLING</h3>
-  {% set mro = merchant_rolling_overview.get('rolling') %}
-  {% if mro %}
-  <div class="grid">
-    <div class="metric"><b>Выдано</b><p>{{ mro.get('principal_usdt','0.000000') }} USDT</p></div>
-    <div class="metric"><b>Погашено</b><p>{{ mro.get('recovered_usdt','0.000000') }} USDT</p></div>
-    <div class="metric"><b>Осталось</b><p>{{ mro.get('outstanding_usdt','0.000000') }} USDT</p></div>
-    <div class="metric"><b>Pending exposure</b><p>{{ mro.get('pending_exposure_usdt','0.000000') }} USDT</p></div>
-    <div class="metric"><b>Покрыто Rolling</b><p>{{ mro.get('covered_pending_usdt','0.000000') }} USDT</p></div>
-    <div class="metric"><b>Потенциально сверх Rolling</b><p>{{ mro.get('uncovered_pending_usdt','0.000000') }} USDT</p></div>
-    <div class="metric"><b>Статус</b><p>{{ mro.get('status','—') }}</p></div>
+  {% set mro = merchant_rolling_overview %}
+  {% set pending_rolling_transfers = merchant_rolling_transfers|selectattr('status','equalto','pending_confirmation')|list %}
+  {% if pending_rolling_transfers %}
+  <div class="rolling-card">
+    {% for transfer in pending_rolling_transfers %}
+    <div class="panel rolling-form-card">
+      <div class="section-head"><h3>Входящий Rolling transfer #{{ transfer.sequence_no }}</h3><span class="status-pill status-wait">ожидает подтверждения</span></div>
+      <div class="detail-grid">
+        <div class="detail-card"><b>Amount</b>{{ transfer.amount_usdt }} USDT</div>
+        <div class="detail-card"><b>Network</b>{{ transfer.network }}</div>
+        <div class="detail-card"><b>Sent at</b>{{ transfer.sent_at|dt_full }}</div>
+        <div class="detail-card"><b>Destination</b><div class="rolling-copy-wrap"><span class="rolling-copy-value cell-mono" title="{{ transfer.destination_address }}">{{ transfer.destination_address }}</span><button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.destination_address }}">Copy</button></div></div>
+        <div class="detail-card"><b>Tx hash</b><div class="rolling-copy-wrap"><span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash }}</span><button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}">Copy</button></div></div>
+      </div>
+      {% if transfer.comment %}<div class="compact-note">{{ transfer.comment }}</div>{% endif %}
+      <div class="actions-row">
+        <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/confirm" data-confirm="Подтвердить фактическое получение {{ transfer.amount_usdt }} USDT?">{{ csrf_input(request) }}<button class="primary" type="submit">Подтвердить получение</button></form>
+        <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/dispute" data-confirm="Сообщить Superadmin о проблеме с переводом?">{{ csrf_input(request) }}<input name="reason" required maxlength="500" placeholder="Обязательно укажите причину"><button class="dangerbtn" type="submit">Сообщить о проблеме</button></form>
+      </div>
+    </div>
+    {% endfor %}
   </div>
-  <div class="note">Исчерпание Rolling не блокирует трафик. После полного погашения Rolling последующий успешный merchant net начисляется в settle.</div>
-  <h3>Funding / top-up и погашения</h3>
-  <div class="table-wrap"><table><tr><th>Дата</th><th>Тип</th><th>USDT</th><th>RUB</th><th>Курс</th><th>Network / tx hash</th></tr>{% for l in merchant_rolling_ledger %}<tr><td>{{ l.created_at|dt_compact }}</td><td>{{ l.entry_type }}</td><td>{{ l.amount_usdt or '—' }}</td><td>{{ l.amount_rub or '—' }}</td><td>{{ l.rate_rub or '—' }}</td><td>{{ l.network or '—' }}<br><span class="cell-mono cell-wrap">{{ l.tx_hash or '—' }}</span></td></tr>{% else %}<tr><td colspan="6">История Rolling пуста</td></tr>{% endfor %}</table></div>
-  <h3>Операции Rolling</h3>
-  <div class="table-wrap"><table><tr><th>Дата</th><th>Deposit</th><th>Gross</th><th>Commission snapshot</th><th>Rapira ask</th><th>Rolling applied</th><th>Settle overflow</th><th>Status</th></tr>{% for a in merchant_rolling_allocations %}<tr><td>{{ a.created_at|dt_compact }}</td><td><span class="cell-mono">{{ a.deposit_id }}</span></td><td>{{ a.gross_rub }} RUB</td><td>{{ a.merchant_fee_percent_snapshot }}% / {{ a.merchant_fee_rub }} RUB</td><td>{{ a.rapira_rate_rub }} RUB · {{ a.rapira_rate_source }} {{ a.rapira_rate_side }}</td><td>{{ a.rolling_applied_usdt }} USDT / {{ a.rolling_applied_rub }} RUB</td><td>{{ a.settle_credited_rub }} RUB</td><td>{{ a.status }}</td></tr>{% else %}<tr><td colspan="8">Операций Rolling нет</td></tr>{% endfor %}</table></div>
-  {% else %}
-  <div class="note">Финансовый режим: postpaid. Успешный merchant net полностью начисляется в обычный RUB settle-баланс.</div>
   {% endif %}
+  {% if mro.has_confirmed_rolling %}
+  <div class="grid">
+    <div class="metric"><b>Confirmed principal</b><p>{{ mro.principal }} USDT</p></div>
+    <div class="metric"><b>Recovered</b><p>{{ mro.recovered }} USDT</p></div>
+    <div class="metric"><b>Outstanding</b><p>{{ mro.outstanding }} USDT</p></div>
+    <div class="metric"><b>Pending exposure</b><p>{{ mro.pending_exposure }} USDT</p></div>
+    <div class="metric"><b>Статус</b><p>{{ mro.status }}</p></div>
+  </div>
+  {% if mro.status == 'exhausted' %}<div class="note">Rolling погашен. Новые суммы накапливаются в settle.</div>{% endif %}
+  <h3>Подтверждённые transfers</h3>
+  <div class="table-wrap"><table><tr><th>#</th><th>Amount</th><th>Recovered</th><th>Remaining</th><th>Network</th><th>Tx hash</th><th>Confirmed</th></tr>{% for transfer in merchant_rolling_transfers if transfer.status == 'confirmed' %}<tr><td>{{ transfer.sequence_no }}</td><td>{{ transfer.amount_usdt }}</td><td>{{ transfer.recovered_usdt }}</td><td>{{ transfer.remaining_usdt }}</td><td>{{ transfer.network or 'legacy' }}</td><td>{% if transfer.tx_hash %}<div class="rolling-copy-wrap"><span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash }}</span><button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}">Copy</button></div>{% else %}<span class="muted">legacy migration</span>{% endif %}</td><td>{{ transfer.confirmed_at|dt_compact }}</td></tr>{% else %}<tr><td colspan="7">Подтверждённых transfers пока нет</td></tr>{% endfor %}</table></div>
+  <h3>История погашений</h3>
+  <div class="table-wrap"><table><tr><th>Дата</th><th>Операция</th><th>USDT</th><th>RUB</th><th>Курс</th></tr>{% for item in merchant_rolling_consumptions %}<tr><td>{{ item.created_at|dt_compact }}</td><td>{{ item.entry_type }}</td><td>{{ item.amount_usdt }}</td><td>{{ item.amount_rub }}</td><td>{{ item.rate_rub }}</td></tr>{% else %}<tr><td colspan="5">Погашений пока нет</td></tr>{% endfor %}</table></div>
+  {% elif not pending_rolling_transfers %}
+  <div class="rolling-empty">Активного Rolling сейчас нет. Сумма к выплате накапливается в settle.</div>
+  {% endif %}
+  {% if mro.disputed_transfers %}<div class="note">Есть оспоренные Rolling transfers: {{ mro.disputed_transfers }}. Superadmin уведомлён.</div>{% endif %}
   <div class="panel settle-panel"><div class="section-head"><h3>Settle</h3><button class="primary" type="button" data-modal-open="settlementRequestModal">Запросить settle</button></div><div class="detail-grid"><div class="detail-card"><b>Курс</b><span data-rapira-rate>{{ settlement_quote.get('rate_rub','100.0000') }}</span> RUB/USDT · <span data-rapira-source>{{ settlement_quote.get('rate_source','manual') }}</span><div class="compact-note">обновляется онлайн с Rapira · <span data-rapira-updated>сейчас</span></div></div><div class="detail-card"><b>Комиссия сети</b><span data-settlement-fee-usdt>{{ settlement_quote.get('fee_usdt','5.00') }}</span> USDT<div class="compact-note">≈ <span data-settlement-fee-rub>{{ settlement_quote.get('fee_rub','0.00') }}</span> RUB</div></div><div class="detail-card"><b>Максимум</b><span data-settlement-max-usdt>{{ settlement_quote.get('max_request_usdt','0.00') }}</span> USDT</div></div></div>
   <div id="settlementRequestModal" class="modal"><div class="modalbox"><h2>Запросить settle</h2><form method="post" action="{{ cabinet_base }}/settlements/request" data-confirm="Отправить запрос на settle?">{{ csrf_input(request) }}<div class="row"><div><label>Сумма, USDT</label><input name="amount_usdt" type="number" min="0.01" step="0.01" max="{{ settlement_quote.get('max_request_usdt','0.00') }}" data-settlement-max-input required></div><div><label>TRC20 адрес</label><input name="trc20_address" placeholder="T..." minlength="34" maxlength="34" required></div></div><div class="modal-actions"><button class="secondary" type="button" data-modal-close="settlementRequestModal">Отмена</button><button class="primary" type="submit">Отправить запрос</button></div></form></div></div>
   <h3>История settle</h3>

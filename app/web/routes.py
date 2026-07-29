@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.db.session import get_db
-from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
+from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, MerchantRollingTransfer, MerchantRollingTransferConsumption, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
@@ -86,12 +86,14 @@ from app.services.fee_tiers import (
 from app.services.platform_income import platform_income_dashboard
 from app.services.rolling import (
     RollingError,
-    get_finance_profile,
+    cancel_rolling_transfer,
+    confirm_rolling_transfer,
+    dispute_rolling_transfer,
     get_rolling_account,
+    list_rolling_transfers,
     reconcile_rolling_account,
-    register_funding,
+    register_rolling_transfer,
     rolling_overview,
-    set_merchant_settlement_mode,
     set_rolling_suspension,
 )
 from app.services.teamlead import (
@@ -2700,69 +2702,17 @@ async def cabinet_antiscam_trader_withdrawals(request: Request, trader_id: str, 
     return _redirect('Настройка вывода трейдера сохранена', 'antiscam')
 
 
-@router.post('/cabinet/rolling/merchants/{merchant_id}/mode')
-async def cabinet_rolling_set_mode(
-    merchant_id: str,
-    request: Request,
-    settlement_mode: str = Form(...),
-    reason: str = Form(...),
-    db: AsyncSession = Depends(get_db),
-):
-    actor = await _require_superadmin_web(request, db)
-    if isinstance(actor, RedirectResponse):
-        return actor
-    reason = reason.strip()
-    if not reason:
-        raise HTTPException(422, 'Reason is required')
-    try:
-        merchant_uuid = uuid.UUID(merchant_id)
-    except ValueError:
-        raise HTTPException(404, 'Merchant not found')
-    merchant = (await db.execute(
-        select(Merchant).where(Merchant.id == merchant_uuid)
-    )).scalar_one_or_none()
-    if not merchant:
-        raise HTTPException(404, 'Merchant not found')
-    try:
-        profile, account = await set_merchant_settlement_mode(
-            db,
-            merchant_id=merchant.id,
-            mode=settlement_mode,
-            actor_id=actor.id,
-        )
-    except RollingError as exc:
-        await db.rollback()
-        return _redirect(str(exc), 'rolling')
-    await audit(
-        db,
-        'merchant_settlement_mode_changed',
-        'merchant',
-        actor.id,
-        merchant.id,
-        client_ip(request),
-        {
-            'settlement_mode': profile.settlement_mode,
-            'rolling_account_status': account.status if account else None,
-            'reason': reason[:500],
-        },
-    )
-    await db.commit()
-    return _redirect(
-        f'Режим {merchant.name} изменён на {profile.settlement_mode}',
-        'rolling',
-    )
-
-
-@router.post('/cabinet/rolling/merchants/{merchant_id}/funding')
-async def cabinet_rolling_funding(
+@router.post('/cabinet/rolling/merchants/{merchant_id}/transfers')
+async def cabinet_rolling_register_transfer(
     merchant_id: str,
     request: Request,
     amount_usdt: str = Form(...),
     network: str = Form(...),
     destination_address: str = Form(...),
     tx_hash: str = Form(...),
-    funded_at: str = Form(...),
-    reason: str = Form(...),
+    sent_at: str = Form(...),
+    comment: str = Form(''),
+    idempotency_key: str = Form(...),
     db: AsyncSession = Depends(get_db),
 ):
     actor = await _require_superadmin_web(request, db)
@@ -2771,9 +2721,9 @@ async def cabinet_rolling_funding(
     try:
         merchant_uuid = uuid.UUID(merchant_id)
         amount = Decimal(amount_usdt)
-        funded = datetime.fromisoformat(funded_at.replace('Z', '+00:00'))
+        sent = datetime.fromisoformat(sent_at.replace('Z', '+00:00'))
     except (ValueError, InvalidOperation):
-        raise HTTPException(422, 'Invalid merchant, amount, or funded_at')
+        raise HTTPException(422, 'Invalid merchant, amount, or sent_at')
     kwargs = {
         'merchant_id': merchant_uuid,
         'actor_id': actor.id,
@@ -2781,40 +2731,146 @@ async def cabinet_rolling_funding(
         'network': network,
         'destination_address': destination_address,
         'tx_hash': tx_hash,
-        'funded_at': funded,
-        'reason': reason,
+        'sent_at': sent,
+        'comment': comment,
+        'idempotency_key': idempotency_key,
     }
     try:
-        entry = await register_funding(db, **kwargs)
+        transfer = await register_rolling_transfer(db, **kwargs)
     except IntegrityError:
         await db.rollback()
         try:
-            entry = await register_funding(db, **kwargs)
-        except (RollingError, IntegrityError) as exc:
+            transfer = await register_rolling_transfer(db, **kwargs)
+        except RollingError as exc:
             await db.rollback()
             return _redirect(str(exc), 'rolling')
+        except IntegrityError:
+            await db.rollback()
+            return _redirect(
+                'Transfer с такими network и tx hash уже зарегистрирован',
+                'rolling',
+            )
     except RollingError as exc:
         await db.rollback()
         return _redirect(str(exc), 'rolling')
-    await audit(
-        db,
-        'rolling_funding_recorded',
-        'merchant',
-        actor.id,
-        merchant_uuid,
-        client_ip(request),
-        {
-            'entry_id': str(entry.id),
-            'entry_type': entry.entry_type,
-            'amount_usdt': str(entry.amount_usdt),
-            'network': entry.network,
-            'tx_hash': entry.tx_hash,
-            'reason': reason[:500],
-        },
-    )
     await db.commit()
     return _redirect(
-        f'Rolling {entry.entry_type} сохранён: {entry.amount_usdt} USDT',
+        (
+            f'Rolling transfer #{transfer.sequence_no} зарегистрирован: '
+            f'{transfer.amount_usdt} USDT; ожидается подтверждение мерчанта'
+        ),
+        'rolling',
+    )
+
+
+async def _merchant_for_rolling_action(
+    request: Request,
+    db: AsyncSession,
+) -> tuple[User, Merchant] | RedirectResponse:
+    user = await get_current_web_user(request, db)
+    if not user:
+        return RedirectResponse('/login', status_code=303)
+    if user.role != Role.merchant.value:
+        return _redirect('Действие доступно только мерчанту', 'Пополнения')
+    if user.twofa_enabled and not request.scope.get('session', {}).get(
+        'twofa_verified'
+    ):
+        return RedirectResponse('/merchant/login?error=2fa_required', status_code=303)
+    merchant = (
+        await db.execute(
+            select(Merchant).where(
+                Merchant.owner_id == user.id,
+                Merchant.is_archived.is_(False),
+            )
+        )
+    ).scalar_one_or_none()
+    if not merchant:
+        return _redirect('Merchant не найден', 'Пополнения')
+    return user, merchant
+
+
+@router.post('/cabinet/rolling/transfers/{transfer_id}/confirm')
+async def cabinet_rolling_confirm_transfer(
+    transfer_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    identity = await _merchant_for_rolling_action(request, db)
+    if isinstance(identity, RedirectResponse):
+        return identity
+    user, merchant = identity
+    try:
+        transfer_uuid = uuid.UUID(transfer_id)
+        transfer = await confirm_rolling_transfer(
+            db,
+            transfer_id=transfer_uuid,
+            merchant_id=merchant.id,
+            actor_id=user.id,
+        )
+    except (ValueError, RollingError) as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'Пополнения')
+    await db.commit()
+    return _redirect(
+        f'Получение Rolling transfer #{transfer.sequence_no} подтверждено',
+        'Пополнения',
+    )
+
+
+@router.post('/cabinet/rolling/transfers/{transfer_id}/dispute')
+async def cabinet_rolling_dispute_transfer(
+    transfer_id: str,
+    request: Request,
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    identity = await _merchant_for_rolling_action(request, db)
+    if isinstance(identity, RedirectResponse):
+        return identity
+    user, merchant = identity
+    try:
+        transfer_uuid = uuid.UUID(transfer_id)
+        transfer = await dispute_rolling_transfer(
+            db,
+            transfer_id=transfer_uuid,
+            merchant_id=merchant.id,
+            actor_id=user.id,
+            reason=reason,
+        )
+    except (ValueError, RollingError) as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'Пополнения')
+    await db.commit()
+    return _redirect(
+        f'Проблема по Rolling transfer #{transfer.sequence_no} зарегистрирована',
+        'Пополнения',
+    )
+
+
+@router.post('/cabinet/rolling/transfers/{transfer_id}/cancel')
+async def cabinet_rolling_cancel_transfer(
+    transfer_id: str,
+    request: Request,
+    reason: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        transfer_uuid = uuid.UUID(transfer_id)
+        transfer = await cancel_rolling_transfer(
+            db,
+            transfer_id=transfer_uuid,
+            actor_id=actor.id,
+            reason=reason,
+        )
+    except (ValueError, RollingError) as exc:
+        await db.rollback()
+        return _redirect(str(exc), 'rolling')
+    await db.commit()
+    return _redirect(
+        f'Rolling transfer #{transfer.sequence_no} отменён',
         'rolling',
     )
 
@@ -3904,10 +3960,22 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     income_trader_options = []
     income_aggregator_options = []
     income_dashboard = {}
-    merchant_rolling_overview = {'settlement_mode': 'postpaid', 'rolling': None}
+    merchant_rolling_overview = {
+        'has_confirmed_rolling': False,
+        'status': 'absent',
+        'principal': Decimal('0.000000'),
+        'recovered': Decimal('0.000000'),
+        'outstanding': Decimal('0.000000'),
+        'pending_transfers': 0,
+        'disputed_transfers': 0,
+        'pending_exposure': Decimal('0.000000'),
+    }
     merchant_rolling_allocations = []
     merchant_rolling_ledger = []
+    merchant_rolling_transfers = []
+    merchant_rolling_consumptions = []
     rolling_admin_rows = []
+    merchant_finance_rows = {}
     teamlead_admin_rows = []
     platform_wallet = None
     platform_wallet_history = []
@@ -4033,6 +4101,21 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 .order_by(MerchantRollingLedgerEntry.created_at.desc())
                 .limit(200)
             )).scalars().all()
+            merchant_rolling_transfers = await list_rolling_transfers(
+                db,
+                merchant.id,
+            )
+            merchant_rolling_consumptions = (await db.execute(
+                select(MerchantRollingTransferConsumption)
+                .where(
+                    MerchantRollingTransferConsumption.merchant_id
+                    == merchant.id
+                )
+                .order_by(
+                    MerchantRollingTransferConsumption.created_at.desc()
+                )
+                .limit(300)
+            )).scalars().all()
 
     users = (await db.execute(select(User).where(User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value] else []
     merchant_users = [u for u in users if u.role == Role.merchant.value]
@@ -4150,6 +4233,49 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 "keys": merchant_keys,
                 "active_key_modes": {k.mode for k in merchant_keys if k.is_active},
             }
+            if user.role == Role.superadmin.value:
+                finance_balance = (await db.execute(
+                    select(Balance).where(
+                        Balance.merchant_id == m.id,
+                        Balance.currency == 'RUB',
+                    )
+                )).scalar_one_or_none()
+                finance_account = await get_rolling_account(db, m.id)
+                finance_transfers = await list_rolling_transfers(db, m.id)
+                finance_allocations = (await db.execute(
+                    select(MerchantRollingAllocation)
+                    .where(MerchantRollingAllocation.merchant_id == m.id)
+                    .order_by(MerchantRollingAllocation.created_at.desc())
+                    .limit(100)
+                )).scalars().all()
+                finance_ledger = (await db.execute(
+                    select(MerchantRollingLedgerEntry)
+                    .where(MerchantRollingLedgerEntry.merchant_id == m.id)
+                    .order_by(MerchantRollingLedgerEntry.created_at.desc())
+                    .limit(200)
+                )).scalars().all()
+                finance_consumptions = (await db.execute(
+                    select(MerchantRollingTransferConsumption)
+                    .where(
+                        MerchantRollingTransferConsumption.merchant_id
+                        == m.id
+                    )
+                    .order_by(
+                        MerchantRollingTransferConsumption.created_at.desc()
+                    )
+                    .limit(300)
+                )).scalars().all()
+                merchant_finance_rows[str(m.id)] = {
+                    'merchant': m,
+                    'balance': finance_balance,
+                    'account': finance_account,
+                    'overview': await rolling_overview(db, m.id),
+                    'transfers': finance_transfers,
+                    'allocations': finance_allocations,
+                    'ledger': finance_ledger,
+                    'consumptions': finance_consumptions,
+                    'reconciliation': await reconcile_rolling_account(db, m.id),
+                }
 
     if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
         merchant_settlements = (await db.execute(select(MerchantSettlement).order_by(MerchantSettlement.created_at.desc()).limit(300))).scalars().all()
@@ -4375,7 +4501,13 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             'remaining_seconds': remaining_seconds,
             'is_active': dep.status in DEPOSIT_ACTIVE_FOR_TRADER,
             'merchant_fee': (dep.metadata_json or {}).get('merchant_fee_amount', ''),
-            'merchant_net': (dep.metadata_json or {}).get('merchant_net_amount', ''),
+            'merchant_payable': (
+                (dep.metadata_json or {}).get('merchant_payable_amount')
+                or (dep.metadata_json or {}).get(
+                    'merchant_' 'net_amount',
+                    '',
+                )
+            ),
             'platform_income': (dep.metadata_json or {}).get('platform_income_amount', ''),
         }
     if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
@@ -4414,30 +4546,17 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         }
     if user.role == Role.superadmin.value:
         for rolling_merchant in merchants:
-            profile = await get_finance_profile(db, rolling_merchant.id)
-            account = await get_rolling_account(db, rolling_merchant.id)
-            overview = await rolling_overview(db, rolling_merchant.id)
-            allocations = (await db.execute(
-                select(MerchantRollingAllocation)
-                .where(MerchantRollingAllocation.merchant_id == rolling_merchant.id)
-                .order_by(MerchantRollingAllocation.created_at.desc())
-                .limit(100)
-            )).scalars().all()
-            ledger_rows = (await db.execute(
-                select(MerchantRollingLedgerEntry)
-                .where(MerchantRollingLedgerEntry.merchant_id == rolling_merchant.id)
-                .order_by(MerchantRollingLedgerEntry.created_at.desc())
-                .limit(200)
-            )).scalars().all()
-            reconciliation = await reconcile_rolling_account(
-                db,
-                rolling_merchant.id,
-            )
+            finance_row = merchant_finance_rows[str(rolling_merchant.id)]
+            account = finance_row['account']
+            overview = finance_row['overview']
+            allocations = finance_row['allocations']
+            ledger_rows = finance_row['ledger']
+            reconciliation = finance_row['reconciliation']
             rolling_admin_rows.append({
                 'merchant': rolling_merchant,
-                'profile': profile,
                 'account': account,
                 'overview': overview,
+                'transfers': finance_row['transfers'],
                 'allocations': allocations,
                 'ledger': ledger_rows,
                 'settle_overflow_rub': sum(
@@ -4447,6 +4566,11 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                         if row.entry_type == 'settle_overflow'
                     ),
                     Decimal('0.00'),
+                ),
+                'settle_balance_rub': (
+                    finance_row['balance'].available
+                    if finance_row['balance']
+                    else Decimal('0.00')
                 ),
                 'reconciliation': reconciliation,
                 'audit': [
@@ -4574,6 +4698,14 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     def money_from_metadata(dep: Deposit, key: str) -> Decimal:
         return safe_decimal(str((dep.metadata_json or {}).get(key, '0')), '0')
 
+    def merchant_payable_from_metadata(dep: Deposit) -> Decimal:
+        metadata = dep.metadata_json or {}
+        value = metadata.get('merchant_payable_amount')
+        if value is None:
+            # Read-only compatibility for immutable pre-0020 deposit metadata.
+            value = metadata.get('merchant_' 'net_amount', '0')
+        return safe_decimal(str(value), '0')
+
     if role == Role.merchant.value and merchant:
         merchant_stat_deposits = list(merchant_all_deposits)
         merchant_successful = [dep for dep in merchant_stat_deposits if dep.status in success_statuses]
@@ -4581,7 +4713,10 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         merchant_active = [dep for dep in merchant_stat_deposits if dep.status in active_statuses]
         merchant_total_count = len(merchant_stat_deposits)
         total_turnover = sum((dep.amount for dep in merchant_successful), Decimal('0.00'))
-        merchant_net = sum((money_from_metadata(dep, 'merchant_net_amount') for dep in merchant_successful), Decimal('0.00'))
+        merchant_payable = sum(
+            (merchant_payable_from_metadata(dep) for dep in merchant_successful),
+            Decimal('0.00'),
+        )
         merchant_fee = sum((money_from_metadata(dep, 'merchant_fee_amount') for dep in merchant_successful), Decimal('0.00'))
         platform_income = sum((money_from_metadata(dep, 'platform_income_amount') for dep in merchant_successful), Decimal('0.00'))
         trader_candidates = {str(trader.id): trader for trader in merchant_traders}
@@ -4612,7 +4747,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         merchant_trader_rows.sort(key=lambda item: item['turnover'], reverse=True)
         merchant_stats = {
             'total_turnover': total_turnover,
-            'merchant_net': merchant_net,
+            'merchant_payable': merchant_payable,
             'merchant_fee': merchant_fee,
             'platform_income': platform_income,
             'successful_count': len(merchant_successful),
@@ -4719,7 +4854,10 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant_rolling_overview': merchant_rolling_overview,
         'merchant_rolling_allocations': merchant_rolling_allocations,
         'merchant_rolling_ledger': merchant_rolling_ledger,
+        'merchant_rolling_transfers': merchant_rolling_transfers,
+        'merchant_rolling_consumptions': merchant_rolling_consumptions,
         'rolling_admin_rows': rolling_admin_rows,
+        'merchant_finance_rows': merchant_finance_rows,
         'teamlead_admin_rows': teamlead_admin_rows,
         'platform_wallet': platform_wallet,
         'platform_wallet_history': platform_wallet_history,
