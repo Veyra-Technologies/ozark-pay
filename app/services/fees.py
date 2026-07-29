@@ -45,15 +45,18 @@ async def settle_deposit_credit(
     platform_income = money(snapshot.platform_income_amount)
     if merchant_fee != money(executor_fee + platform_income):
         raise FeeConfigurationError('fee snapshot invariant is broken')
-    net = money(gross - merchant_fee)
-    if net < Decimal('0.00') or platform_income < Decimal('0.00'):
+    merchant_payable = money(gross - merchant_fee)
+    if merchant_payable < Decimal('0.00') or platform_income < Decimal('0.00'):
         raise FeeConfigurationError('fee snapshot contains a negative settlement amount')
 
     metadata = dict(deposit.metadata_json or {})
     metadata.update({
         'merchant_commission_percent': str(rate(snapshot.merchant_rate_percent)),
         'merchant_fee_amount': str(merchant_fee),
-        'merchant_net_amount': str(net),
+        'merchant_payable_amount': str(merchant_payable),
+        # Existing API/webhook and immutable metadata compatibility. New UI
+        # and Rolling code use merchant_payable_amount.
+        'merchant_net_amount': str(merchant_payable),
         'executor_type': snapshot.executor_type,
         'executor_id': str(snapshot.executor_id),
         'executor_fee_amount': str(executor_fee),
@@ -66,11 +69,12 @@ async def settle_deposit_credit(
         db,
         deposit=deposit,
         snapshot=snapshot,
-        merchant_net_rub=net,
+        merchant_payable_rub=merchant_payable,
         description=description,
     )
     metadata.update({
-        'settlement_mode': financing['settlement_mode'],
+        'financing_route': financing['financing_route'],
+        'has_confirmed_rolling': financing['has_confirmed_rolling'],
         'rolling_applied_usdt': str(financing['rolling_applied_usdt']),
         'rolling_applied_rub': str(financing['rolling_applied_rub']),
         'settle_credited_rub': str(financing['settle_credited_rub']),
@@ -118,10 +122,11 @@ async def settle_deposit_credit(
     return {
         'gross_amount': str(gross),
         'fee_amount': str(merchant_fee),
-        'net_amount': str(net),
+        'net_amount': str(merchant_payable),
         'merchant_commission_percent': str(rate(snapshot.merchant_rate_percent)),
         'merchant_fee_amount': str(merchant_fee),
-        'merchant_net_amount': str(net),
+        'merchant_payable_amount': str(merchant_payable),
+        'merchant_net_amount': str(merchant_payable),
         'executor_type': snapshot.executor_type,
         'executor_id': str(snapshot.executor_id),
         'executor_fee_amount': str(executor_fee),
@@ -138,7 +143,8 @@ async def settle_deposit_credit(
             if teamlead_accrual
             else '0.00'
         ),
-        'settlement_mode': financing['settlement_mode'],
+        'financing_route': financing['financing_route'],
+        'has_confirmed_rolling': financing['has_confirmed_rolling'],
         'rolling_applied_usdt': str(financing['rolling_applied_usdt']),
         'rolling_applied_rub': str(financing['rolling_applied_rub']),
         'settle_credited_rub': str(financing['settle_credited_rub']),

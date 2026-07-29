@@ -92,16 +92,30 @@ async def create_merchant_settlement(db: AsyncSession, *, merchant_id: UUID, req
     if amount_usdt <= 0:
         raise ValueError('Сумма settle должна быть больше нуля')
     trc20_address = validate_trc20_address(trc20_address)
-    # Serialize settlement requests per merchant: pending requests are not debited yet,
-    # so we lock the merchant balance row before calculating available-minus-pending.
-    await get_or_create_balance(db, merchant_id)
-    quote = await merchant_settlement_quote(db, merchant_id)
-    rate_rub = quote['rate_rub']
-    fee_usdt = quote['fee_usdt']
+    # Fetch the external quote before acquiring any database row lock.
+    rate_quote = await get_rapira_rub_usdt_quote()
+    rate_rub = rate(rate_quote.rate_rub)
+    rate_source = (
+        f'{rate_quote.source} stale'
+        if rate_quote.stale
+        else rate_quote.source
+    )
+    fee_usdt = settlement_transfer_fee_usdt()
     amount_rub = money(amount_usdt * rate_rub)
     fee_rub = money(fee_usdt * rate_rub)
     total_debit_rub = money(amount_rub + fee_rub)
-    if total_debit_rub > quote['available_rub']:
+    # The balance lock serializes requests for this merchant. The database
+    # partial unique index remains the final concurrency guard.
+    balance = await get_or_create_balance(db, merchant_id)
+    pending = (await db.execute(
+        select(MerchantSettlement.id).where(
+            MerchantSettlement.merchant_id == merchant_id,
+            MerchantSettlement.status == SETTLEMENT_STATUS_PENDING,
+        )
+    )).scalar_one_or_none()
+    if pending:
+        raise ValueError('У мерчанта уже есть активный запрос settle')
+    if total_debit_rub > money(balance.available):
         raise ValueError('Недостаточно доступного баланса для settle с учётом комиссии сети')
     settlement = MerchantSettlement(
         merchant_id=merchant_id,
@@ -114,7 +128,7 @@ async def create_merchant_settlement(db: AsyncSession, *, merchant_id: UUID, req
         total_debit_rub=total_debit_rub,
         trc20_address=trc20_address,
         status=SETTLEMENT_STATUS_PENDING,
-        metadata_json={'rate_source': quote.get('rate_source', 'SETTLEMENT_USDT_RUB_RATE')},
+        metadata_json={'rate_source': rate_source},
     )
     db.add(settlement)
     await db.flush()

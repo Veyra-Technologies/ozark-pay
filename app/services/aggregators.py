@@ -485,10 +485,12 @@ async def create_payment(
     if internal_merchant.status != AGGREGATOR_ACTIVE_STATUS:
         raise AggregatorError('aggregator merchant is not active')
 
+    deposit_created_at = datetime.now(timezone.utc)
     try:
         rolling_quote = await rolling_quote_for_deposit_create(
             db,
             aggregator.platform_merchant_id,
+            created_at=deposit_created_at,
         )
     except RollingRateUnavailable as exc:
         raise AggregatorError(exc.code) from exc
@@ -515,6 +517,7 @@ async def create_payment(
         status=DepositStatus.pending.value,
         requisites_id=selected.requisite.id,
         client_ip=client_ip,
+        created_at=deposit_created_at,
         expires_at=new_deposit_expires_at(),
         metadata_json={
             **selected.settlement_metadata(),
