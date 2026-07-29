@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import asyncio
+import logging
 import os
 import secrets
 from decimal import Decimal
@@ -13,19 +14,23 @@ from app.core.config import settings
 from app.core.security import encrypt_secret, hash_password, is_unreadable_encrypted_text, reveal_text
 from app.core.enums import Role
 
-async def ensure_user(db, email: str, password: str, role: Role, twofa: bool = False, secret: str | None = None, sync_credentials: bool = False):
+logger = logging.getLogger(__name__)
+ALLOWED_SEED_ENVIRONMENTS = {'local', 'dev', 'development', 'test', 'testing'}
+
+
+def assert_seed_environment() -> None:
+    environment = os.getenv('APP_ENV', settings.ENV).strip().lower()
+    if settings.is_production or environment not in ALLOWED_SEED_ENVIRONMENTS:
+        raise RuntimeError(
+            'scripts.seed is restricted to local, development, and test environments'
+        )
+
+
+async def ensure_user(db, email: str, password: str, role: Role, twofa: bool = False, secret: str | None = None):
     user=(await db.execute(select(User).where(User.email==email))).scalar_one_or_none()
     if not user:
         user=User(email=email,password_hash=hash_password(password),role=role.value,twofa_secret=encrypt_secret(secret),twofa_enabled=twofa)
         db.add(user); await db.flush()
-    elif sync_credentials:
-        user.password_hash = hash_password(password)
-        user.role = role.value
-        user.twofa_secret = encrypt_secret(secret)
-        user.twofa_enabled = twofa
-        user.is_active = True
-        user.is_locked = False
-        user.failed_login_count = 0
     return user
 
 async def ensure_demo_merchant(db, owner):
@@ -57,13 +62,20 @@ async def ensure_demo_merchant(db, owner):
 async def normalize_requisites_plaintext(db):
     rows = (await db.execute(select(Requisite))).scalars().all()
     for req in rows:
+        if is_unreadable_encrypted_text(req.value_encrypted):
+            logger.error(
+                'seed_requisite_decryption_failed',
+                extra={
+                    'event': 'seed_requisite_decryption_failed',
+                    'record_type': 'requisite',
+                },
+            )
+            raise RuntimeError(
+                'Requisite encryption validation failed; no seed changes were committed'
+            )
         visible_value = reveal_text(req.value_encrypted).strip()
         if visible_value and visible_value != req.value_encrypted:
             req.value_encrypted = encrypt_secret(visible_value)
-        elif is_unreadable_encrypted_text(req.value_encrypted):
-            req.enabled = False
-            if req.status != 'deleted':
-                req.status = 'review'
 
 
 async def ensure_demo_requisite(db, operator):
@@ -93,14 +105,15 @@ async def ensure_demo_requisite(db, operator):
         setattr(requisite, key, value)
 
 async def main():
+    assert_seed_environment()
+    if not settings.SEED_DEMO_DATA:
+        logger.info(
+            'demo_seed_skipped',
+            extra={'event': 'demo_seed_skipped', 'reason': 'disabled'},
+        )
+        return
     async with AsyncSessionLocal() as db:
-        await ensure_user(db, settings.SUPERADMIN_EMAIL, settings.SUPERADMIN_PASSWORD, Role.superadmin, True, settings.SUPERADMIN_2FA_SECRET, sync_credentials=True)
         await normalize_requisites_plaintext(db)
-        if not settings.SEED_DEMO_DATA:
-            await db.commit()
-            return
-        if settings.is_production:
-            raise RuntimeError('SEED_DEMO_DATA must be false in production')
         await ensure_user(db, os.getenv('DEMO_ADMIN_EMAIL', 'admin@example.com'), os.getenv('DEMO_ADMIN_PASSWORD', secrets.token_urlsafe(24)), Role.admin, True, os.getenv('DEMO_ADMIN_2FA_SECRET', pyotp.random_base32()))
         await ensure_user(db, os.getenv('DEMO_SUPPORT_EMAIL', 'support@example.com'), os.getenv('DEMO_SUPPORT_PASSWORD', secrets.token_urlsafe(24)), Role.support, True, os.getenv('DEMO_SUPPORT_2FA_SECRET', pyotp.random_base32()))
         operator = await ensure_user(db, os.getenv('DEMO_OPERATOR_EMAIL', 'operator@example.com'), os.getenv('DEMO_OPERATOR_PASSWORD', secrets.token_urlsafe(24)), Role.operator, False, None)

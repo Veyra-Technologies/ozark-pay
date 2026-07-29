@@ -91,10 +91,11 @@ def is_unreadable_encrypted_text(value: str | None) -> bool:
     if value is None:
         return False
     text = str(value).strip()
-    if not _looks_like_fernet_token(text):
+    token = _encrypted_token(text)
+    if token is None:
         return False
     try:
-        decrypt_text(text)
+        decrypt_text(token)
         return False
     except Exception:
         return True

@@ -49,7 +49,8 @@ test credentials outside an isolated development environment.
 
 The production Compose definition may be reused only with isolated local Docker
 volumes during review. Do not point it at an existing database. Start the local
-dependencies, then run the API on port 8000 without nginx:
+dependencies, run the explicit migration job, optionally bootstrap the first
+Superadmin, and then run the API on port 8000 without nginx:
 
 ```bash
 docker compose \
@@ -60,9 +61,22 @@ docker compose \
 docker compose \
   -f docker-compose.production.yml \
   --env-file .env.production \
-  run --rm -p 8000:8000 api \
-  bash -lc "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+  --profile migrate run --rm migrate
+
+docker compose \
+  -f docker-compose.production.yml \
+  --env-file .env.production \
+  run --rm api python -m scripts.bootstrap_superadmin
+
+docker compose \
+  -f docker-compose.production.yml \
+  --env-file .env.production \
+  run --rm -p 8000:8000 api
 ```
+
+The normal `api`, `worker`, and `beat` commands never run migrations or seed
+data. `scripts.seed` is restricted to local/development/test demo data and is
+never part of application startup.
 
 After startup, verify `/version`, `/health` and `/ready`. The expected version is
 `2.0.0-rc1`.
