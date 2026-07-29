@@ -1,225 +1,136 @@
-# Ozark Pay 2.0.0-rc1 release runbook
+# Ozark Pay 2.0.0-rc1 release notes
 
-`2.0.0-rc1` is a release candidate. Do not label it `2.0.0` production
-release until manual QA is signed off.
-
-This runbook documents operator commands. It does not authorize automatic
-backup, deployment, production/staging migration, or restart.
+`2.0.0-rc1` is a release candidate prepared for independent audit. It is not a
+production release. Manual QA, security review and financial reconciliation
+must be approved before promotion to `2.0.0`.
 
 ## Scope
 
-- Rolling and strict Rapira behavior from migrations 0014–0016.
-- TeamLead accounting from migration 0017.
-- Versioned display-only platform USDT TRC20 wallet in migration 0018.
-- Disabled-by-default AI Office configuration and manual GET health test in
-  migration 0019.
+This release candidate includes:
 
-The wallet does not watch TRON, detect deposits, credit balances, or assign
-personal addresses. AI Office does not receive events, issue commands, access
-the database, run antifraud, or mutate payments in this release candidate.
+- an immutable Deposit lifecycle with explicit expiry and unsuccessful
+  finalization;
+- strict live Rapira `askPrice` handling for Rolling, including nullable
+  provider timestamps and `fetched_at` freshness evidence;
+- settle as the base merchant accounting model, without a persistent
+  settlement-mode switch;
+- merchant-confirmed Rolling transfers, immutable funding evidence and FIFO
+  recovery;
+- TeamLead historical attribution, accrual, reversal, debt and settlement
+  accounting;
+- a versioned, display-only platform USDT TRC20 wallet with Base58Check
+  validation and QR rendering;
+- encrypted AI Office settings, disabled by default;
+- release preflight, GET-only smoke checks and PostgreSQL migration tests.
 
-## New environment variables
+The platform wallet does not watch TRON, detect deposits, credit balances or
+assign personal addresses. AI Office does not receive payment events, issue
+commands, access the database or mutate payments in this release candidate.
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `APP_VERSION` | `2.0.0-rc1` | Public application version returned by `/version` and `/health`. |
+## Migration chain
 
-AI Office credentials are not environment variables. They are entered by a
-2FA-authenticated Superadmin and stored encrypted with the existing
-`ENCRYPTION_KEY`. Do not place them in source, fixtures, documentation, or
-command-line arguments.
-
-The canonical application environment variable remains `ENV`
-(`local`, `staging`, or `production`). The preflight reports it as `APP_ENV`
-without printing connection URLs.
-
-## 1. Backup before migration
-
-Use the existing encrypted backup workflow and the production environment
-file selected by the release operator:
-
-```bash
-export BACKUP_ENCRYPTION_PASSPHRASE='set-through-the-secret-manager'
-./scripts/backup_encrypted.sh
-```
-
-Never paste the passphrase into a ticket or terminal transcript. Record the
-generated backup path, checksum, PostgreSQL version, operator, and timestamp in
-the release record.
-
-## 2. Verify the backup
-
-Verify checksum and perform the documented isolated restore test:
-
-```bash
-sha256sum /approved/backup/path/ozark-pay-*.dump.enc
-./scripts/verify_encrypted_backup_restore.sh /approved/backup/path/ozark-pay-*.dump.enc
-```
-
-The restore target must be an isolated disposable PostgreSQL instance, never
-production or staging.
-
-## 3. Pre-migration checks
-
-Run the read-only preflight against the currently running service:
-
-```bash
-python -m scripts.preflight_v2 --base-url http://127.0.0.1:8000
-```
-
-It checks environment safety, DB/Redis connectivity, a single Alembic head,
-current revision, required secrets without printing them, Rapira live ask,
-AI configuration, active wallet count, writable directories, health and
-readiness. It never runs migrations or creates payments.
-
-Confirm separately:
-
-```bash
-alembic heads
-alembic current
-```
-
-Before this release, both must report `0017_teamlead`.
-
-## 4. Upgrade 0017 → 0018 → 0019
-
-After backup approval and during the approved change window:
-
-```bash
-alembic upgrade 0018_platform_crypto_wallet
-alembic current
-alembic upgrade 0020_rolling_confirmation_flow
-alembic current
-```
-
-Expected final revision:
+The release contains one Alembic head:
 
 ```text
-0020_rolling_confirmation_flow (head)
+0020_rolling_confirmation_flow
 ```
 
-Do not use `alembic upgrade head` without first verifying that the repository
-has exactly one expected head.
+Relevant release migrations are:
 
-## 5. Service start order
+- `0014_deposit_expiry_finance_profile`;
+- `0015_merchant_rolling`;
+- `0016_rolling_rapira_freshness`;
+- `0017_teamlead`;
+- `0018_platform_crypto_wallet`;
+- `0019_ai_office_config`;
+- `0020_rolling_confirmation_flow`.
 
-Start or replace services in this order:
+Migration `0020` preserves existing merchant, trader and TeamLead balances. It
+creates synthetic confirmed transfers only for legacy accounts that contain
+actual Rolling finance and preserves existing allocations and ledger history.
+Legacy allocations without real Rolling finance are marked ineligible.
 
-1. PostgreSQL and Redis; wait for their health checks.
-2. API; wait for migration completion and `/health`.
-3. Celery worker.
-4. Celery beat.
-5. nginx/reverse proxy.
-6. Monitoring services only if their configuration changed.
+Migration execution against staging or production is not authorized by this
+publication. Reviewers should use an isolated PostgreSQL instance and verify the
+single expected head before any local upgrade.
 
-Example Compose sequence; exact files and environment file must be selected by
-the release operator:
+## Rolling confirmation model
 
-```bash
-docker compose up -d db redis
-docker compose up -d api
-docker compose up -d worker beat
-docker compose up -d nginx
-```
+Every merchant uses settle as the base model. A Rolling cycle becomes active
+only after the merchant confirms a specific transfer registered by
+Superadmin.
 
-If API is recreated without nginx, the existing nginx master may retain the
-previous container IP for the `api` Docker DNS name. After API is healthy,
-validate and gracefully reload the same project's nginx container:
+Pending, disputed and cancelled transfers do not change principal or
+outstanding. Confirmation is transactional and idempotent. Deposit eligibility
+is based on immutable `deposit.created_at`, so a Deposit cannot consume a
+transfer confirmed after the Deposit was created.
 
-```bash
-docker compose exec nginx nginx -t
-docker compose exec nginx nginx -s reload
-docker compose exec nginx getent hosts api
-```
+Confirmed transfers are recovered FIFO. If one operation crosses the remaining
+Rolling balance, the eligible portion recovers Rolling and the exact RUB
+remainder is credited to settle.
 
-Do not hardcode the resolved container IP. Verify `/version`, `/health`,
-`/ready`, and `/staff/login` through the external localhost listener after
-the reload. A full nginx recreate is only needed when graceful reload is not
-available or its configuration test fails.
+See [Rolling confirmation and FIFO accounting](rolling.md) for the complete
+invariants and lock order.
 
-Do not use `--no-cache` during the release window unless a separately approved
-incident procedure requires it.
+## TeamLead accounting
 
-## 6. Health and readiness
+TeamLead attribution is historical: the assignment active at
+`deposit.created_at` determines eligibility. Accrual is a separate platform
+expense and does not change trader income, merchant payable or Rolling.
 
-```bash
-curl --fail --silent http://127.0.0.1:8000/health
-curl --fail --silent http://127.0.0.1:8000/ready
-curl --fail --silent http://127.0.0.1:8000/version
-```
+Settlement accounting separates requested payout, platform fee and total debit.
+TRC20 addresses use Base58Check validation, completed transaction hashes are
+network-unique, and cooldown is based only on `completed_at`.
 
-Expected version is `2.0.0-rc1`. Readiness must report both PostgreSQL and
-Redis as `ok`.
+See [TeamLead accounting](teamlead.md) for the full model.
 
-## 7. Post-deploy GET-only smoke
+## AI Office and wallet boundaries
 
-```bash
-python -m scripts.smoke_v2 --base-url http://127.0.0.1:8000
-```
+AI Office settings:
 
-The script uses only GET for `/health`, `/ready`, `/version`, and
-`/staff/login`. It checks `/openapi.json` only when `OPENAPI_ENABLED=true`.
-Production should normally keep docs and OpenAPI disabled.
+- are disabled by default;
+- store credentials encrypted;
+- require Superadmin, CSRF and verified 2FA for changes;
+- support a manual redacted GET health check only;
+- do not run background payment integration.
 
-## 8. Celery verification
+The platform TRC20 wallet is display-only and versioned. It does not include a
+private key and does not perform blockchain transactions.
 
-```bash
-docker compose ps api worker beat
-docker compose logs --since 10m worker beat
-```
+## Validation
 
-Confirm that worker and beat stay running, scheduled tasks execute, and no
-finance invariant errors are introduced by the release.
+The release gate includes:
 
-## 9. Rapira verification
+- the full isolated PostgreSQL pytest suite;
+- Python bytecode compilation for `app` and `scripts`;
+- Jinja template compilation;
+- OpenAPI import;
+- Alembic head/current verification;
+- migration upgrade and invariant tests;
+- Rolling reconciliation;
+- secret and prohibited-artifact scans;
+- the [manual QA checklist](manual-qa-v2.0.md).
 
-The preflight must report a fresh `USDT/RUB`, `side=ask`,
-`source=rapira_live` quote. `provider_timestamp` may be null when
-`freshness_basis=fetched_at`. No static, stale, last-success, bid, last, or
-close fallback is valid for Rolling or TeamLead.
+## Known baseline Alembic drift
 
-## 10. Webhook backlog
+`alembic check` reports schema/model representation differences that predate
+this release branch. The same set was reproduced against the `origin/main`
+baseline; the current migrations do not add new drift.
 
-Use a read-only query:
+The classification and unsafe raw-autogenerate operations are documented in
+[the Alembic drift review](review-alembic-drift.md). The generated operations
+must not be applied without a separately reviewed migration.
 
-```sql
-SELECT status, count(*)
-  FROM webhook_events
- GROUP BY status
- ORDER BY status;
-```
+## Audit and release boundary
 
-Investigate an unexpected increase in queued/failed deliveries before
-continuing. Do not bulk-retry during the release without a separate decision.
+Before promotion:
 
-## 11. Rollback and forward-fix boundary
+- complete the manual QA checklist;
+- independently review migrations `0014` through `0020`;
+- verify financial reconciliation on an approved non-production copy;
+- confirm no environment files, credentials, backups, dumps, archives or
+  private operational discovery are present in the published branch;
+- obtain explicit approval for any production deployment or migration.
 
-Schema downgrade to 0017 is allowed only before any wallet history or AI
-configuration is created:
-
-```bash
-alembic downgrade 0017_teamlead
-```
-
-Migration 0018 refuses downgrade when any wallet history exists. Migration
-0019 refuses downgrade when any AI Office configuration exists. These guards
-prevent deleting operational configuration and audit history.
-
-After Rolling or TeamLead financial data exists, do not destructively
-downgrade migrations 0015–0017. Keep the additive 0018/0019 schema and use an
-application forward-fix. The same forward-fix rule applies after wallet or AI
-configuration has been saved.
-
-Never bypass downgrade guards by dropping tables, editing `alembic_version`,
-disabling triggers, or manually deleting records.
-
-## 12. Release completion
-
-Do not promote `2.0.0-rc1` to `2.0.0` until:
-
-- automated PostgreSQL and regression suites pass;
-- the checklist in `docs/manual-qa-v2.0.md` is signed off;
-- backup restore evidence is attached;
-- the release owner approves production activation;
-- AI Office remains disabled in production until M2M authentication and
-  permissions are separately approved.
+This release publication does not authorize merge, deployment, production data
+changes or creation of a final `2.0.0` tag.
