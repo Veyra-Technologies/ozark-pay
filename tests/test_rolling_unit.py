@@ -226,12 +226,11 @@ def test_decline_endpoint_has_server_side_role_check_and_required_reason():
     assert 'finalize_unsuccessful_deposit' in block
 
 
-def test_migrations_backfill_postpaid_and_legacy_ttl():
+def test_migrations_preserve_legacy_ttl_and_normalize_rolling():
     migration = (
         ROOT / 'alembic/versions/0014_deposit_expiry_finance_profile.py'
     ).read_text(encoding='utf-8')
     assert "created_at + interval '15 minutes'" in migration
-    assert "'postpaid'" in migration
     assert 'nullable=False' in migration
     assert 'LIMIT {_EXPIRES_BACKFILL_BATCH_SIZE}' in migration
     assert 'CREATE INDEX CONCURRENTLY' in migration
@@ -254,8 +253,15 @@ def test_migrations_backfill_postpaid_and_legacy_ttl():
     ):
         assert field in freshness_migration
 
+    confirmation_migration = (
+        ROOT / 'alembic/versions/0020_rolling_confirmation_flow.py'
+    ).read_text(encoding='utf-8')
+    assert "op.drop_table('merchant_finance_profiles')" in confirmation_migration
+    assert 'merchant_rolling_transfers' in confirmation_migration
+    assert 'merchant_rolling_transfer_consumptions' in confirmation_migration
 
-def test_balance_api_keeps_legacy_fields_and_adds_rolling():
+
+def test_balance_api_keeps_balance_fields_and_returns_rolling_state():
     merchant_api = (ROOT / 'app/api/v1/merchant.py').read_text(encoding='utf-8')
     start = merchant_api.index("async def balance(")
     block = merchant_api[start:merchant_api.index(
@@ -264,8 +270,8 @@ def test_balance_api_keeps_legacy_fields_and_adds_rolling():
     )]
     for field in ("'available'", "'frozen'", "'currency'"):
         assert field in block
-    assert "'settlement_mode'" in block
     assert "'rolling'" in block
+    assert 'settlement_' + 'mode' not in block
     assert "Balance.currency=='RUB'" in block
 
 
@@ -449,7 +455,7 @@ def test_direct_decline_request_is_forbidden_for_trader(monkeypatch):
     assert exc_info.value.status_code == 403
 
 
-def test_rolling_funding_form_requires_superadmin_2fa_and_audit():
+def test_rolling_transfer_registration_requires_superadmin_2fa():
     routes = (ROOT / 'app/web/routes.py').read_text(encoding='utf-8')
     helper_start = routes.index('async def _require_superadmin_web')
     helper = routes[helper_start:routes.index(
@@ -459,17 +465,17 @@ def test_rolling_funding_form_requires_superadmin_2fa_and_audit():
     assert 'Role.superadmin.value' in helper
     assert 'staff_2fa_setup_required(actor)' in helper
 
-    route_start = routes.index('async def cabinet_rolling_funding')
+    route_start = routes.index('async def cabinet_rolling_register_transfer')
     route = routes[route_start:routes.index(
-        "@router.post('/cabinet/rolling/merchants/{merchant_id}/suspension')",
+        'async def _merchant_for_rolling_action',
         route_start,
     )]
     assert '_require_superadmin_web(request, db)' in route
-    assert "reason: str = Form(...)" in route
-    assert "'rolling_funding_recorded'" in route
+    assert "idempotency_key: str = Form(...)" in route
+    assert 'register_rolling_transfer' in route
 
 
-def test_superadmin_without_2fa_is_redirected_before_funding(monkeypatch):
+def test_superadmin_without_2fa_is_redirected_before_transfer_registration(monkeypatch):
     import app.web.routes as web_routes
 
     async def superadmin_without_2fa(request, db):
@@ -483,7 +489,7 @@ def test_superadmin_without_2fa_is_redirected_before_funding(monkeypatch):
     request = Request({
         'type': 'http',
         'method': 'POST',
-        'path': '/cabinet/rolling/merchants/test/funding',
+        'path': '/cabinet/rolling/merchants/test/transfers',
         'headers': [],
         'query_string': b'',
         'scheme': 'http',
@@ -495,7 +501,9 @@ def test_superadmin_without_2fa_is_redirected_before_funding(monkeypatch):
     assert response.headers['location'].startswith('/cabinet')
 
 
-def test_balance_api_serializes_all_decimal_rolling_fields_as_strings():
+def test_balance_api_serializes_all_decimal_rolling_fields_as_strings(
+    monkeypatch,
+):
     merchant_api = (ROOT / 'app/api/v1/merchant.py').read_text(encoding='utf-8')
     start = merchant_api.index("async def balance(")
     block = merchant_api[start:merchant_api.index(
@@ -503,3 +511,68 @@ def test_balance_api_serializes_all_decimal_rolling_fields_as_strings():
         start,
     )]
     assert "str(value) if isinstance(value, Decimal)" in block
+
+    from app.api.v1 import merchant as merchant_module
+
+    class Result:
+        @staticmethod
+        def scalar_one_or_none():
+            return SimpleNamespace(
+                available=Decimal('12.34'),
+                frozen=Decimal('5.67'),
+            )
+
+    class DB:
+        @staticmethod
+        async def execute(_query):
+            return Result()
+
+        @staticmethod
+        async def commit():
+            return None
+
+    expected = {
+        'has_confirmed_rolling': True,
+        'status': 'active',
+        'principal': Decimal('100.000000'),
+        'recovered': Decimal('25.000000'),
+        'outstanding': Decimal('75.000000'),
+        'pending_transfers': 1,
+        'disputed_transfers': 0,
+        'pending_exposure': Decimal('10.000000'),
+    }
+
+    async def overview(_db, _merchant_id):
+        return expected
+
+    async def no_log(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(merchant_module, 'rolling_overview', overview)
+    monkeypatch.setattr(merchant_module, 'log_req', no_log)
+    request = Request({
+        'type': 'http',
+        'method': 'GET',
+        'path': '/merchant/v1/balance',
+        'headers': [],
+        'query_string': b'',
+        'scheme': 'http',
+        'server': ('testserver', 80),
+        'client': ('127.0.0.1', 12345),
+    })
+    payload = asyncio.run(
+        merchant_module.balance(
+            request,
+            DB(),
+            SimpleNamespace(id='merchant-id'),
+        )
+    )
+    assert payload['available'] == '12.34'
+    assert payload['frozen'] == '5.67'
+    assert payload['rolling'] == {
+        **expected,
+        'principal': '100.000000',
+        'recovered': '25.000000',
+        'outstanding': '75.000000',
+        'pending_exposure': '10.000000',
+    }

@@ -88,14 +88,14 @@ After backup approval and during the approved change window:
 ```bash
 alembic upgrade 0018_platform_crypto_wallet
 alembic current
-alembic upgrade 0019_ai_office_config
+alembic upgrade 0020_rolling_confirmation_flow
 alembic current
 ```
 
 Expected final revision:
 
 ```text
-0019_ai_office_config (head)
+0020_rolling_confirmation_flow (head)
 ```
 
 Do not use `alembic upgrade head` without first verifying that the repository
@@ -121,6 +121,21 @@ docker compose up -d api
 docker compose up -d worker beat
 docker compose up -d nginx
 ```
+
+If API is recreated without nginx, the existing nginx master may retain the
+previous container IP for the `api` Docker DNS name. After API is healthy,
+validate and gracefully reload the same project's nginx container:
+
+```bash
+docker compose exec nginx nginx -t
+docker compose exec nginx nginx -s reload
+docker compose exec nginx getent hosts api
+```
+
+Do not hardcode the resolved container IP. Verify `/version`, `/health`,
+`/ready`, and `/staff/login` through the external localhost listener after
+the reload. A full nginx recreate is only needed when graceful reload is not
+available or its configuration test fails.
 
 Do not use `--no-cache` during the release window unless a separately approved
 incident procedure requires it.

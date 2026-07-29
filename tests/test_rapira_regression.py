@@ -273,11 +273,8 @@ def test_live_payload_without_timestamp_unblocks_rolling_create_service(
         async def get(self, url, headers):
             return FakeResponse()
 
-    async def rolling_mode(db, merchant_id):
-        return 'rolling'
-
-    async def no_account(db, merchant_id):
-        return None
+    async def eligible_sequence(db, merchant_id, created_at):
+        return 1
 
     monkeypatch.setattr(rapira, '_strict_rolling_cache', None)
     monkeypatch.setattr(rapira.settings, 'RAPIRA_RATES_ENABLED', True)
@@ -291,18 +288,22 @@ def test_live_payload_without_timestamp_unblocks_rolling_create_service(
         'AsyncClient',
         lambda **kwargs: FakeClient(),
     )
-    monkeypatch.setattr(rolling, 'merchant_settlement_mode', rolling_mode)
-    monkeypatch.setattr(rolling, 'get_rolling_account', no_account)
+    monkeypatch.setattr(
+        rolling,
+        '_eligible_transfer_sequence',
+        eligible_sequence,
+    )
 
     quote = asyncio.run(
         rolling.rolling_quote_for_deposit_create(None, uuid4())
     )
 
     assert quote is not None
-    assert quote.rate == Decimal('81.42')
-    assert quote.provider_timestamp is None
-    assert quote.freshness_basis == 'fetched_at'
-    assert quote.source == 'rapira_live'
+    assert quote.quote.rate == Decimal('81.42')
+    assert quote.quote.provider_timestamp is None
+    assert quote.quote.freshness_basis == 'fetched_at'
+    assert quote.quote.source == 'rapira_live'
+    assert quote.eligible_transfer_sequence == 1
 
 
 def test_general_cache_does_not_depend_on_strict_rolling_cache(monkeypatch):
@@ -411,16 +412,20 @@ def test_existing_settlement_rate_keeps_general_quote_contract(monkeypatch):
     assert source == 'Rapira'
 
 
-def test_postpaid_path_never_calls_strict_rolling_quote(monkeypatch):
+def test_settle_only_path_never_calls_strict_rolling_quote(monkeypatch):
     import app.services.rolling as rolling
 
-    async def postpaid_mode(db, merchant_id):
-        return 'postpaid'
+    async def no_eligible_transfer(db, merchant_id, created_at):
+        return None
 
     async def forbidden_strict_quote():
-        raise AssertionError('postpaid must not call strict Rapira')
+        raise AssertionError('settle-only deposit must not call strict Rapira')
 
-    monkeypatch.setattr(rolling, 'merchant_settlement_mode', postpaid_mode)
+    monkeypatch.setattr(
+        rolling,
+        '_eligible_transfer_sequence',
+        no_eligible_transfer,
+    )
     monkeypatch.setattr(
         rolling,
         'get_strict_rolling_ask_quote',
@@ -440,18 +445,18 @@ def test_rolling_path_calls_only_strict_ask_quote(monkeypatch):
     marker = object()
     calls = []
 
-    async def rolling_mode(db, merchant_id):
-        return 'rolling'
-
-    async def no_account(db, merchant_id):
-        return None
+    async def eligible_sequence(db, merchant_id, created_at):
+        return 7
 
     async def strict_quote():
         calls.append('strict')
         return marker
 
-    monkeypatch.setattr(rolling, 'merchant_settlement_mode', rolling_mode)
-    monkeypatch.setattr(rolling, 'get_rolling_account', no_account)
+    monkeypatch.setattr(
+        rolling,
+        '_eligible_transfer_sequence',
+        eligible_sequence,
+    )
     monkeypatch.setattr(
         rolling,
         'get_strict_rolling_ask_quote',
@@ -462,5 +467,6 @@ def test_rolling_path_calls_only_strict_ask_quote(monkeypatch):
         rolling.rolling_quote_for_deposit_create(None, uuid4())
     )
 
-    assert quote is marker
+    assert quote.quote is marker
+    assert quote.eligible_transfer_sequence == 7
     assert calls == ['strict']

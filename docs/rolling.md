@@ -1,309 +1,230 @@
-# Postpaid, Rolling и жизненный цикл Deposit
+# Merchant Rolling: подтверждённые переводы и FIFO-погашение
 
-## Экономический смысл
+## Финансовая модель
 
-`postpaid` — прежний режим. Мерчант сначала даёт трафик, а после `deposit.paid`
-весь `merchant_net_rub` зачисляется в существующий RUB settle-баланс.
+Для каждого мерчанта базовый расчёт всегда один: сумма к выплате после
+успешного Deposit накапливается в RUB settle balance. Rolling — не тип
+мерчанта и не постоянный режим, а временный финансовый цикл, который
+начинается только после подтверждения мерчантом конкретного USDT-перевода.
 
-`rolling` — отдельный контур обязательств. Ozark заранее передаёт мерчанту USDT,
-а будущий успешный `merchant_net` погашает этот аванс. Rolling не является
-отрицательным `Balance`: обычный `Balance` — долг Ozark мерчанту, Rolling —
-долг мерчанта Ozark.
-
-Исчерпание Rolling не блокирует трафик. При `outstanding_usdt=0` весь net
-следующей успешной заявки идёт в settle. Pending exposure и размер заявки также
-могут превышать outstanding.
-
-Все существующие мерчанты миграция оставляет в `postpaid`.
-
-## Формулы и точность
-
-Источником комиссии является существующий immutable
-`OperationFeeSnapshot`:
+Терминология активного кода и UI:
 
 ```text
-merchant_fee_rub = gross_rub × merchant_commission_percent / 100
-merchant_net_rub = gross_rub - merchant_fee_rub
-merchant_net_usdt = merchant_net_rub / rapira_ask_rate_rub
+merchant_payable_rub = gross_rub - merchant_fee_rub
+merchant_payable_usdt = merchant_payable_rub / saved_rapira_ask
 ```
 
-Используются `Decimal` и `ROUND_HALF_UP`: RUB — 2 знака, USDT — 6, курс —
-8, процент — 6. Старые операции не пересчитываются по новым тарифам или курсу.
+Пока нет подтверждённого перевода с остатком, вся сумма
+`merchant_payable_rub` зачисляется в settle. Pending, disputed и cancelled
+переводы не меняют principal, recovered, outstanding или settle.
 
-Для paid:
+## Двухэтапный перевод
+
+Superadmin в профиле мерчанта регистрирует отправку с amount, network,
+destination, tx hash, sent_at, комментарием и idempotency key. Создаётся
+`MerchantRollingTransfer(status=pending_confirmation)`, но Rolling account
+и funding/topup ledger на этом шаге не меняются.
+
+Мерчант видит неизменяемые реквизиты перевода и может:
+
+- подтвердить получение;
+- сообщить о проблеме с обязательной причиной.
+
+Подтверждение выполняется в одной транзакции:
+
+1. `SELECT ... FOR UPDATE` transfer и проверка ownership/status;
+2. создание или блокировка merchant Rolling account;
+3. однократное увеличение principal и outstanding;
+4. перевод в `confirmed` с `confirmed_at` и `confirmed_by`;
+5. immutable funding/topup ledger и audit.
+
+Повторное подтверждение возвращает уже подтверждённый transfer и не меняет
+агрегаты. Confirm конкурирует с dispute/cancel под блокировкой одной строки,
+поэтому фиксируется ровно один terminal result. Подтверждённый перевод нельзя
+отменить; исправление требует отдельной компенсирующей финансовой операции.
+
+## Применимость к Deposit
+
+Определяющий момент — неизменяемый `deposit.created_at`, а не paid_at.
+При создании Deposit:
+
+1. ищется confirmed transfer с remaining > 0 и
+   `confirmed_at <= deposit.created_at`;
+2. если его нет, strict Rapira quote не запрашивается и allocation не
+   создаётся;
+3. если он есть, до финансовых DB locks запрашивается свежий live ask Rapira;
+4. allocation сохраняет rate evidence, `rolling_eligible_at` и максимальный
+   `eligible_transfer_sequence`.
+
+Таким образом, Deposit, созданный до подтверждения funding/top-up, не может
+использовать этот перевод, даже если становится paid после подтверждения.
+Новый top-up также не забирает ранее начисленный settle и не участвует в
+старых allocations.
+
+Eligibility хранится явно и проверяется DB constraint:
+
+- `eligibility_status=eligible` требует непустые
+  `eligible_transfer_sequence` и `rolling_eligible_at`, а также source
+  `confirmed_transfer` или `legacy_migration`;
+- `eligibility_status=ineligible` требует NULL в sequence/timestamp и source
+  `legacy_no_confirmed_funding` либо
+  `no_confirmed_funding_at_creation`.
+
+Новые Deposits без confirmed transfer не создают allocation. Явное
+`ineligible` состояние существует для безопасно мигрированной legacy-истории.
+При paid такая allocation целиком зачисляет merchant payable в settle и
+никогда не ищет текущий active Rolling или более поздний top-up.
+
+## Strict Rapira
+
+Для Rolling используется только успешный live HTTP response и `askPrice`.
+Symbol определяет направление. Provider timestamp nullable: freshness
+основана на нём, когда он валиден, иначе на фактическом UTC `fetched_at`.
+Static fallback, last-success fallback, legacy cache, bid, last и close в
+Rolling не используются. HTTP выполняется до участков с DB row locks.
+
+Immutable allocation хранит rate, symbol, side=ask, source=rapira_live,
+provider timestamp, fetched_at и freshness basis.
+
+## FIFO и crossing в settle
+
+При paid блокируются только transfers, допустимые snapshot этого Deposit:
+confirmed, `sequence_no <= eligible_transfer_sequence` и
+`confirmed_at <= rolling_eligible_at`. Погашение идёт по sequence FIFO.
+
+Каждая часть погашения записывается отдельной immutable
+`MerchantRollingTransferConsumption`:
+
+- deposit и allocation;
+- transfer и account;
+- USDT, RUB и сохранённый rate;
+- recovery/reversal type и idempotency key.
+
+Для пересекающей операции:
 
 ```text
-rolling_applied_usdt = min(merchant_net_usdt, outstanding_usdt)
-rolling_applied_rub =
-    merchant_net_rub, если весь net ушёл в Rolling;
-    min(merchant_net_rub, ROUND_HALF_UP(rolling_applied_usdt × rate, 2))
-    для граничной заявки
-settle_credited_rub = merchant_net_rub - rolling_applied_rub
+rolling_applied_usdt =
+    min(merchant_payable_usdt, eligible_confirmed_remaining)
+
+rolling_applied_rub + settle_credited_rub = merchant_payable_rub
 ```
 
-Инвариант каждой paid allocation:
+Если Rolling покрывает всю операцию, весь RUB payable считается recovery.
+Если remaining меньше payable, допустимый USDT остаток закрывается, а точный
+RUB overflow зачисляется в settle. После outstanding=0 account становится
+`exhausted`; новый трафик продолжает идти в settle без ручного переключателя.
+
+Account агрегаты обязаны совпадать с confirmed transfers:
 
 ```text
-merchant_net_rub = rolling_applied_rub + settle_credited_rub
+account.principal   = sum(confirmed transfer.amount)
+account.recovered   = sum(confirmed transfer.recovered)
+account.outstanding = sum(confirmed transfer.remaining)
+principal = recovered + outstanding
 ```
 
-Пример: outstanding 500 USDT, Rapira ask 100 RUB/USDT, gross 100 000 RUB,
-комиссия 10%. Net равен 90 000 RUB / 900 USDT. Результат: 500 USDT и
-50 000 RUB идут в Rolling recovery, 40 000 RUB — в settle, outstanding
-становится 0, account — `exhausted`.
+## Reversal и immutable history
 
-## Strict Rapira snapshot
+История не редактируется и не удаляется. Reversal:
 
-Expected read-only provider contract (shown here as a schema, not as a captured
-provider response):
+- блокирует Deposit → allocation → account → затронутые transfers;
+- создаёт compensating consumption rows;
+- возвращает recovery в transfer remaining/account outstanding;
+- отдельно сторнирует settle overflow, если он доступен;
+- добавляет immutable ledger и audit.
 
-```json
-{
-  "data": [
-    {
-      "symbol": "USDT/RUB",
-      "askPrice": "100.12345678",
-      "updatedAt": "2026-01-01T00:00:00Z"
-    }
-  ]
-}
-```
+PostgreSQL trigger и ORM guards запрещают UPDATE/DELETE для Rolling ledger и
+transfer consumption rows.
 
-`data` may be a single market object or a list of market objects. The owner of
-the Rapira integration must confirm the production field names and nesting for
-symbol, ask price, and market update time before rollout. A numeric JSON
-`askPrice` is accepted as well as a numeric string. The market timestamp is
-mandatory, must contain a timezone, must not be stale, and must not be more than
-five seconds in the future. No staging/read-only provider payload was available
-during this review, so the strict parser has not been validated against a real
-provider response. Production Rapira was not called.
+## Merchant settle
 
-Rolling использует только свежий реальный `askPrice` Rapira. Допустимы
-USDT/RUB и явно инвертированная RUB/USDT. Snapshot содержит symbol, rate,
-side=`ask`, source=`Rapira`, received timestamp, market timestamp (если он
-есть), `stale=False` и имя provider field `askPrice`.
+Settle создаётся только вручную мерчантом. Текущая реализация поддерживает
+частичный запрос: requested USDT вместе с комиссией конвертируется в
+`total_debit_rub`, который переносится available → frozen. Rejected возвращает
+hold, completed окончательно списывает frozen. Частота не ограничивается, но
+partial unique index разрешает только один pending request на merchant.
 
-`bidPrice`, `last`, `close`, произвольный `price`, статический
-`SETTLEMENT_USDT_RUB_RATE`, stale cache и last-success fallback запрещены.
-Максимальный возраст задаёт `ROLLING_RAPIRA_MAX_AGE_SECONDS` (по умолчанию 60).
+Rapira quote для settle получается до блокировки balance. Scheduler T+0/T+1,
+Celery task или автоматическое создание settle отсутствуют.
 
-Сетевой запрос выполняется до выбора реквизита и долгих `FOR UPDATE`.
-Если quote недоступна, rolling-create возвращает
-`rolling_rate_unavailable`/HTTP 503 и транзакция не оставляет Deposit, trader
-hold или allocation. Идемпотентный повтор существующей заявки не вызывает
-Rapira и возвращает первоначальный snapshot.
+## Lock order
 
-Postpaid вообще не вызывает strict Rapira.
+Финансовый paid/reversal flow фиксирует порядок:
 
-## Deposit TTL
+1. Deposit;
+2. Rolling allocation;
+3. Rolling account;
+4. eligible confirmed transfers FIFO;
+5. immutable transfer consumption rows;
+6. merchant settle balance.
 
-All unsuccessful transitions use `finalize_unsuccessful_deposit()`. Direct
-status assignments remain only for transitions that have different financial
-semantics: successful confirmation sets `paid`; opening an appeal sets
-`appeal_opened`; appeal approval restores the released allocation before using
-the normal paid financing path; appeal rejection restores the recorded
-pre-appeal terminal status. These are intentionally not routed through the
-unsuccessful finalizer because that service releases holds/allocation and emits
-terminal failure outbox records.
-
-`DEPOSIT_PROCESSING_TTL_SECONDS` по умолчанию равен 900. При создании в
-`Deposit.expires_at` сохраняется абсолютный UTC deadline. Изменение настройки
-не меняет уже созданные заявки.
-
-Миграция backfill устанавливает старым строкам
-`created_at + interval '15 minutes'`, после чего колонка становится NOT NULL.
-DB default в 15 минут сохранён только как совместимость для старого экземпляра
-приложения во время rolling deploy/rollback. Новый код всегда явно записывает
-deadline из `DEPOSIT_PROCESSING_TTL_SECONDS`.
-
-Confirm после deadline под `SELECT ... FOR UPDATE`, но до любых финансовых
-движений, выполняет единую timeout-финализацию:
-
-- внешний совместимый status остаётся `failed`;
-- техническая причина — `trader_timeout`;
-- trader hold и pending allocation освобождаются ровно один раз;
-- webhook и aggregator callback создаются в той же DB-транзакции;
-- delivery task ставится только после commit;
-- paid settlement не выполняется.
-
-Тот же lifecycle service используется Celery, ручным Admin/Superadmin decline,
-Merchant cancellation и SMS confirm. Повторная финализация является no-op.
-
-## Pending exposure
-
-A pending allocation created while `outstanding_usdt == 0` **does recover a
-later top-up** if the allocation subsequently becomes paid. Outstanding is not
-reserved at create time. The paid split reads the then-current outstanding
-under the Rolling account lock, so the new top-up participates in recovery.
-This is the existing behavior, now documented and covered by a dedicated
-PostgreSQL test.
-
-При rolling-create создаются одна allocation на Deposit и immutable
-`pending_added` ledger entry. Outstanding на create не уменьшается.
-
-```text
-pending_exposure_usdt = сумма net всех pending allocations
-covered_pending_usdt = min(outstanding, pending_exposure)
-uncovered_pending_usdt = max(pending_exposure - outstanding, 0)
-```
-
-Конкретный кусок outstanding не резервируется за заявкой. Окончательный split
-происходит только при paid под lock Rolling account. При paid, failed,
-timeout, decline или cancellation пишется компенсирующий `pending_released`.
-
-## Funding, top-up и переключение режима
-
-Funding/top-up доступен только Superadmin через CSRF-защищённую форму и
-аутентифицированную 2FA-сессию. Обязательны amount, network, destination
-address, tx hash, funded timestamp и reason. Первый перевод — `funding`,
-следующие — `topup`.
-
-Идемпотентность определяется стабильным ключом от merchant + normalized network
-+ tx hash; в БД дополнительно действует partial unique index по network/tx hash.
-Funding увеличивает `principal_usdt` и `outstanding_usdt`. Top-up после
-`exhausted` возвращает account в `active`.
-
-При включении rolling создаётся безопасный account с нулевыми totals.
-Переключение rolling → postpaid запрещено при outstanding > 0 или pending
-allocations. Скрытого write-off и автоматического зачёта существующего settle
-нет. Suspension — только явное действие Superadmin с reason; `exhausted` трафик
-не блокирует.
-
-## Reversal и апелляции
-
-Публичного UI reversal нет. Внутренний `reverse_paid_allocation()`:
-
-- блокирует account и allocation;
-- возвращает `rolling_applied_usdt` в outstanding;
-- уменьшает recovered;
-- дебетует только ранее начисленный `settle_credited_rub`;
-- создаёт immutable reversal ledger entry и audit;
-- повторный вызов идемпотентен.
-
-Если settle уже выведен/заморожен и available недостаточен, reversal
-останавливается. Отрицательный available не создаётся; нужен отдельный
-receivable/debt workflow.
-
-Одобрение апелляции по ранее failed rolling Deposit восстанавливает исходную
-released allocation и её fee/rate snapshot, затем использует единую
-`apply_merchant_financing()`.
+Confirmation сначала блокирует transfer, затем существующий account. Для
+первого account строка merchant служит creation mutex с обязательным re-check.
+Manual settle блокирует только settle balance и не берёт Rolling locks.
 
 ## Reconciliation
 
-The compensating workflow for a future public reversal is deliberately not
-implemented in this change. The minimum design is:
+`reconcile_rolling_account()` только сообщает расхождения и ничего не
+исправляет. Он сверяет:
 
-1. create an immutable merchant receivable for the settle shortfall, linked to
-   the original Deposit, allocation, attempted reversal, actor, and reason;
-2. record any collection as a separate `manual_adjustment` ledger entry, never
-   by editing Rolling totals or the original recovery;
-3. require a separately authorized and audited `write_off`, with an explicit
-   loss amount and approval identity;
-4. reconcile receivable principal, collections, and write-offs independently
-   from the Rolling account.
+- confirmed transfer totals с account aggregates;
+- net recovery/reversal consumption с recovered каждого transfer;
+- paid allocation RUB split;
+- settle overflow allocations с immutable ledger;
+- pending exposure;
+- количество pending/disputed transfers, не включая их в principal.
 
-Its absence is not a blocker while reversal has no public route and an
-insufficient available settle balance atomically rejects the internal reversal.
-It becomes a production blocker before exposing reversal to staff or before an
-appeal policy permits paid deposits to be reversed after settle withdrawal.
+## Миграция 0020
 
-`reconcile_rolling_account()` ничего не исправляет. Он сравнивает:
+`0020_rolling_confirmation_flow` следует за `0019_ai_office_config`.
 
-- funding/top-up ledger с principal;
-- recovery минус reversal с recovered;
-- principal минус recovered с outstanding;
-- `pending_added - pending_released` с pending allocations;
-- paid RUB split;
-- active settle overflow с ledger overflow с учётом reversal;
-- количество released allocations.
+- Settle balances, trader balances и merchant balances не меняются.
+- Пустой/нулевой Rolling account не создаёт transfer.
+- Для account с principal > 0 создаётся один synthetic confirmed transfer:
+  amount=principal, recovered=recovered, remaining=outstanding,
+  source=`legacy_migration`, tx hash остаётся NULL.
+- Legacy allocation с доказанным consumption (`rolling_applied_usdt > 0` или
+  recovery ledger) связывается с synthetic transfer и получает
+  `eligibility_status=eligible`.
+- Allocation без consumption остаётся eligible только при наличии
+  funding/topup ledger не позднее `deposit.created_at`.
+- Allocation без такого evidence получает явный snapshot
+  `eligibility_status=ineligible`,
+  `eligibility_source=legacy_no_confirmed_funding`; её финансовые суммы и
+  status не пересчитываются.
+- Для paid/reversed eligible allocations создаются derived immutable
+  consumption rows.
+- Existing Rolling ledger rows не изменяются; новый nullable FK остаётся NULL.
+- Сущность старого постоянного режима удаляется.
+- Противоречивые account/funding totals, RUB split, доказанное consumption без
+  funding либо duplicate pending settle останавливают upgrade с redacted
+  invariant error.
 
-Расхождение возвращается структурированным report, логируется и показывается
-Superadmin. Manual adjustment/write-off в текущем UI не реализованы: для них
-нужен отдельный компенсирующий сервис с явно документированным направлением,
-а не изменение totals.
+Downgrade допускается только для legacy-only состояния. После регистрации
+нового transfer он fail-closed, потому что удаление transfer уничтожило бы
+audit/financial evidence.
 
-## Lock order и транзакции
+Исторические миграции `0014`/`0015` и downgrade-часть `0020` сохраняют старое
+слово `postpaid` только как неизбежную schema compatibility для отката до
+старого приложения. В моделях, сервисах, routes, API, templates, UI, логах и
+текущей документации бизнес-модели этого режима нет.
 
-Общий порядок:
+Физические DB-колонки `merchant_net_rub`/`merchant_net_usdt` и прежний
+аддитивный response/metadata alias `merchant_net_amount` временно сохранены
+ради совместимости внешних клиентов и immutable истории. ORM и новый
+контракт отображают их как `merchant_payable_rub`,
+`merchant_payable_usdt` и `merchant_payable_amount`; это документированный
+технический долг, не пользовательский термин.
 
-1. Deposit;
-2. Requisite и trader balance;
-3. Rolling account;
-4. Rolling allocation;
-5. merchant RUB Balance.
+## Проверка
 
-В финансовой транзакции нет HTTP-вызовов. Fee, trader settlement, Rolling
-split, platform/executor ledger, status, webhook outbox, aggregator callback и
-audit фиксируются до одного commit. Доставка запускается после commit.
+Автоматический PostgreSQL suite покрывает регистрацию/подтверждение,
+ownership, dispute/cancel и их гонки, FIFO нескольких transfers, crossing,
+eligibility по created_at, future top-up exclusion, exhausted routing,
+idempotent/concurrent paid, reconciliation, manual partial settle, migration
+legacy totals и downgrade guard.
 
-DB-инварианты: unique profile/merchant, account/merchant, allocation/deposit,
-ledger idempotency key, funding network/tx hash; неотрицательные amounts;
-immutable Rolling ledger защищён PostgreSQL trigger от UPDATE/DELETE.
-
-## Миграция и rollback
-
-Порядок upgrade:
-
-1. `0014_deposit_finance`: nullable `expires_at`, backfill, NOT NULL, индексы,
-   finance profiles с postpaid backfill.
-2. `0015_merchant_rolling`: accounts, allocations, immutable ledger,
-   constraints, индексы и trigger.
-
-Перед production: backup, проверка одного Alembic head, upgrade на копии
-production DB, reconciliation dry run, затем контролируемый rollout.
-Downgrade `0015` удаляет только ещё неиспользуемый Rolling-контур. После
-реального funding/traffic downgrade является разрушительным и без
-архивирования ledger запрещён. Downgrade `0014` удаляет deadlines/profiles и
-допустим только при полном откате приложения.
-
-## Инструкция Superadmin
-
-1. Убедиться, что 2FA включена и текущая сессия прошла 2FA.
-2. Открыть раздел `Rolling`, выбрать мерчанта, включить `rolling` с причиной.
-3. Записать funding: проверить сеть, destination, tx hash, UTC timestamp и
-   сумму. Повторный submit с тем же tx hash безопасен.
-4. Сверить principal/outstanding и reconciliation=`OK`.
-5. Suspension применять только как явное операционное решение с причиной.
-6. Возврат в postpaid выполнять только при нулевом outstanding и отсутствии
-   pending allocations.
-
-## Manual QA checklist
-
-### Locking, outbox, and migration safety
-
-For appeal resolution the order begins with `Deposit` and then `Appeal`; a
-locked Appeal is never used to acquire its Deposit. Lock reads use
-`populate_existing=True` so a waiter observes the committed winner rather than
-a stale SQLAlchemy identity-map object.
-
-Outbox delivery uses a two-phase claim. The worker locks the event, records a
-`delivering` attempt and a two-minute lease, commits, and only then performs DNS
-validation and HTTP. It reacquires the event/attempt after HTTP and will not
-overwrite a newer attempt. Periodic scanners enqueue queued/failed records and
-expired `delivering` leases; the scanners do not perform HTTP while scanning.
-
-Migration `0014` is staged for a large Deposit table: add the nullable column
-without a volatile-default rewrite, set the compatibility default separately,
-backfill in 10,000-row committed batches, validate a temporary not-null check,
-perform the short `SET NOT NULL`, then create the new Deposit indexes with
-`CREATE INDEX CONCURRENTLY` outside the migration transaction. Migration
-`0015` rejects downgrade once any funded/traffic ledger or non-zero Rolling
-total exists.
-
-- Postpaid create не вызывает Rapira и не создаёт allocation.
-- Rolling create без fresh ask даёт 503 и не оставляет hold.
-- Идемпотентный create возвращает прежний rate.
-- Pending может превышать outstanding и не блокирует заявку.
-- Paid полностью и частично гасит Rolling; overflow идёт в RUB settle.
-- При outstanding=0 весь следующий net идёт в settle.
-- Failed/timeout/cancel/decline освобождают pending один раз.
-- Confirm после deadline возвращает конфликт и не проводит finance.
-- Trader/operator видит только `Принять`; прямой decline получает 403.
-- Admin/Superadmin decline требует reason.
-- Funding требует 2FA/CSRF/reason и идемпотентен по tx hash.
-- Top-up после exhausted возвращает active.
-- rolling → postpaid с долгом/pending запрещён.
-- Reversal восстанавливает точные Rolling/settle части.
-- Merchant API сохраняет available/frozen/currency и добавляет string Rolling.
-- Webhook содержит только аддитивные Rolling fields.
-- Reconciliation сходится после funding → pending → paid → overflow → reversal.
+Для ручной проверки localhost нельзя создавать реальный transfer без
+отдельного решения оператора. Проверяются пустые состояния, существующая
+история, формы/permissions/CSRF, health endpoints и отсутствие ошибок в
+api/worker/beat logs.

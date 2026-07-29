@@ -12,8 +12,9 @@ and a test-only Redis service.
 | Immutable Deposit TTL | `app.services.deposit_ttl.new_deposit_expires_at`; Merchant and Aggregator create paths | `test_new_deposit_ttl_uses_nondefault_application_setting`; `test_ttl_uses_immutable_expires_at` |
 | Confirm after deadline commits before error response | `app.services.deposit_confirmation.confirm_deposit_payment`; admin API route | `test_postgres_http_confirm_after_deadline_commits_before_409` |
 | Unified unsuccessful lifecycle | `app.services.deposit_lifecycle.finalize_unsuccessful_deposit` | unsuccessful finalization, expiry worker, and repeated timeout PostgreSQL tests |
-| Postpaid compatibility and no Rapira call | `app.services.rolling.apply_merchant_financing` postpaid branch | `test_postgres_postpaid_default_credits_legacy_balance_without_rapira` |
+| Settle routing without confirmed Rolling and no Rapira call | `app.services.rolling.apply_merchant_financing` settle branch | `test_deposit_created_before_confirmation_goes_to_settle_even_if_paid_later` |
 | Rolling create and immutable snapshot | `rolling_quote_for_deposit_create`; `create_pending_allocation` | original-rate idempotency and strict stale-cache tests |
+| Explicit Rolling eligibility | allocation `eligibility_status` DB CHECK; legacy classification in `0020` | backup-derived pending/released/settle-only/crossing fixtures and future-top-up exclusion |
 | Strict Rapira contract | `app.services.rapira` | direct/inverse, numeric, missing/null/zero/negative ask, symbol, stale/future/naive timestamp, multiple entries, and malformed JSON tests |
 | Pending exposure | pending allocation create/release services | pending-over-outstanding, failed release, and mode-switch PostgreSQL tests |
 | Pending created before top-up | paid-time account split in `apply_merchant_financing` | `test_postgres_pending_created_before_topup_recovers_the_new_rolling` |
@@ -21,7 +22,7 @@ and a test-only Redis service.
 | Top-up | `register_funding` | idempotent/reactivation and paid/top-up concurrency tests |
 | Reversal atomicity | `reverse_paid_allocation` | exact restore, withdrawn-settle rollback, and confirm/reversal race tests |
 | Reconciliation | `reconcile_rolling_account` | baseline funding/split/reversal and paid-allocation concurrency tests |
-| Merchant API compatibility | Merchant balance/create/operation serializers | legacy fields, decimal-as-string, and postpaid tests |
+| Merchant API compatibility | Merchant balance/create/operation serializers | stable balance fields and decimal-as-string Rolling state tests |
 | Superadmin 2FA, session, CSRF, validation, idempotency | `_require_superadmin_web`; funding route; `register_funding` | `test_postgres_superadmin_rolling_funding_requires_real_2fa_session_and_csrf` |
 | Outbox commit/enqueue crash recovery | transactional outbox plus due scanners | `test_postgres_outbox_scanner_recovers_commit_enqueue_crash` |
 | No HTTP under outbox DB locks and newer-claim protection | two-phase delivery claim | `test_postgres_outbox_releases_db_lock_during_http_and_preserves_newer_claim` |

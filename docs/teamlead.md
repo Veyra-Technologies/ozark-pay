@@ -20,7 +20,7 @@ accrual_rub = deposit_gross_rub × commission_percent / 100
 `deposit.created_at`; назначение задним числом не применяется.
 
 Вознаграждение является расходом платформы. Оно не уменьшает доход или баланс
-трейдера, Merchant net/settle и Rolling recovery.
+трейдера, сумму к выплате мерчанту/settle и Rolling recovery.
 
 ## Исторические назначения
 

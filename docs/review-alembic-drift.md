@@ -81,12 +81,20 @@ enforcement. Reconcile the intended model first.
 
 29. remove `uq_operation_fee_snapshots_deposit_id`:
     **A=yes, B=no, C=yes, D=no, E=yes**. Rolling depends on one immutable fee
-    snapshot per Deposit. Any drift migration must preserve that invariant; the
-    raw removal must not be applied.
+snapshot per Deposit. Any drift migration must preserve that invariant; the
+raw removal must not be applied.
+
+## Platform wallet history index
+
+30. remove `ix_platform_crypto_wallets_created_at`:
+    **A=yes, B=no, C=no, D=no, E=yes**. This drift belongs to the existing
+    `0018_platform_crypto_wallet` schema/model representation and is outside
+    the Rolling confirmation refactor. The raw removal must not be folded into
+    `0020`.
 
 ## Summary by requested category
 
-- **A:** all 29 logical drift rows above (39 Alembic detector messages when
+- **A:** all 30 logical drift rows above (40 Alembic detector messages when
   remove/add index changes are counted separately).
 - **B:** none.
 - **C:** operation-fee snapshot uniqueness only; no actual 0014/0015 table,

@@ -7,7 +7,7 @@ production funds, production wallet credentials, or real AI Office secrets.
 
 - `/version` returns `2.0.0-rc1`.
 - `/health` and `/ready` return HTTP 200.
-- Alembic current is `0019_ai_office_config`.
+- Alembic current is `0020_rolling_confirmation_flow`.
 - A Superadmin has working 2FA.
 - Separate Admin, Trader/Operator, Support, Merchant and TeamLead test
   accounts are available.
@@ -93,10 +93,10 @@ production funds, production wallet credentials, or real AI Office secrets.
 
 ## D. Financial regression
 
-1. Create/confirm a legacy postpaid Deposit.
+1. Create/confirm a Deposit without eligible confirmed Rolling.
 2. Create/confirm a Rolling Deposit with a fresh Rapira live ask.
 3. Confirm a TeamLead-attributed Deposit and verify accrual from gross.
-4. Confirm trader income, merchant net, Rolling allocation and platform
+4. Confirm trader income, merchant payable, Rolling allocation and platform
    expense match the pre-release formulas.
 5. Request/reject/retry/complete a TeamLead settlement and verify the existing
    168-hour cooldown and fee accounting.

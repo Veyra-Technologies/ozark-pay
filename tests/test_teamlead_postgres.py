@@ -508,7 +508,16 @@ def test_postgres_paid_accrues_once_from_gross_without_changing_trader_merchant_
                         Balance.merchant_id == actors['merchant'].id
                     )
                 )).scalar_one()
-                assert first['merchant_net_amount'] == second['merchant_net_amount'] == '90000.00'
+                assert (
+                    first['merchant_payable_amount']
+                    == second['merchant_payable_amount']
+                    == '90000.00'
+                )
+                assert (
+                    first['merchant_net_amount']
+                    == second['merchant_net_amount']
+                    == '90000.00'
+                )
                 assert accrual.gross_rub == Decimal('100000.00')
                 assert accrual.commission_percent_snapshot == Decimal('0.500000')
                 assert accrual.accrual_rub == Decimal('500.00')
