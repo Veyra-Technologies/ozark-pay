@@ -6,12 +6,12 @@ from sqlalchemy import and_, or_, select
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal, engine
-from app.models import AggregatorCallbackLog, WebhookEvent
+from app.models import AggregatorCallbackLog
 from app.services.appeals import approve_expired_appeals
 from app.services.aggregators import deliver_callback_log
 from app.services.antiscam import run_periodic_antiscam_scan
 from app.services.deposit_lifecycle import expire_due_deposits
-from app.services.webhooks import deliver_event
+from app.services.webhooks import deliver_event, due_webhook_event_ids
 
 celery_app = Celery('processing_platform', broker=settings.CELERY_BROKER_URL, backend=settings.CELERY_RESULT_BACKEND)
 
@@ -47,23 +47,7 @@ def deliver_aggregator_callback_task(callback_log_id: str):
 def deliver_due_webhooks_task() -> int:
     async def run() -> int:
         async with AsyncSessionLocal() as db:
-            now = datetime.now(timezone.utc)
-            event_ids = (await db.execute(
-                select(WebhookEvent.id)
-                .where(
-                    or_(
-                        WebhookEvent.status.in_(['queued', 'failed']),
-                        and_(
-                            WebhookEvent.status == 'delivering',
-                            WebhookEvent.next_retry_at <= now,
-                        ),
-                    ),
-                    WebhookEvent.attempts < settings.PLATFORM_WEBHOOK_RETRY_LIMIT,
-                    (WebhookEvent.next_retry_at.is_(None) | (WebhookEvent.next_retry_at <= now)),
-                )
-                .order_by(WebhookEvent.created_at.asc())
-                .limit(100)
-            )).scalars().all()
+            event_ids = await due_webhook_event_ids(db, limit=100)
         from app.services.webhook_enqueue import enqueue_webhook_delivery
 
         return sum(

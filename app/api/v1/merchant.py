@@ -18,7 +18,6 @@ from app.models import (
     MerchantRollingAllocation,
     Payout,
     Requisite,
-    WebhookEvent,
 )
 from app.schemas.common import PaymentCreate, PayoutCreate
 from app.core.config import settings
@@ -83,6 +82,7 @@ MERCHANT_ERROR_MESSAGES = {
     'negative_platform_margin': 'The configured executor fee exceeds the merchant fee.',
     'fee_configuration_error': 'Fee configuration blocks this operation.',
     'webhook_not_found': 'Webhook event was not found.',
+    'webhook_retry_superadmin_required': 'Manual webhook retry is restricted to Superadmin.',
     'rolling_rate_unavailable': 'A fresh Rapira ask quote is unavailable for Rolling.',
     'rolling_suspended': 'Rolling traffic is suspended for this merchant.',
 }
@@ -638,15 +638,6 @@ async def operations(
 
 @router.post('/webhooks/{event_id}/retry')
 async def retry_webhook(event_id: str, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
-    ev=(await db.execute(select(WebhookEvent).where(WebhookEvent.id==event_id, WebhookEvent.merchant_id==merchant.id))).scalar_one_or_none()
-    if not ev:
-        await log_req(db,merchant,request,404); await db.commit()
-        raise merchant_error(404, 'webhook_not_found')
-    ev.status='queued'
-    ev.attempts = 0
-    ev.next_retry_at = None
-    ev.last_error = None
-    await log_req(db,merchant,request)
+    await log_req(db, merchant, request, 403)
     await db.commit()
-    webhook_enqueued = _enqueue_webhook(ev.id)
-    return {'ok':True,'status':'queued','event_id':ev.id,'webhook_enqueued':webhook_enqueued}
+    raise merchant_error(403, 'webhook_retry_superadmin_required')

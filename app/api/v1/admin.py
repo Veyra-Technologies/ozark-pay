@@ -6,7 +6,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pyotp
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,7 @@ from app.db.session import get_db
 from app.api.deps import require_roles
 from app.core.business_rules import BUSINESS_RULES, ROLE_PERMISSIONS
 from app.core.compliance import COMPLIANCE_POLICY
-from app.models import Appeal, AppealMessage, AggregatorAccount, AggregatorCallbackLog, AggregatorPayment, Blacklist, FeeRule, KycProfile, LedgerEntry, LimitRule, ReportExport, RiskEvent, User, Merchant, ApiKey, Deposit, Payout, Balance, Requisite, AuditLog, WebhookEvent
+from app.models import Appeal, AppealMessage, AggregatorAccount, AggregatorCallbackLog, AggregatorPayment, Blacklist, FeeRule, KycProfile, LedgerEntry, LimitRule, ReportExport, RiskEvent, User, Merchant, ApiKey, Deposit, Payout, Balance, Requisite, AuditLog, WebhookEvent, MerchantWebhookSigningKey
 from app.schemas.common import AggregatorCreate, AggregatorStatusIn, AggregatorUpdate, AppealMessageIn, AppealResolveIn, BlacklistIn, FeeRuleIn, KycReviewIn, LimitRuleIn, MerchantCreate, RequisiteIn, UserCreateIn
 from app.core.enums import AppealStatus, Role, DepositStatus, PayoutStatus
 from app.core.access import can_message_appeal, can_view_admin_stats
@@ -34,7 +34,17 @@ from app.services.fee_tiers import (
     replace_fee_rule,
 )
 from app.services.platform_income import platform_income_dashboard
-from app.services.webhooks import queue_webhook
+from app.services.webhooks import (
+    queue_webhook,
+    request_manual_webhook_retry,
+)
+from app.services.webhook_signing_keys import (
+    WebhookSigningKeyError,
+    issue_webhook_signing_key,
+    revoke_webhook_signing_key,
+    rotate_webhook_signing_key,
+    webhook_key_fingerprint,
+)
 from app.services.sms import confirm_deposit_from_sms
 from app.services.webhook_enqueue import enqueue_webhook_delivery
 from app.services.webhook_payloads import build_deposit_webhook_payload, build_payout_webhook_payload
@@ -806,17 +816,205 @@ async def resolve_appeal(appeal_id: UUID, data: AppealResolveIn, request: Reques
     return {'ok':True,'appeal_id':appeal.id,'status':appeal.status}
 
 @router.post('/webhooks/{event_id}/retry')
-async def admin_retry_webhook(event_id: UUID, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin))):
-    event=(await db.execute(select(WebhookEvent).where(WebhookEvent.id==event_id))).scalar_one_or_none()
+async def admin_retry_webhook(event_id: UUID, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin))):
+    event = await request_manual_webhook_retry(db, event_id)
     if not event: raise HTTPException(404,'webhook event not found')
-    event.status='queued'
-    event.attempts = 0
-    event.next_retry_at = None
-    event.last_error = None
-    await audit(db,'webhook_retry_requested','webhook_event',actor.id,event.id,client_ip(request))
+    await audit(
+        db,
+        'webhook_retry_requested',
+        'webhook_event',
+        actor.id,
+        event.id,
+        client_ip(request),
+        {
+            'event_id': str(event.id),
+            'attempts': event.attempts,
+            'max_attempts': event.max_attempts,
+        },
+    )
     await db.commit()
-    webhook_enqueued = _enqueue_webhook(event.id)
+    webhook_enqueued = (
+        False
+        if event.status == 'delivered'
+        else _enqueue_webhook(event.id)
+    )
     return {'ok':True,'event_id':event.id,'status':event.status,'webhook_enqueued':webhook_enqueued}
+
+
+@router.get('/merchants/{merchant_id}/webhook-signing-keys')
+async def list_webhook_signing_keys(
+    merchant_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    merchant = await db.scalar(
+        select(Merchant).where(Merchant.id == merchant_id)
+    )
+    if not merchant:
+        raise HTTPException(404, 'merchant not found')
+    keys = (
+        await db.execute(
+            select(MerchantWebhookSigningKey)
+            .where(
+                MerchantWebhookSigningKey.merchant_id == merchant.id
+            )
+            .order_by(MerchantWebhookSigningKey.created_at.desc())
+        )
+    ).scalars().all()
+    return {
+        'merchant_id': merchant.id,
+        'configuration_required': not any(
+            key.status == 'active' for key in keys
+        ),
+        'keys': [
+            {
+                'key_id': key.key_id,
+                'status': key.status,
+                'created_at': key.created_at,
+                'retire_at': key.retire_at,
+                'revoked_at': key.revoked_at,
+            }
+            for key in keys
+        ],
+    }
+
+
+@router.post('/merchants/{merchant_id}/webhook-signing-keys')
+async def issue_merchant_webhook_signing_key(
+    merchant_id: UUID,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    merchant = await db.scalar(
+        select(Merchant)
+        .where(Merchant.id == merchant_id)
+        .with_for_update()
+    )
+    if not merchant:
+        raise HTTPException(404, 'merchant not found')
+    try:
+        key, secret = await issue_webhook_signing_key(
+            db,
+            merchant,
+            created_by=actor.id,
+        )
+    except WebhookSigningKeyError as exc:
+        raise HTTPException(409, {'code': exc.code}) from exc
+    await audit(
+        db,
+        'merchant_webhook_signing_key_issued',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant.id),
+            'key_fingerprint': webhook_key_fingerprint(key.key_id),
+        },
+    )
+    await db.commit()
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return {
+        'merchant_id': merchant.id,
+        'key_id': key.key_id,
+        'secret': secret,
+        'secret_display': 'one_time',
+    }
+
+
+@router.post('/merchants/{merchant_id}/webhook-signing-keys/rotate')
+async def rotate_merchant_webhook_signing_key(
+    merchant_id: UUID,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    merchant = await db.scalar(
+        select(Merchant)
+        .where(Merchant.id == merchant_id)
+        .with_for_update()
+    )
+    if not merchant:
+        raise HTTPException(404, 'merchant not found')
+    try:
+        key, secret, retiring = await rotate_webhook_signing_key(
+            db,
+            merchant,
+            created_by=actor.id,
+        )
+    except WebhookSigningKeyError as exc:
+        raise HTTPException(409, {'code': exc.code}) from exc
+    await audit(
+        db,
+        'merchant_webhook_signing_key_rotated',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant.id),
+            'new_key_fingerprint': webhook_key_fingerprint(key.key_id),
+            'retiring_key_fingerprint': webhook_key_fingerprint(
+                retiring.key_id
+            ),
+            'retire_at': retiring.retire_at.isoformat(),
+        },
+    )
+    await db.commit()
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return {
+        'merchant_id': merchant.id,
+        'key_id': key.key_id,
+        'secret': secret,
+        'secret_display': 'one_time',
+        'retiring_key_id': retiring.key_id,
+        'retire_at': retiring.retire_at,
+    }
+
+
+@router.post(
+    '/merchants/{merchant_id}/webhook-signing-keys/{key_id}/revoke'
+)
+async def revoke_merchant_webhook_signing_key(
+    merchant_id: UUID,
+    key_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    key = await db.scalar(
+        select(MerchantWebhookSigningKey)
+        .where(
+            MerchantWebhookSigningKey.merchant_id == merchant_id,
+            MerchantWebhookSigningKey.key_id == key_id,
+        )
+        .with_for_update()
+    )
+    if not key:
+        raise HTTPException(404, 'webhook signing key not found')
+    try:
+        await revoke_webhook_signing_key(db, key)
+    except WebhookSigningKeyError as exc:
+        raise HTTPException(409, {'code': exc.code}) from exc
+    await audit(
+        db,
+        'merchant_webhook_signing_key_revoked',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant_id),
+            'key_fingerprint': webhook_key_fingerprint(key.key_id),
+        },
+    )
+    await db.commit()
+    return {'ok': True, 'key_id': key.key_id, 'status': key.status}
 
 @router.get('/reports/export')
 async def export_operations_report(

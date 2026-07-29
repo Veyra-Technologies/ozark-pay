@@ -28,7 +28,17 @@ class Settings(BaseSettings):
     SUPERADMIN_2FA_SECRET: str = Field(min_length=16)
     SEED_DEMO_DATA: bool = False
     ALLOW_SANDBOX_KEYS_IN_PRODUCTION: bool = False
-    PLATFORM_WEBHOOK_RETRY_LIMIT: int = 5
+    PLATFORM_WEBHOOK_RETRY_LIMIT: int = Field(default=5, ge=1, le=20)
+    WEBHOOK_LEASE_SECONDS: int = Field(default=120, ge=15, le=3600)
+    WEBHOOK_RETRY_BASE_SECONDS: int = Field(default=30, ge=1, le=3600)
+    WEBHOOK_RETRY_MAX_SECONDS: int = Field(default=3600, ge=1, le=86400)
+    WEBHOOK_RETRY_JITTER_SECONDS: int = Field(default=15, ge=0, le=600)
+    WEBHOOK_RETRY_AFTER_MAX_SECONDS: int = Field(default=3600, ge=1, le=86400)
+    WEBHOOK_SIGNING_KEY_OVERLAP_SECONDS: int = Field(
+        default=86400,
+        ge=60,
+        le=2592000,
+    )
     RATE_LIMIT_DEFAULT: str = '120/minute'
     LOGIN_RATE_LIMIT: str = '10/minute'
     AUTH_FAILURE_LIMIT: int = 7

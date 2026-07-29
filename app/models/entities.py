@@ -1164,10 +1164,30 @@ class WebhookEvent(Base, TimestampMixin):
     payload: Mapped[dict]=mapped_column(JSON)
     status: Mapped[str]=mapped_column(String(32), default='queued')
     attempts: Mapped[int]=mapped_column(Integer, default=0)
+    max_attempts: Mapped[int]=mapped_column(Integer, default=5)
     last_error: Mapped[str|None]=mapped_column(Text, nullable=True)
     last_status_code: Mapped[int|None]=mapped_column(Integer, nullable=True)
     response_snippet: Mapped[str|None]=mapped_column(Text, nullable=True)
     next_retry_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    next_attempt_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    lock_owner: Mapped[str|None]=mapped_column(String(64), nullable=True)
+    locked_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    lease_until: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    correlation_id: Mapped[str]=mapped_column(String(64), default=lambda: uuid.uuid4().hex)
+    signing_key_id: Mapped[uuid.UUID|None]=mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('merchant_webhook_signing_keys.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    __table_args__=(
+        Index(
+            'ix_webhook_events_delivery_due',
+            'status',
+            'next_attempt_at',
+            'lease_until',
+        ),
+    )
 
 
 class WebhookDeliveryAttempt(Base, TimestampMixin):
@@ -1179,6 +1199,47 @@ class WebhookDeliveryAttempt(Base, TimestampMixin):
     status_code: Mapped[int|None]=mapped_column(Integer, nullable=True)
     error: Mapped[str|None]=mapped_column(Text, nullable=True)
     response_snippet: Mapped[str|None]=mapped_column(Text, nullable=True)
+    __table_args__=(
+        UniqueConstraint(
+            'webhook_event_id',
+            'attempt_no',
+            name='uq_webhook_delivery_attempt_event_number',
+        ),
+    )
+
+
+class MerchantWebhookSigningKey(Base, TimestampMixin):
+    __tablename__='merchant_webhook_signing_keys'
+    id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    merchant_id: Mapped[uuid.UUID]=mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('merchants.id', ondelete='CASCADE'),
+        index=True,
+    )
+    key_id: Mapped[str]=mapped_column(String(80), unique=True, index=True)
+    encrypted_secret: Mapped[str]=mapped_column(String(255))
+    status: Mapped[str]=mapped_column(String(16), default='active', index=True)
+    retire_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    revoked_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    created_by: Mapped[uuid.UUID|None]=mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True,
+    )
+    __table_args__=(
+        CheckConstraint(
+            "status IN ('active','retiring','revoked')",
+            name='ck_merchant_webhook_signing_keys_status',
+        ),
+        Index(
+            'uq_merchant_webhook_signing_keys_one_active',
+            'merchant_id',
+            unique=True,
+            postgresql_where=text("status = 'active'"),
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
 
 
 class ApiReplayNonce(Base, TimestampMixin):

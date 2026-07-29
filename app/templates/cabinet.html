@@ -448,6 +448,17 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
       <td>{% if k.is_active %}<div class="actions-row"><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/{{ k.id }}/rotate" data-confirm="Отозвать выбранный {{ 'Production' if k.mode == 'production' else 'Sandbox' }} key и показать новый secret один раз?">{{ csrf_input(request) }}<button class="secondary" type="submit">Перевыпустить</button></form><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/{{ k.id }}/revoke" data-confirm="Отозвать выбранный API key? Это действие немедленно остановит запросы с ним.">{{ csrf_input(request) }}<button class="danger" type="submit">Отозвать</button></form></div>{% else %}—{% endif %}</td>
     </tr>{% endfor %}{% else %}<tr><td colspan="7">Ключей нет</td></tr>{% endif %}</table></div>
     {% if mc %}<div class="actions-row"><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/issue" data-confirm="Выпустить отдельный Sandbox API key и показать secret один раз?">{{ csrf_input(request) }}<input type="hidden" name="mode" value="sandbox"><button class="secondary" type="submit" {% if 'sandbox' in mc['active_key_modes'] %}disabled title="Активный Sandbox key уже существует — используйте перевыпуск"{% endif %}>Выпустить Sandbox API key/secret</button></form><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/issue" data-confirm="Выпустить Production API key для реального трафика и показать secret один раз?">{{ csrf_input(request) }}<input type="hidden" name="mode" value="production"><button class="primary" type="submit" {% if 'production' in mc['active_key_modes'] %}disabled title="Активный Production key уже существует — используйте перевыпуск"{% endif %}>Выпустить Production API key/secret</button></form></div>{% endif %}
+    {% if role == 'superadmin' and mc %}
+    <h3>Webhook signing keys</h3>
+    {% if mc.webhook_configuration_required %}<div class="note">configuration_required: webhook URL настроен, но отдельный signing key отсутствует. Доставка заблокирована; Merchant API secret не используется как fallback.</div>{% endif %}
+    <div class="table-wrap"><table><tr><th>Key ID</th><th>Status</th><th>Created</th><th>Retire at</th></tr>
+    {% for key in mc.webhook_signing_keys %}<tr><td><span class="cell-mono cell-ellipsis" title="{{ key.key_id }}">{{ key.key_id }}</span></td><td><span class="status-pill {{ 'status-ok' if key.status == 'active' else 'status-wait' if key.status == 'retiring' else 'status-bad' }}">{{ key.status }}</span></td><td>{{ key.created_at|dt_compact }}</td><td>{{ key.retire_at|dt_compact if key.retire_at else '—' }}</td></tr>{% else %}<tr><td colspan="4">Webhook signing keys отсутствуют.</td></tr>{% endfor %}
+    </table></div>
+    <div class="actions-row">
+      {% if mc.has_active_webhook_signing_key %}<form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/webhook-signing-keys/rotate" data-confirm="Rotate webhook signing key? Старый ключ останется retiring на overlap-период.">{{ csrf_input(request) }}<button class="secondary" type="submit">Rotate webhook key</button></form>
+      {% else %}<form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/webhook-signing-keys/issue" data-confirm="Выпустить отдельный webhook signing secret и показать его один раз?">{{ csrf_input(request) }}<button class="primary" type="submit">Issue webhook key</button></form>{% endif %}
+    </div>
+    {% endif %}
     <div class="modal-actions"><button class="secondary" type="button" data-modal-close="merchantModal{{ u.id }}">Закрыть</button></div>
   </div></div>
   {% endfor %}{% endif %}
@@ -869,7 +880,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </table></div>
 
   {% elif s == 'Webhook' %}
-  <div class="table-wrap"><table><tr><th>Дата</th><th>Событие</th><th>Статус</th><th>Попытки</th><th>Payload</th><th>Ошибка</th></tr>
+  <div class="table-wrap"><table><tr><th>Дата</th><th>Событие</th><th>Статус</th><th>Попытки</th><th>Payload</th><th>Ошибка</th><th>Действие</th></tr>
   {% for ev in webhook_events %}
   <tr>
     <td><span class="text-date" title="{{ ev.created_at|dt_full }}">{{ ev.created_at|dt_compact }}</span></td>
@@ -878,8 +889,9 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <td>{{ ev.attempts }}</td>
     <td class="cell-wrap">{{ ev.payload }}</td>
     <td class="cell-wrap">{{ ev.last_error or '—' }}</td>
+    <td>{% if role == 'superadmin' and ev.status != 'delivered' %}<form method="post" action="{{ cabinet_base }}/webhooks/{{ ev.id }}/retry" data-confirm="Запросить ручную повторную доставку этого event_id?">{{ csrf_input(request) }}<button class="secondary btn-small" type="submit">Retry</button></form>{% else %}—{% endif %}</td>
   </tr>
-  {% else %}<tr><td colspan="6">Webhook-событий пока нет</td></tr>{% endfor %}
+  {% else %}<tr><td colspan="7">Webhook-событий пока нет</td></tr>{% endfor %}
   </table></div>
 
   {% elif s == 'Апелляции' %}

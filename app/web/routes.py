@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.db.session import get_db
-from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, MerchantRollingTransfer, MerchantRollingTransferConsumption, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
+from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, MerchantWebhookSigningKey, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, MerchantRollingTransfer, MerchantRollingTransferConsumption, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
@@ -79,7 +79,10 @@ from app.services.settlements import (
     reject_merchant_settlement,
 )
 from app.services.webhook_enqueue import enqueue_webhook_delivery
-from app.services.webhooks import queue_webhook
+from app.services.webhooks import (
+    queue_webhook,
+    request_manual_webhook_retry,
+)
 from app.services.webhook_payloads import build_deposit_webhook_payload
 from app.services.fee_tiers import (
     COMMISSION_TIER_METHODS,
@@ -142,6 +145,12 @@ from app.services.merchant_api_keys import (
     normalize_api_key_mode,
     revoke_merchant_api_key,
     rotate_merchant_api_key,
+)
+from app.services.webhook_signing_keys import (
+    WebhookSigningKeyError,
+    issue_webhook_signing_key,
+    rotate_webhook_signing_key,
+    webhook_key_fingerprint,
 )
 
 router = APIRouter(tags=['web'])
@@ -657,6 +666,7 @@ def merchant_credentials_response(
     mode: str,
     login_password: str | None = None,
     title: str = 'Merchant API credentials',
+    credential_kind: str = 'merchant_api',
 ):
     realm = request_auth_realm(request) or realm_for_role(actor.role) or 'staff'
     response = templates.TemplateResponse(
@@ -672,12 +682,183 @@ def merchant_credentials_response(
             'secret_key': secret_key,
             'login_password': login_password,
             'mode': api_key_mode_label(mode),
+            'credential_kind': credential_kind,
             'cabinet_base': realm_cabinet_path(realm),
         },
     )
     response.headers['Cache-Control'] = 'no-store, max-age=0'
     response.headers['Pragma'] = 'no-cache'
     return response
+
+
+@router.post(
+    '/cabinet/merchants/{merchant_id}/webhook-signing-keys/issue',
+    response_class=HTMLResponse,
+)
+async def issue_webhook_signing_key_from_cabinet(
+    request: Request,
+    merchant_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await get_current_web_user(request, db)
+    if not actor:
+        return RedirectResponse('/login', status_code=303)
+    if staff_2fa_setup_required(actor):
+        return _twofa_redirect()
+    if actor.role != Role.superadmin.value:
+        return _merchant_key_redirect(
+            request,
+            'Only Superadmin can issue webhook signing keys.',
+        )
+    merchant = await _locked_merchant(db, merchant_id)
+    if not merchant:
+        return _merchant_key_redirect(request, 'Merchant not found.')
+    try:
+        key, secret = await issue_webhook_signing_key(
+            db,
+            merchant,
+            created_by=actor.id,
+        )
+    except WebhookSigningKeyError as exc:
+        return _merchant_key_redirect(request, str(exc))
+    owner = await db.scalar(
+        select(User).where(User.id == merchant.owner_id)
+    )
+    await audit(
+        db,
+        'merchant_webhook_signing_key_issued',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant.id),
+            'key_fingerprint': webhook_key_fingerprint(key.key_id),
+        },
+    )
+    await db.commit()
+    return merchant_credentials_response(
+        request=request,
+        actor=actor,
+        merchant=merchant,
+        merchant_email=owner.email if owner else '',
+        api_key=key.key_id,
+        secret_key=secret,
+        mode='production',
+        title='New webhook signing credentials',
+        credential_kind='webhook_signing',
+    )
+
+
+@router.post(
+    '/cabinet/merchants/{merchant_id}/webhook-signing-keys/rotate',
+    response_class=HTMLResponse,
+)
+async def rotate_webhook_signing_key_from_cabinet(
+    request: Request,
+    merchant_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await get_current_web_user(request, db)
+    if not actor:
+        return RedirectResponse('/login', status_code=303)
+    if staff_2fa_setup_required(actor):
+        return _twofa_redirect()
+    if actor.role != Role.superadmin.value:
+        return _merchant_key_redirect(
+            request,
+            'Only Superadmin can rotate webhook signing keys.',
+        )
+    merchant = await _locked_merchant(db, merchant_id)
+    if not merchant:
+        return _merchant_key_redirect(request, 'Merchant not found.')
+    try:
+        key, secret, retiring = await rotate_webhook_signing_key(
+            db,
+            merchant,
+            created_by=actor.id,
+        )
+    except WebhookSigningKeyError as exc:
+        return _merchant_key_redirect(request, str(exc))
+    owner = await db.scalar(
+        select(User).where(User.id == merchant.owner_id)
+    )
+    await audit(
+        db,
+        'merchant_webhook_signing_key_rotated',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant.id),
+            'new_key_fingerprint': webhook_key_fingerprint(key.key_id),
+            'retiring_key_fingerprint': webhook_key_fingerprint(
+                retiring.key_id
+            ),
+            'retire_at': retiring.retire_at.isoformat(),
+        },
+    )
+    await db.commit()
+    return merchant_credentials_response(
+        request=request,
+        actor=actor,
+        merchant=merchant,
+        merchant_email=owner.email if owner else '',
+        api_key=key.key_id,
+        secret_key=secret,
+        mode='production',
+        title='Rotated webhook signing credentials',
+        credential_kind='webhook_signing',
+    )
+
+
+@router.post('/cabinet/webhooks/{event_id}/retry')
+async def retry_webhook_from_cabinet(
+    request: Request,
+    event_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await get_current_web_user(request, db)
+    if not actor:
+        return RedirectResponse('/login', status_code=303)
+    if staff_2fa_setup_required(actor):
+        return _twofa_redirect()
+    if actor.role != Role.superadmin.value:
+        return _redirect(
+            'Manual webhook retry is restricted to Superadmin.',
+            'webhook',
+        )
+    event = await request_manual_webhook_retry(db, event_id)
+    if not event:
+        return _redirect('Webhook event not found.', 'webhook')
+    await audit(
+        db,
+        'webhook_retry_requested',
+        'webhook_event',
+        actor.id,
+        event.id,
+        client_ip(request),
+        {
+            'event_id': str(event.id),
+            'attempts': event.attempts,
+            'max_attempts': event.max_attempts,
+        },
+    )
+    await db.commit()
+    enqueued = (
+        False
+        if event.status == 'delivered'
+        else enqueue_webhook_delivery(event.id)
+    )
+    return _redirect(
+        (
+            'Webhook retry queued.'
+            if enqueued
+            else 'Webhook retry recorded; scanner will recover enqueue.'
+        ),
+        'webhook',
+    )
 
 
 async def get_current_web_user(request: Request, db: AsyncSession):
@@ -4262,11 +4443,30 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] and merchants:
         merchant_ids = [m.id for m in merchants]
         keys = (await db.execute(select(ApiKey).where(ApiKey.merchant_id.in_(merchant_ids)).order_by(ApiKey.created_at.desc()))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value] else []
+        webhook_signing_keys = (
+            await db.execute(
+                select(MerchantWebhookSigningKey)
+                .where(
+                    MerchantWebhookSigningKey.merchant_id.in_(merchant_ids)
+                )
+                .order_by(MerchantWebhookSigningKey.created_at.desc())
+            )
+        ).scalars().all() if user.role == Role.superadmin.value else []
         keys_by_merchant = {}
         for k in keys:
             keys_by_merchant.setdefault(str(k.merchant_id), []).append(k)
+        webhook_keys_by_merchant = {}
+        for webhook_key in webhook_signing_keys:
+            webhook_keys_by_merchant.setdefault(
+                str(webhook_key.merchant_id),
+                [],
+            ).append(webhook_key)
         for m in merchants:
             merchant_keys = keys_by_merchant.get(str(m.id), [])
+            merchant_webhook_keys = webhook_keys_by_merchant.get(
+                str(m.id),
+                [],
+            )
             merchant_credentials[str(m.owner_id)] = {
                 "merchant_id": str(m.id),
                 "name": m.name,
@@ -4276,6 +4476,18 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 "commission_percent": m.merchant_commission_percent,
                 "keys": merchant_keys,
                 "active_key_modes": {k.mode for k in merchant_keys if k.is_active},
+                "webhook_signing_keys": merchant_webhook_keys,
+                "has_active_webhook_signing_key": any(
+                    key.status == 'active'
+                    for key in merchant_webhook_keys
+                ),
+                "webhook_configuration_required": (
+                    bool(m.webhook_url)
+                    and not any(
+                        key.status == 'active'
+                        for key in merchant_webhook_keys
+                    )
+                ),
             }
             if user.role == Role.superadmin.value:
                 finance_balance = (await db.execute(

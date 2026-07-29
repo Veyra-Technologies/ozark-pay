@@ -11,12 +11,13 @@ def enqueue_webhook_delivery(event_id) -> bool:
     try:
         deliver_webhook_task.delay(event_id_text)
     except Exception as exc:
-        metrics_registry.increment('processing_platform_webhook_enqueue_failures_total', {'reason': exc.__class__.__name__})
-        logger.exception(
+        error_type = exc.__class__.__name__
+        metrics_registry.increment('processing_platform_webhook_enqueue_failures_total', {'reason': error_type})
+        logger.error(
             'webhook_enqueue_failed',
             extra={
                 'event_id': event_id_text,
-                'reason': str(exc)[:500],
+                'error_type': error_type,
             },
         )
         return False
