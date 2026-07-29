@@ -16,6 +16,8 @@ concurrency:
 
 env:
   PYTHON_VERSION: '3.12'
+  PIP_DEFAULT_TIMEOUT: '300'
+  PIP_RETRIES: '10'
   ENV: test
   SECRET_KEY: ci-only-secret-key-with-at-least-thirty-two-characters
   ENCRYPTION_KEY: X0djOf3Ag4hSfN_PmH-aPSBaZGYoWsdFBGFzlNH3wlg=
@@ -65,7 +67,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install application
-        run: python -m pip install .
+        uses: ./.github/actions/install-python-app
       - name: Upgrade database
         run: python -m alembic upgrade head
       - name: Run full test suite
@@ -103,7 +105,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install application
-        run: python -m pip install .
+        uses: ./.github/actions/install-python-app
       - name: Clean upgrade and drift check
         run: |
           python -m alembic upgrade head
@@ -155,7 +157,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - name: Install application
-        run: python -m pip install .
+        uses: ./.github/actions/install-python-app
       - name: Upgrade database
         run: python -m alembic upgrade head
       - name: Repeat race-sensitive tests three times
@@ -225,12 +227,35 @@ jobs:
             git diff --check HEAD^ HEAD
           fi
       - name: Full-history secret scan
-        run: >-
-          docker run --rm
-          -v "${{ github.workspace }}:/repo"
-          ghcr.io/gitleaks/gitleaks:v8.30.1
-          git --source=/repo --redact --no-banner --log-opts=--all
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/repo \
+            --volume "${{ github.workspace }}:/repo:ro" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f \
+            git --config /repo/.gitleaks.toml \
+            --redact --no-banner --log-opts=--all /repo
+          then
+            {
+              echo "### Full-history secret scan failed"
+              echo
+              echo "Gitleaks found a secret or could not complete the scan."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          {
+            echo "### Full-history secret scan"
+            echo
+            echo "Gitleaks completed successfully across the full Git history."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Install application
+        uses: ./.github/actions/install-python-app
       - name: Dependency audit
         run: |
-          python -m pip install . pip-audit==2.10.1
-          python -m pip_audit --strict
+          python -m pip install pip-audit==2.10.1
+          python -m pip_audit --strict --format json .
