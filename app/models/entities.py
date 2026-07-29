@@ -71,13 +71,15 @@ class ApiKey(Base, TimestampMixin):
     __tablename__='api_keys'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     merchant_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('merchants.id', ondelete='CASCADE'), index=True)
-    api_key: Mapped[str]=mapped_column(String(80), unique=True, index=True)
+    api_key: Mapped[str]=mapped_column(String(80))
     secret_hash: Mapped[str]=mapped_column(String(255))
     is_active: Mapped[bool]=mapped_column(Boolean, default=True)
     mode: Mapped[str]=mapped_column(String(16), default='sandbox')
     last_used_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     __table_args__=(
+        UniqueConstraint('api_key', name='api_keys_api_key_key'),
+        Index('ix_api_keys_api_key', 'api_key'),
         CheckConstraint("mode IN ('sandbox', 'production')", name='ck_api_keys_mode'),
         Index(
             'uq_api_keys_one_active_per_merchant_mode',
@@ -93,12 +95,18 @@ class RefreshToken(Base, TimestampMixin):
     __tablename__='refresh_tokens'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('users.id', ondelete='CASCADE'), index=True)
-    token_hash: Mapped[str]=mapped_column(String(64), unique=True, index=True)
-    jti: Mapped[str]=mapped_column(String(80), unique=True, index=True)
+    token_hash: Mapped[str]=mapped_column(String(64))
+    jti: Mapped[str]=mapped_column(String(80))
     expires_at: Mapped[datetime]=mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     ip: Mapped[str|None]=mapped_column(String(64), nullable=True)
     user_agent: Mapped[str|None]=mapped_column(String(300), nullable=True)
+    __table_args__=(
+        UniqueConstraint('token_hash', name='refresh_tokens_token_hash_key'),
+        UniqueConstraint('jti', name='refresh_tokens_jti_key'),
+        Index('ix_refresh_tokens_token_hash', 'token_hash'),
+        Index('ix_refresh_tokens_jti', 'jti'),
+    )
 
 class Balance(Base, TimestampMixin):
     __tablename__='balances'
@@ -1095,7 +1103,7 @@ class AntiscamGlobalSettings(Base, TimestampMixin):
 class TraderAntiscamSettings(Base, TimestampMixin):
     __tablename__='trader_antiscam_settings'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    trader_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'), unique=True, index=True)
+    trader_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='CASCADE'))
     use_global_antiscam_settings: Mapped[bool]=mapped_column(Boolean, default=True)
     antiscam_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     failed_payments_in_row_limit: Mapped[int]=mapped_column(Integer, default=10)
@@ -1109,12 +1117,19 @@ class TraderAntiscamSettings(Base, TimestampMixin):
     auto_disable_requisites_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     auto_disable_trader_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     freeze_withdrawals_on_auto_pause: Mapped[bool]=mapped_column(Boolean, default=True)
+    __table_args__=(
+        UniqueConstraint(
+            'trader_id',
+            name='uq_trader_antiscam_settings_trader_id',
+        ),
+        Index('ix_trader_antiscam_settings_trader_id', 'trader_id'),
+    )
 
 
 class RequisiteAntiscamSettings(Base, TimestampMixin):
     __tablename__='requisite_antiscam_settings'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    requisite_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('requisites.id', ondelete='CASCADE'), unique=True, index=True)
+    requisite_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('requisites.id', ondelete='CASCADE'))
     use_global_antiscam_settings: Mapped[bool]=mapped_column(Boolean, default=True)
     antiscam_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     failed_payments_in_row_limit: Mapped[int]=mapped_column(Integer, default=5)
@@ -1124,6 +1139,16 @@ class RequisiteAntiscamSettings(Base, TimestampMixin):
     allow_high_amount_traffic: Mapped[bool]=mapped_column(Boolean, default=True)
     limited_max_active_payments: Mapped[int]=mapped_column(Integer, default=3)
     limited_max_amount: Mapped[Decimal]=mapped_column(Numeric(18,2), default=Decimal('30000.00'))
+    __table_args__=(
+        UniqueConstraint(
+            'requisite_id',
+            name='uq_requisite_antiscam_settings_requisite_id',
+        ),
+        Index(
+            'ix_requisite_antiscam_settings_requisite_id',
+            'requisite_id',
+        ),
+    )
 
 class Appeal(Base, TimestampMixin):
     __tablename__='appeals'
@@ -1146,7 +1171,7 @@ class AppealMessage(Base, TimestampMixin):
 class SmsMessage(Base, TimestampMixin):
     __tablename__='sms_messages'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    provider_message_id: Mapped[str]=mapped_column(String(128), unique=True, index=True)
+    provider_message_id: Mapped[str]=mapped_column(String(128))
     sender: Mapped[str]=mapped_column(String(128))
     body: Mapped[str]=mapped_column(Text)
     parsed_amount: Mapped[Decimal|None]=mapped_column(Numeric(18,2), nullable=True)
@@ -1155,6 +1180,12 @@ class SmsMessage(Base, TimestampMixin):
     review_required: Mapped[bool]=mapped_column(Boolean, default=False)
     linked_deposit_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('deposits.id'), nullable=True)
     processed: Mapped[bool]=mapped_column(Boolean, default=False)
+    __table_args__=(
+        UniqueConstraint(
+            'provider_message_id',
+            name='sms_messages_provider_message_id_key',
+        ),
+    )
 
 class WebhookEvent(Base, TimestampMixin):
     __tablename__='webhook_events'
@@ -1266,9 +1297,9 @@ class AggregatorAccount(Base, TimestampMixin):
     __tablename__='aggregator_accounts'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     platform_merchant_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='RESTRICT'), index=True)
-    name: Mapped[str]=mapped_column(String(160), unique=True, index=True)
+    name: Mapped[str]=mapped_column(String(160))
     status: Mapped[str]=mapped_column(String(32), default='active', index=True)
-    api_key: Mapped[str]=mapped_column(String(80), unique=True, index=True)
+    api_key: Mapped[str]=mapped_column(String(80))
     secret_hash: Mapped[str]=mapped_column(String(255))
     callback_url: Mapped[str|None]=mapped_column(String(500), nullable=True)
     success_url: Mapped[str|None]=mapped_column(String(500), nullable=True)
@@ -1283,6 +1314,18 @@ class AggregatorAccount(Base, TimestampMixin):
     total_turnover: Mapped[Decimal]=mapped_column(Numeric(18,2), default=Decimal('0.00'))
     is_archived: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
     archived_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__=(
+        UniqueConstraint(
+            'api_key',
+            name='uq_aggregator_accounts_api_key',
+        ),
+        UniqueConstraint(
+            'name',
+            name='uq_aggregator_accounts_name',
+        ),
+        Index('ix_aggregator_accounts_api_key', 'api_key'),
+        Index('ix_aggregator_accounts_name', 'name'),
+    )
 
 
 class AggregatorMerchant(Base, TimestampMixin):
@@ -1307,7 +1350,7 @@ class AggregatorPayment(Base, TimestampMixin):
     aggregator_merchant_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('aggregator_merchants.id', ondelete='SET NULL'), nullable=True, index=True)
     merchant_order_id: Mapped[str]=mapped_column(String(128), index=True)
     aggregator_order_id: Mapped[str]=mapped_column(String(128), index=True)
-    platform_payment_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT'), unique=True, index=True)
+    platform_payment_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT'))
     amount: Mapped[Decimal]=mapped_column(Numeric(18,2))
     currency: Mapped[str]=mapped_column(String(8), default='RUB')
     payment_method: Mapped[str]=mapped_column(String(32))
@@ -1322,8 +1365,16 @@ class AggregatorPayment(Base, TimestampMixin):
     paid_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     metadata_json: Mapped[dict]=mapped_column(JSON, default=dict)
     __table_args__=(
+        UniqueConstraint(
+            'platform_payment_id',
+            name='uq_aggregator_payments_platform_payment_id',
+        ),
         UniqueConstraint('aggregator_id','aggregator_order_id', name='uq_aggregator_payments_aggregator_order'),
         UniqueConstraint('aggregator_id','merchant_order_id', name='uq_aggregator_payments_merchant_order'),
+        Index(
+            'ix_aggregator_payments_platform_payment_id',
+            'platform_payment_id',
+        ),
     )
 
 
@@ -1385,6 +1436,19 @@ class FeeRule(Base, TimestampMixin):
     created_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
     updated_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
     __table_args__=(
+        CheckConstraint(
+            "entity_type IN ('merchant','trader','aggregator')",
+            name='ck_fee_rules_entity_type',
+        ),
+        CheckConstraint(
+            "entity_id <> '00000000-0000-0000-0000-000000000000'::uuid",
+            name='ck_fee_rules_entity_id_nonzero',
+        ),
+        CheckConstraint(
+            "(entity_type = 'merchant' AND fee_side = 'merchant_fee') OR "
+            "(entity_type IN ('trader','aggregator') AND fee_side = 'executor_fee')",
+            name='ck_fee_rules_entity_fee_side',
+        ),
         CheckConstraint('min_amount >= 0', name='ck_fee_rules_min_amount_nonnegative'),
         CheckConstraint('max_amount IS NULL OR max_amount > min_amount', name='ck_fee_rules_amount_range'),
         CheckConstraint('rate_percent >= 0 AND rate_percent <= 100', name='ck_fee_rules_rate_percent'),
@@ -1394,13 +1458,29 @@ class FeeRule(Base, TimestampMixin):
             'entity_type', 'entity_id', 'fee_side', 'payment_method', 'currency',
             'is_active', 'effective_from',
         ),
+        Index('ix_fee_rules_entity_scope', 'entity_type', 'entity_id'),
+        Index(
+            'uq_fee_rules_active_exact',
+            'entity_type',
+            'entity_id',
+            'fee_side',
+            'payment_method',
+            'currency',
+            'min_amount',
+            'max_amount',
+            'effective_from',
+            'effective_to',
+            unique=True,
+            postgresql_where=text('is_active'),
+            postgresql_nulls_not_distinct=True,
+        ),
     )
 
 
 class OperationFeeSnapshot(Base, TimestampMixin):
     __tablename__='operation_fee_snapshots'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    deposit_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT'), unique=True, index=True)
+    deposit_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('deposits.id', ondelete='RESTRICT'))
     merchant_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='RESTRICT'), nullable=False, index=True)
     merchant_rate_rule_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('fee_rules.id', ondelete='RESTRICT'), nullable=False)
     merchant_rate_version: Mapped[int]=mapped_column(Integer)
@@ -1422,6 +1502,15 @@ class OperationFeeSnapshot(Base, TimestampMixin):
     settled_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     ledger_reference: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
     __table_args__=(
+        UniqueConstraint(
+            'deposit_id',
+            name='uq_operation_fee_snapshots_deposit_id',
+        ),
+        Index(
+            'ix_operation_fee_snapshots_deposit_id',
+            'deposit_id',
+            unique=True,
+        ),
         CheckConstraint('merchant_rate_percent >= executor_rate_percent', name='ck_operation_snapshot_nonnegative_margin'),
         CheckConstraint('merchant_fee_amount = executor_fee_amount + platform_income_amount', name='ck_operation_snapshot_fee_invariant'),
         CheckConstraint("executor_type IN ('trader','aggregator')", name='ck_operation_snapshot_executor_type'),
@@ -1472,7 +1561,7 @@ class RequisiteUsage(Base, TimestampMixin):
 class KycProfile(Base, TimestampMixin):
     __tablename__='kyc_profiles'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    merchant_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('merchants.id', ondelete='CASCADE'), unique=True, index=True)
+    merchant_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('merchants.id', ondelete='CASCADE'))
     status: Mapped[str]=mapped_column(String(32), default='not_started', index=True)
     legal_name: Mapped[str|None]=mapped_column(String(255), nullable=True)
     tax_id_encrypted: Mapped[str|None]=mapped_column(Text, nullable=True)
@@ -1480,6 +1569,13 @@ class KycProfile(Base, TimestampMixin):
     risk_level: Mapped[str]=mapped_column(String(32), default='standard')
     reviewed_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True)
     reviewed_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    __table_args__=(
+        UniqueConstraint(
+            'merchant_id',
+            name='kyc_profiles_merchant_id_key',
+        ),
+        Index('ix_kyc_profiles_merchant_id', 'merchant_id'),
+    )
 
 class RiskEvent(Base, TimestampMixin):
     __tablename__='risk_events'
@@ -1607,6 +1703,7 @@ class PlatformCryptoWallet(Base):
             unique=True,
             postgresql_where=text('is_active'),
         ),
+        Index('ix_platform_crypto_wallets_created_at', 'created_at'),
     )
 
 

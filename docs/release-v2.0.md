@@ -111,15 +111,17 @@ The release gate includes:
 - secret and prohibited-artifact scans;
 - the [manual QA checklist](manual-qa-v2.0.md).
 
-## Known baseline Alembic drift
+## Alembic schema alignment
 
-`alembic check` reports schema/model representation differences that predate
-this release branch. The same set was reproduced against the `origin/main`
-baseline; the current migrations do not add new drift.
+The baseline schema/model drift has been classified and reconciled by explicit
+ORM metadata plus the narrow `0024_required_schema_indexes` migration.
+`alembic check` reports no new upgrade operations on a clean PostgreSQL 16
+database.
 
-The classification and unsafe raw-autogenerate operations are documented in
-[the Alembic drift review](review-alembic-drift.md). The generated operations
-must not be applied without a separately reviewed migration.
+The comparison, unsafe raw-autogenerate operations, and the still-open
+production schema-clone gate are documented in
+[the Alembic drift review](review-alembic-drift.md). A production migration is
+not authorized until that gate is independently completed.
 
 ## Audit and release boundary
 

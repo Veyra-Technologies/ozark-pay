@@ -312,7 +312,7 @@ def test_postgres_clean_downgrade_and_funded_rolling_downgrade_guard():
         with psycopg.connect(database_url) as verify:
             assert verify.execute(
                 'SELECT version_num FROM alembic_version'
-            ).fetchone()[0] == '0020_rolling_confirmation_flow'
+            ).fetchone()[0] == '0024_required_schema_indexes'
             assert verify.execute(
                 'SELECT count(*) FROM merchant_rolling_ledger_entries'
             ).fetchone()[0] == 1
@@ -441,7 +441,7 @@ def test_postgres_teamlead_clean_downgrade_immutable_trigger_and_finance_guard()
         with psycopg.connect(database_url) as verify:
             assert verify.execute(
                 'SELECT version_num FROM alembic_version'
-            ).fetchone()[0] == '0020_rolling_confirmation_flow'
+            ).fetchone()[0] == '0024_required_schema_indexes'
             assert verify.execute(
                 'SELECT count(*) FROM teamlead_ledger_entries'
             ).fetchone()[0] == 1
@@ -671,7 +671,7 @@ def test_postgres_v2_clean_0017_to_0018_to_0019_downgrade_and_reupgrade():
         with psycopg.connect(database_url) as db:
             assert db.execute(
                 'SELECT version_num FROM alembic_version'
-            ).fetchone()[0] == '0020_rolling_confirmation_flow'
+            ).fetchone()[0] == '0024_required_schema_indexes'
     finally:
         with psycopg.connect(admin_url, autocommit=True) as admin:
             admin.execute(
@@ -766,7 +766,7 @@ def test_postgres_v2_wallet_history_downgrade_guard():
         with psycopg.connect(database_url) as db:
             assert db.execute(
                 'SELECT version_num FROM alembic_version'
-            ).fetchone()[0] == '0020_rolling_confirmation_flow'
+            ).fetchone()[0] == '0024_required_schema_indexes'
             assert db.execute(
                 'SELECT count(*) FROM platform_crypto_wallets'
             ).fetchone()[0] == 1
@@ -842,7 +842,7 @@ def test_postgres_v2_ai_config_secret_downgrade_guard():
         with psycopg.connect(database_url) as db:
             assert db.execute(
                 'SELECT version_num FROM alembic_version'
-            ).fetchone()[0] == '0020_rolling_confirmation_flow'
+            ).fetchone()[0] == '0024_required_schema_indexes'
             stored = db.execute(
                 'SELECT encrypted_bearer_token FROM ai_integration_configs'
             ).fetchone()[0]
@@ -1708,6 +1708,137 @@ def test_postgres_0020_stops_on_contradictory_legacy_financial_totals():
             assert db.execute(
                 "SELECT to_regclass('public.merchant_rolling_transfers')"
             ).fetchone()[0] is None
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL('DROP DATABASE IF EXISTS {} WITH (FORCE)').format(
+                    sql.Identifier(database_name)
+                )
+            )
+
+
+def test_postgres_0023_normalizes_attempts_and_guards_signing_key_downgrade():
+    admin_url, database_url, database_name = _database_urls()
+    with psycopg.connect(admin_url, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database_name))
+        )
+    try:
+        to_0022 = _alembic(
+            database_url,
+            'upgrade',
+            '0022_hmac_v2_idempotency',
+        )
+        assert to_0022.returncode == 0, to_0022.stdout + to_0022.stderr
+
+        user_id = uuid.uuid4()
+        merchant_id = uuid.uuid4()
+        event_id = uuid.uuid4()
+        with psycopg.connect(database_url) as db:
+            db.execute(
+                """
+                INSERT INTO users (
+                    id, email, password_hash, role, is_active, is_locked,
+                    failed_login_count, twofa_enabled
+                )
+                VALUES (%s, %s, 'unused', 'merchant', true, false, 0, false)
+                """,
+                (
+                    user_id,
+                    f'webhook-migration-{uuid.uuid4().hex}@example.test',
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO merchants (
+                    id, owner_id, name, ip_whitelist, sandbox_mode
+                )
+                VALUES (%s, %s, 'Webhook migration merchant', '[]'::json, true)
+                """,
+                (merchant_id, user_id),
+            )
+            db.execute(
+                """
+                INSERT INTO webhook_events (
+                    id, merchant_id, event_type, payload, status, attempts
+                )
+                VALUES (%s, %s, 'deposit.paid', '{}'::json, 'queued', 0)
+                """,
+                (event_id, merchant_id),
+            )
+            for created_at in (
+                datetime.now(timezone.utc) - timedelta(minutes=2),
+                datetime.now(timezone.utc) - timedelta(minutes=1),
+            ):
+                db.execute(
+                    """
+                    INSERT INTO webhook_delivery_attempts (
+                        id, webhook_event_id, attempt_no, status,
+                        created_at, updated_at
+                    )
+                    VALUES (%s, %s, 1, 'failed', %s, %s)
+                    """,
+                    (uuid.uuid4(), event_id, created_at, created_at),
+                )
+            db.commit()
+
+        to_0023 = _alembic(
+            database_url,
+            'upgrade',
+            '0023_webhook_hardening',
+        )
+        assert to_0023.returncode == 0, to_0023.stdout + to_0023.stderr
+
+        with psycopg.connect(database_url) as db:
+            assert db.execute(
+                """
+                SELECT attempt_no
+                  FROM webhook_delivery_attempts
+                 WHERE webhook_event_id = %s
+                 ORDER BY attempt_no
+                """,
+                (event_id,),
+            ).fetchall() == [(1,), (2,)]
+            assert db.execute(
+                """
+                SELECT attempts, max_attempts
+                  FROM webhook_events
+                 WHERE id = %s
+                """,
+                (event_id,),
+            ).fetchone() == (2, 5)
+            db.execute(
+                """
+                INSERT INTO merchant_webhook_signing_keys (
+                    id, merchant_id, key_id, encrypted_secret,
+                    status, created_by
+                )
+                VALUES (%s, %s, %s, %s, 'active', %s)
+                """,
+                (
+                    uuid.uuid4(),
+                    merchant_id,
+                    f'whk_{uuid.uuid4().hex}',
+                    encrypt_secret('webhook-downgrade-guard-secret'),
+                    user_id,
+                ),
+            )
+            db.commit()
+
+        blocked = _alembic(
+            database_url,
+            'downgrade',
+            '0022_hmac_v2_idempotency',
+        )
+        assert blocked.returncode != 0
+        assert (
+            'webhook hardening downgrade blocked: signing keys exist'
+            in blocked.stdout + blocked.stderr
+        )
+        with psycopg.connect(database_url) as db:
+            assert db.execute(
+                'SELECT version_num FROM alembic_version'
+            ).fetchone()[0] == '0023_webhook_hardening'
     finally:
         with psycopg.connect(admin_url, autocommit=True) as admin:
             admin.execute(

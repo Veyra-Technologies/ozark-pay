@@ -1,109 +1,159 @@
-# Alembic drift classification
+# Alembic schema drift review
 
-`alembic check` was run against clean PostgreSQL 16 databases for both the
-`origin/main` baseline and this checkout. The detected operations are identical.
-Therefore every item below is category **A** (it existed before this branch) and
-no item is category **B** (introduced by this branch).
+This review compares three immutable points:
 
-The labels used below are:
+- `origin/main`;
+- `origin/release/v2.0.0-rc1` at
+  `a4a5506ed8fe56ea9bc2f3ba1a9fb1e41de176e2`;
+- `hardening/v2.0.0-rc2`, including migrations `0021` through `0024`.
 
-- **C**: can affect migrations 0014/0015 or their financial invariants;
-- **D**: safe as a target, provided the stated online strategy is used;
-- **E**: requires a separately reviewed migration before rollout if the ORM
-  model is intended to be canonical.
+The comparison was performed against clean PostgreSQL 16 databases. The
+hardening checkout now reports:
 
-Do not apply the raw autogenerate output. In particular, a remove/add pair for a
-unique index must not create a window without uniqueness.
+```text
+0024_required_schema_indexes (head)
+No new upgrade operations detected.
+```
 
-## Unique-constraint versus unique-index representation
+No raw autogenerate output was applied. Migration
+`0024_required_schema_indexes` contains only the missing lookup indexes listed
+below. It does not alter rows, financial columns, unique constraints, foreign
+keys, balances, Rolling, TeamLead accounting, or settlements.
 
-All rows: **A=yes, B=no, C=no, D=conditional, E=yes**. The target uniqueness is
-reasonable, but migration must validate duplicates, build the replacement
-unique index concurrently, and only then remove redundant enforcement.
+## Classification
 
-1. `aggregator_accounts`: remove `uq_aggregator_accounts_api_key`; change
-   `ix_aggregator_accounts_api_key` from non-unique to unique.
-2. `aggregator_accounts`: remove `uq_aggregator_accounts_name`; change
-   `ix_aggregator_accounts_name` from non-unique to unique.
-3. `aggregator_payments`: remove
-   `uq_aggregator_payments_platform_payment_id`; change
-   `ix_aggregator_payments_platform_payment_id` from non-unique to unique.
-4. `api_keys`: remove `api_keys_api_key_key`; change `ix_api_keys_api_key`
-   from non-unique to unique.
-5. `kyc_profiles`: remove `kyc_profiles_merchant_id_key`; change
-   `ix_kyc_profiles_merchant_id` from non-unique to unique.
-6. `refresh_tokens`: remove `refresh_tokens_jti_key`; change
-   `ix_refresh_tokens_jti` from non-unique to unique.
-7. `refresh_tokens`: remove `refresh_tokens_token_hash_key`; change
-   `ix_refresh_tokens_token_hash` from non-unique to unique.
-8. `requisite_antiscam_settings`: remove
-   `uq_requisite_antiscam_settings_requisite_id`; change
-   `ix_requisite_antiscam_settings_requisite_id` from non-unique to unique.
-9. `sms_messages`: remove `sms_messages_provider_message_id_key`; add unique
-   `ix_sms_messages_provider_message_id`.
-10. `trader_antiscam_settings`: remove
-    `uq_trader_antiscam_settings_trader_id`; change
-    `ix_trader_antiscam_settings_trader_id` from non-unique to unique.
+The requested categories mean:
 
-## Missing non-unique indexes
+- **A** — an object exists in migrations and matches the model;
+- **B** — safe naming or index-representation drift;
+- **C** — a required constraint or index is actually absent;
+- **D** — an unsafe raw-autogenerate recommendation;
+- **E** — a reviewed migration is required;
+- **F** — intentional model-only metadata needed to describe an existing
+  database object.
 
-All rows: **A=yes, B=no, C=no, D=yes with `CREATE INDEX CONCURRENTLY`,
-E=yes**. These are performance/schema-alignment changes and do not belong in
-0014/0015.
+### Existing uniqueness and companion indexes
 
-11. add `ix_api_request_logs_merchant_id`.
-12. add `ix_api_request_logs_request_id`.
-13. add `ix_appeal_messages_appeal_id`.
-14. add `ix_appeals_operation_id`.
-15. add `ix_audit_logs_action`.
-16. add `ix_audit_logs_actor_id`.
-17. add `ix_blacklist_kind`.
-18. add `ix_blacklist_value`.
-19. add `ix_deposits_external_id`.
-20. add `ix_fee_rules_merchant_id`.
-21. add `ix_ledger_entries_merchant_id`.
-22. add `ix_ledger_entries_operation_id`.
-23. add `ix_limit_rules_merchant_id`.
-24. add `ix_payouts_external_id`.
-25. add `ix_requisites_trader_id`.
-26. add `ix_webhook_events_merchant_id`.
+The following tables already had both a unique constraint and, where listed in
+the historical migration, a companion non-unique lookup index:
 
-## Fee-rule indexes absent from the ORM model
+- `api_keys.api_key`;
+- `refresh_tokens.token_hash` and `refresh_tokens.jti`;
+- `kyc_profiles.merchant_id`;
+- `aggregator_accounts.api_key` and `aggregator_accounts.name`;
+- `aggregator_payments.platform_payment_id`;
+- `trader_antiscam_settings.trader_id`;
+- `requisite_antiscam_settings.requisite_id`.
 
-Both rows: **A=yes, B=no, C=no, D=no, E=yes**. Blind removal can weaken fee
-selection performance and, for the partial unique index, active-rule
-enforcement. Reconcile the intended model first.
+Before hardening these were **B** representation differences. Alembic proposed
+removing the constraint and replacing the companion index with a unique index.
+Those remove/add pairs were **D** because they could create a uniqueness gap and
+discard the schema representation established by migrations `0001`, `0002`,
+`0007`, and `0008`.
 
-27. remove `ix_fee_rules_entity_scope`.
-28. remove partial unique `uq_fee_rules_active_exact`.
+Resolution: the existing constraints and indexes remain unchanged, and the ORM
+now names both objects explicitly (**F**, now resulting in **A**). No migration
+was needed.
 
-## Operation fee snapshot uniqueness
+`sms_messages.provider_message_id` is intentionally represented only by its
+existing unique constraint. The model no longer requests an unnecessary second
+index.
 
-29. remove `uq_operation_fee_snapshots_deposit_id`:
-    **A=yes, B=no, C=yes, D=no, E=yes**. Rolling depends on one immutable fee
-snapshot per Deposit. Any drift migration must preserve that invariant; the
-raw removal must not be applied.
+### Actually missing lookup indexes
 
-## Platform wallet history index
+These sixteen indexes were **C** and **E**. Migration `0024` creates them with
+`CREATE INDEX CONCURRENTLY IF NOT EXISTS`:
 
-30. remove `ix_platform_crypto_wallets_created_at`:
-    **A=yes, B=no, C=no, D=no, E=yes**. This drift belongs to the existing
-    `0018_platform_crypto_wallet` schema/model representation and is outside
-    the Rolling confirmation refactor. The raw removal must not be folded into
-    `0020`.
+1. `ix_api_request_logs_merchant_id`
+2. `ix_api_request_logs_request_id`
+3. `ix_appeal_messages_appeal_id`
+4. `ix_appeals_operation_id`
+5. `ix_audit_logs_action`
+6. `ix_audit_logs_actor_id`
+7. `ix_blacklist_kind`
+8. `ix_blacklist_value`
+9. `ix_deposits_external_id`
+10. `ix_fee_rules_merchant_id`
+11. `ix_ledger_entries_merchant_id`
+12. `ix_ledger_entries_operation_id`
+13. `ix_limit_rules_merchant_id`
+14. `ix_payouts_external_id`
+15. `ix_requisites_trader_id`
+16. `ix_webhook_events_merchant_id`
 
-## Summary by requested category
+The migration uses an Alembic autocommit block because PostgreSQL forbids
+concurrent index creation inside a transaction. Each statement is idempotent,
+so an operator may perform a reviewed retry after diagnosing a partial failure.
+An automatic blind retry is still prohibited.
 
-- **A:** all 30 logical drift rows above (40 Alembic detector messages when
-  remove/add index changes are counted separately).
-- **B:** none.
-- **C:** operation-fee snapshot uniqueness only; no actual 0014/0015 table,
-  column, constraint, or index appears in the drift.
-- **D:** the sixteen missing non-unique indexes are safe with concurrent
-  creation; uniqueness representation changes are only conditionally safe;
-  fee-rule and operation-snapshot removals are unsafe.
-- **E:** all drift should be handled in one or more separate migrations after
-  model intent is confirmed. It must not be folded into 0014/0015.
+### Financial and security-critical objects
 
-No anonymized schema-only staging/production clone was available. No production
-database connection or write was made.
+| Area | Database evidence | Classification and resolution |
+|---|---|---|
+| Operation fee snapshot | `uq_operation_fee_snapshots_deposit_id` plus unique `ix_operation_fee_snapshots_deposit_id` exist since `0010` | Raw constraint removal was **D**. Both objects are now explicit model metadata (**F** → **A**). One immutable snapshot per Deposit remains enforced. |
+| Fee rules | `ix_fee_rules_entity_scope` and partial unique `uq_fee_rules_active_exact` exist since `0011` | Raw removal was **D**. Indexes and the three `0011` entity checks are now explicit metadata (**F** → **A**). |
+| Platform wallet | `ix_platform_crypto_wallets_created_at` exists since `0018` | Raw removal was **D**. It is now explicit metadata (**F** → **A**). |
+| Merchant idempotency | Merchant/external and merchant/idempotency unique constraints exist; `0022` adds immutable request fingerprints | **A**. No drift operation remains. |
+| Merchant settlement | Pending-settlement and completed network/tx-hash enforcement comes from `0004`/`0021` | **A**. No drift operation remains. |
+| Rolling | Constraints, indexes, immutable triggers, and confirmation-flow objects come from `0015`, `0016`, and `0020` | **A**. No drift operation remains. |
+| TeamLead | Assignment, accrual, settlement, ledger constraints, and partial unique pending index come from `0017` | **A**. No drift operation remains. |
+| Webhook delivery | Lease/due indexes, unique attempt number, and signing-key indexes come from `0023`; merchant lookup comes from `0024` | **A**. No drift operation remains. |
+
+Alembic does not fully compare PostgreSQL trigger/function bodies. Their
+presence and downgrade guards must therefore remain covered by migration and
+PostgreSQL tests rather than inferred from `alembic check`.
+
+## Local migration evidence
+
+The following isolated PostgreSQL 16 paths succeeded:
+
+- clean database `base -> 0024`;
+- `0020_rolling_confirmation_flow -> 0024`;
+- allowed `0024 -> 0023` downgrade;
+- repeat `0023 -> 0024` upgrade;
+- one Alembic head;
+- `alembic current` at `0024_required_schema_indexes`;
+- `alembic check` with no new operations.
+
+All temporary Compose projects used an `ozark-pay-test-` prefix and were
+removed with volumes and orphans after each run.
+
+## Production schema-clone gate remains open
+
+No schema-only clone from the real server was available. Therefore this review
+does **not** claim that the production migration is validated. Before any
+production migration, an authorized operator must create a read-only schema
+export outside this repository:
+
+```bash
+export PGOPTIONS='-c default_transaction_read_only=on'
+pg_dump --schema-only --format=custom --no-owner --no-privileges \
+  --no-comments --no-security-labels \
+  --dbname="$OZARK_PRODUCTION_READONLY_URL" \
+  --file=/secure/offline/ozark-production-schema.dump
+pg_restore --list /secure/offline/ozark-production-schema.dump
+sha256sum /secure/offline/ozark-production-schema.dump
+```
+
+Restore only into an isolated PostgreSQL instance:
+
+```bash
+createdb --dbname="$OZARK_SCHEMA_CLONE_ADMIN_URL" ozark_schema_clone
+pg_restore --schema-only --no-owner --no-privileges --exit-on-error \
+  --dbname="$OZARK_SCHEMA_CLONE_URL" \
+  /secure/offline/ozark-production-schema.dump
+DATABASE_URL="$OZARK_SCHEMA_CLONE_ASYNC_URL" \
+SYNC_DATABASE_URL="$OZARK_SCHEMA_CLONE_SYNC_URL" \
+  alembic current
+DATABASE_URL="$OZARK_SCHEMA_CLONE_ASYNC_URL" \
+SYNC_DATABASE_URL="$OZARK_SCHEMA_CLONE_SYNC_URL" \
+  alembic upgrade head
+DATABASE_URL="$OZARK_SCHEMA_CLONE_ASYNC_URL" \
+SYNC_DATABASE_URL="$OZARK_SCHEMA_CLONE_SYNC_URL" \
+  alembic check
+```
+
+The read-only role must have no write privileges. URLs and dump contents must
+never be printed, committed, attached to CI artifacts, or placed in the
+repository. Production promotion stays blocked until this clone test and the
+financial reconciliation gate are independently approved.
