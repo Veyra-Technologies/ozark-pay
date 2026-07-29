@@ -61,7 +61,7 @@ from app.services.antiscam import (
 )
 from app.services.aggregator_enqueue import enqueue_aggregator_callback_delivery
 from app.services.aggregators import create_aggregator_account, money, percent, regenerate_aggregator_secret, sync_payment_from_deposit
-from app.services.ledger import LedgerError, debit_frozen, manual_trader_adjustment, release_hold
+from app.services.ledger import LedgerError, manual_trader_adjustment
 from app.services.requisites import deposit_trader_profit_amount, deposit_trader_settlement_amount, release_trader_deposit_hold
 from app.services.deposit_confirmation import DepositConfirmationError, DepositConfirmationSystemError, confirm_deposit_payment, enqueue_deposit_confirmation_deliveries
 from app.services.deposit_lifecycle import (
@@ -70,7 +70,14 @@ from app.services.deposit_lifecycle import (
 )
 from app.services.deposit_ttl import deposit_deadline
 from app.services.rapira import RollingRateUnavailable, get_rapira_rub_usdt_quote, get_strict_rolling_ask_quote
-from app.services.settlements import SETTLEMENT_STATUS_COMPLETED, SETTLEMENT_STATUS_PENDING, SETTLEMENT_STATUS_REJECTED, create_merchant_settlement, merchant_settlement_quote, settlement_rate_rub
+from app.services.settlements import (
+    MerchantSettlementError,
+    MerchantSettlementRateUnavailable,
+    complete_merchant_settlement,
+    create_merchant_settlement,
+    merchant_settlement_quote,
+    reject_merchant_settlement,
+)
 from app.services.webhook_enqueue import enqueue_webhook_delivery
 from app.services.webhooks import queue_webhook
 from app.services.webhook_payloads import build_deposit_webhook_payload
@@ -2046,7 +2053,13 @@ async def cabinet_usdt_rub_rate(request: Request, db: AsyncSession = Depends(get
     if user.role == Role.merchant.value:
         merchant = (await db.execute(select(Merchant).where(Merchant.owner_id == user.id, Merchant.is_archived.is_(False)))).scalar_one_or_none()
         if merchant:
-            quote = await merchant_settlement_quote(db, merchant.id)
+            try:
+                quote = await merchant_settlement_quote(db, merchant.id)
+            except MerchantSettlementRateUnavailable as exc:
+                return JSONResponse(
+                    {'detail': exc.code, 'code': exc.code},
+                    status_code=503,
+                )
             return {
                 'rate_rub': str(quote['rate_rub']),
                 'rate_source': quote['rate_source'],
@@ -2072,7 +2085,13 @@ async def cabinet_usdt_rub_rate(request: Request, db: AsyncSession = Depends(get
     }
 
 @router.post('/cabinet/settlements/request')
-async def request_merchant_settlement(request: Request, amount_usdt: str = Form(...), trc20_address: str = Form(...), db: AsyncSession = Depends(get_db)):
+async def request_merchant_settlement(
+    request: Request,
+    amount_usdt: str = Form(...),
+    trc20_address: str = Form(...),
+    idempotency_key: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
     user = await get_current_web_user(request, db)
     if not user:
         return RedirectResponse('/login', status_code=303)
@@ -2082,17 +2101,35 @@ async def request_merchant_settlement(request: Request, amount_usdt: str = Form(
     if not merchant:
         return RedirectResponse('/cabinet?msg=' + quote_plus('Merchant не найден'), status_code=303)
     try:
-        settlement = await create_merchant_settlement(db, merchant_id=merchant.id, requested_by_id=user.id, amount_usdt=safe_decimal(amount_usdt, '0'), trc20_address=trc20_address)
-    except ValueError as exc:
+        await create_merchant_settlement(
+            db,
+            merchant_id=merchant.id,
+            requested_by_id=user.id,
+            amount_usdt=safe_decimal(amount_usdt, '0'),
+            trc20_address=trc20_address,
+            idempotency_key=idempotency_key,
+            actor_ip=client_ip(request),
+        )
+    except MerchantSettlementRateUnavailable as exc:
+        await db.rollback()
+        return JSONResponse(
+            {'detail': exc.code, 'code': exc.code},
+            status_code=503,
+        )
+    except MerchantSettlementError as exc:
         await db.rollback()
         return RedirectResponse('/cabinet?msg=' + quote_plus(str(exc)), status_code=303)
-    await audit(db, 'merchant_settlement_requested', 'merchant_settlement', user.id, settlement.id, client_ip(request), {'merchant_id': str(merchant.id), 'amount_usdt': str(settlement.amount_usdt), 'total_debit_rub': str(settlement.total_debit_rub)})
     await db.commit()
     return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle отправлен superadmin'), status_code=303)
 
 
 @router.post('/cabinet/settlements/{settlement_id}/approve')
-async def approve_merchant_settlement(request: Request, settlement_id: str, db: AsyncSession = Depends(get_db)):
+async def approve_merchant_settlement(
+    request: Request,
+    settlement_id: str,
+    tx_hash: str = Form(...),
+    db: AsyncSession = Depends(get_db),
+):
     actor = await get_current_web_user(request, db)
     if not actor:
         return RedirectResponse('/login', status_code=303)
@@ -2104,20 +2141,20 @@ async def approve_merchant_settlement(request: Request, settlement_id: str, db: 
         settlement_uuid = uuid.UUID(settlement_id)
     except ValueError:
         return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle не найден'), status_code=303)
-    settlement = (await db.execute(select(MerchantSettlement).where(MerchantSettlement.id == settlement_uuid).with_for_update())).scalar_one_or_none()
-    if not settlement:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle не найден'), status_code=303)
-    if settlement.status != SETTLEMENT_STATUS_PENDING:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Этот settle уже обработан'), status_code=303)
     try:
-        await debit_frozen(db, settlement.merchant_id, settlement.total_debit_rub, settlement.id, f'merchant-settlement:{settlement.id}:debit-frozen', f'TRC20 settle {settlement.amount_usdt} USDT + fee {settlement.fee_usdt} USDT')
-    except LedgerError:
+        await complete_merchant_settlement(
+            db,
+            settlement_id=settlement_uuid,
+            actor_id=actor.id,
+            tx_hash=tx_hash,
+            actor_ip=client_ip(request),
+        )
+    except MerchantSettlementError as exc:
         await db.rollback()
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Недостаточно баланса мерчанта для подтверждения settle'), status_code=303)
-    settlement.status = SETTLEMENT_STATUS_COMPLETED
-    settlement.processed_by_id = actor.id
-    settlement.processed_at = datetime.now(timezone.utc)
-    await audit(db, 'merchant_settlement_approved', 'merchant_settlement', actor.id, settlement.id, client_ip(request), {'merchant_id': str(settlement.merchant_id), 'amount_usdt': str(settlement.amount_usdt), 'total_debit_rub': str(settlement.total_debit_rub)})
+        return RedirectResponse(
+            '/cabinet?msg=' + quote_plus(exc.code),
+            status_code=303,
+        )
     await db.commit()
     return RedirectResponse('/cabinet?msg=' + quote_plus('Settle подтверждён, баланс мерчанта уменьшен'), status_code=303)
 
@@ -2135,21 +2172,20 @@ async def reject_merchant_settlement(request: Request, settlement_id: str, rejec
         settlement_uuid = uuid.UUID(settlement_id)
     except ValueError:
         return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle не найден'), status_code=303)
-    settlement = (await db.execute(select(MerchantSettlement).where(MerchantSettlement.id == settlement_uuid).with_for_update())).scalar_one_or_none()
-    if not settlement:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle не найден'), status_code=303)
-    if settlement.status != SETTLEMENT_STATUS_PENDING:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Этот settle уже обработан'), status_code=303)
     try:
-        await release_hold(db, settlement.merchant_id, settlement.total_debit_rub, settlement.id, f'merchant-settlement:{settlement.id}:release', 'settlement rejected')
-    except LedgerError:
+        await reject_merchant_settlement(
+            db,
+            settlement_id=settlement_uuid,
+            actor_id=actor.id,
+            reason=reject_reason,
+            actor_ip=client_ip(request),
+        )
+    except MerchantSettlementError as exc:
         await db.rollback()
-        return RedirectResponse('/cabinet?msg=' + quote_plus('РќРµ СѓРґР°Р»РѕСЃСЊ СЂР°Р·РјРѕСЂРѕР·РёС‚СЊ СЃСѓРјРјСѓ settle'), status_code=303)
-    settlement.status = SETTLEMENT_STATUS_REJECTED
-    settlement.reject_reason = reject_reason.strip()[:500] or None
-    settlement.processed_by_id = actor.id
-    settlement.processed_at = datetime.now(timezone.utc)
-    await audit(db, 'merchant_settlement_rejected', 'merchant_settlement', actor.id, settlement.id, client_ip(request), {'merchant_id': str(settlement.merchant_id), 'amount_usdt': str(settlement.amount_usdt), 'reason': settlement.reject_reason})
+        return RedirectResponse(
+            '/cabinet?msg=' + quote_plus(exc.code),
+            status_code=303,
+        )
     await db.commit()
     return RedirectResponse('/cabinet?msg=' + quote_plus('Settle отклонён'), status_code=303)
 def _form_bool(value) -> bool:
@@ -3922,6 +3958,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     merchant_local_docker_api_base_url = 'http://host.docker.internal:8000/api/v1/merchant'
     balance = None
     settlement_quote = {}
+    merchant_settlement_idempotency_key = ''
     merchant_settlements = []
     webhook_events = []
     aggregator_accounts = []
@@ -4086,7 +4123,14 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                     Balance.currency == 'RUB',
                 )
             )).scalar_one_or_none()
-            settlement_quote = await merchant_settlement_quote(db, merchant.id)
+            settlement_quote = await merchant_settlement_quote(
+                db,
+                merchant.id,
+                allow_unavailable=True,
+            )
+            merchant_settlement_idempotency_key = (
+                f'merchant-settlement:{merchant.id}:{uuid.uuid4().hex}'
+            )
             merchant_api_keys = (await db.execute(select(ApiKey).where(ApiKey.merchant_id == merchant.id).order_by(ApiKey.is_active.desc(), ApiKey.created_at.desc()).limit(20))).scalars().all()
             merchant_rolling_overview = await rolling_overview(db, merchant.id)
             merchant_rolling_allocations = (await db.execute(
@@ -4851,6 +4895,9 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant_settlements': merchant_settlements,
         'settlement_merchant_names': settlement_merchant_names,
         'settlement_quote': settlement_quote,
+        'merchant_settlement_idempotency_key': (
+            merchant_settlement_idempotency_key
+        ),
         'merchant_rolling_overview': merchant_rolling_overview,
         'merchant_rolling_allocations': merchant_rolling_allocations,
         'merchant_rolling_ledger': merchant_rolling_ledger,

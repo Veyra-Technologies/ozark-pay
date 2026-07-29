@@ -1184,14 +1184,12 @@ def test_manual_settle_supports_partial_request_and_one_pending_database_guard(
     import app.services.settlements as settlements
 
     async def quote():
-        return SimpleNamespace(
-            rate_rub=Decimal('100'),
-            source='test',
-            stale=False,
-            updated_at=datetime.now(timezone.utc),
+        return _strict_quote(
+            datetime.now(timezone.utc),
+            '100',
         )
 
-    monkeypatch.setattr(settlements, 'get_rapira_rub_usdt_quote', quote)
+    monkeypatch.setattr(settlements, 'get_strict_rolling_ask_quote', quote)
 
     async def scenario():
         engine = create_async_engine(_database_url())
@@ -1212,16 +1210,21 @@ def test_manual_settle_supports_partial_request_and_one_pending_database_guard(
                     requested_by_id=owner.id,
                     amount_usdt=Decimal('100.00'),
                     trc20_address='TJRabPrwbZy45sbavfcjinPJC18kjpRTv8',
+                    idempotency_key=f'settlement:{uuid.uuid4().hex}',
                 )
                 assert first.total_debit_rub < Decimal('100000.00')
                 assert balance.frozen == first.total_debit_rub
-                with pytest.raises(ValueError, match='активный запрос'):
+                with pytest.raises(
+                    ValueError,
+                    match='merchant_settlement_pending',
+                ):
                     await create_merchant_settlement(
                         db,
                         merchant_id=merchant.id,
                         requested_by_id=owner.id,
                         amount_usdt=Decimal('10.00'),
                         trc20_address='TJRabPrwbZy45sbavfcjinPJC18kjpRTv8',
+                        idempotency_key=f'settlement:{uuid.uuid4().hex}',
                     )
                 with pytest.raises(IntegrityError):
                     async with db.begin_nested():
@@ -1237,6 +1240,9 @@ def test_manual_settle_supports_partial_request_and_one_pending_database_guard(
                                 total_debit_rub=Decimal('1500.00'),
                                 trc20_address=(
                                     'TJRabPrwbZy45sbavfcjinPJC18kjpRTv8'
+                                ),
+                                idempotency_key=(
+                                    f'settlement:{uuid.uuid4().hex}'
                                 ),
                                 status='pending',
                             )
@@ -1257,6 +1263,7 @@ def test_manual_settle_supports_partial_request_and_one_pending_database_guard(
                     requested_by_id=owner.id,
                     amount_usdt=Decimal('200.00'),
                     trc20_address='TJRabPrwbZy45sbavfcjinPJC18kjpRTv8',
+                    idempotency_key=f'settlement:{uuid.uuid4().hex}',
                 )
                 second.status = 'completed'
                 await debit_frozen(

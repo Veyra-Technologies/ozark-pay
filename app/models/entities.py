@@ -177,12 +177,27 @@ class MerchantSettlement(Base, TimestampMixin):
     fee_rub: Mapped[Decimal]=mapped_column(Numeric(18,2))
     total_debit_rub: Mapped[Decimal]=mapped_column(Numeric(18,2))
     trc20_address: Mapped[str]=mapped_column(String(128))
+    network: Mapped[str]=mapped_column(String(32), default='TRC20')
+    tx_hash: Mapped[str|None]=mapped_column(String(160), nullable=True)
+    idempotency_key: Mapped[str]=mapped_column(String(180))
+    rate_symbol: Mapped[str|None]=mapped_column(String(32), nullable=True)
+    rate_side: Mapped[str|None]=mapped_column(String(16), nullable=True)
+    rate_source: Mapped[str|None]=mapped_column(String(32), nullable=True)
+    rate_provider_field: Mapped[str|None]=mapped_column(String(32), nullable=True)
+    provider_timestamp: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    fetched_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
+    freshness_basis: Mapped[str|None]=mapped_column(String(32), nullable=True)
     status: Mapped[str]=mapped_column(String(32), default='pending', index=True)
     reject_reason: Mapped[str|None]=mapped_column(String(500), nullable=True)
     processed_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     metadata_json: Mapped[dict]=mapped_column(JSON, default=dict)
     merchant=relationship('Merchant', back_populates='settlements')
     __table_args__=(
+        UniqueConstraint(
+            'merchant_id',
+            'idempotency_key',
+            name='uq_merchant_settlement_idempotency',
+        ),
         Index(
             'uq_merchant_settlement_one_pending',
             'merchant_id',
@@ -190,7 +205,55 @@ class MerchantSettlement(Base, TimestampMixin):
             postgresql_where=text("status = 'pending'"),
             sqlite_where=text("status = 'pending'"),
         ),
+        Index(
+            'uq_merchant_settlement_completed_network_tx_hash',
+            'network',
+            'tx_hash',
+            unique=True,
+            postgresql_where=text(
+                "status = 'completed' AND tx_hash IS NOT NULL"
+            ),
+            sqlite_where=text(
+                "status = 'completed' AND tx_hash IS NOT NULL"
+            ),
+        ),
     )
+
+
+@event.listens_for(MerchantSettlement, 'before_update')
+def protect_merchant_settlement_quote_snapshot(mapper, connection, target):
+    del mapper, connection
+    immutable_fields = {
+        'merchant_id',
+        'requested_by_id',
+        'amount_usdt',
+        'fee_usdt',
+        'rate_rub',
+        'amount_rub',
+        'fee_rub',
+        'total_debit_rub',
+        'trc20_address',
+        'network',
+        'idempotency_key',
+        'rate_symbol',
+        'rate_side',
+        'rate_source',
+        'rate_provider_field',
+        'provider_timestamp',
+        'fetched_at',
+        'freshness_basis',
+        'metadata_json',
+    }
+    changed = sorted(
+        field
+        for field in immutable_fields
+        if inspect(target).attrs[field].history.has_changes()
+    )
+    if changed:
+        raise ValueError(
+            'merchant settlement snapshot is immutable: '
+            + ', '.join(changed)
+        )
 
 
 class TraderLedgerEntry(Base, TimestampMixin):

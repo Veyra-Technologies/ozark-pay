@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import logging
-import hashlib
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -14,6 +12,10 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.core.tron import (
+    TronAddressError,
+    validate_trc20_address as validate_tron_address,
+)
 from app.core.enums import (
     Role,
     TeamLeadAccrualStatus,
@@ -44,9 +46,6 @@ PERCENT = Decimal('0.000001')
 USDT = Decimal('0.000001')
 TEAMLEAD_SETTLEMENT_FEE_USDT = Decimal('5.000000')
 TEAMLEAD_SETTLEMENT_COOLDOWN = timedelta(hours=168)
-TRC20_ADDRESS_RE = re.compile(r'^T[1-9A-HJ-NP-Za-km-z]{33}$')
-BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
-BASE58_INDICES = {char: index for index, char in enumerate(BASE58_ALPHABET)}
 
 
 class TeamLeadError(ValueError):
@@ -84,21 +83,6 @@ def _money(value: Any, *, allow_zero: bool = True) -> Decimal:
     if not result.is_finite() or result < 0 or (not allow_zero and result == 0):
         raise TeamLeadError('invalid_money')
     return result
-
-
-def _base58decode(value: str) -> bytes:
-    num = 0
-    for char in value:
-        index = BASE58_INDICES.get(char)
-        if index is None:
-            raise ValueError('invalid_base58_character')
-        num = num * 58 + index
-    byte_length = max(1, (num.bit_length() + 7) // 8)
-    decoded = num.to_bytes(byte_length, byteorder='big')
-    leading_zeros = len(value) - len(value.lstrip('1'))
-    if leading_zeros:
-        decoded = b'\x00' * leading_zeros + decoded
-    return decoded
 
 
 def _signed_money(value: Any) -> Decimal:
@@ -494,22 +478,10 @@ def _validate_live_quote(
 
 
 def validate_trc20_address(wallet_address: str) -> str:
-    normalized = (wallet_address or '').strip()
-    if not TRC20_ADDRESS_RE.fullmatch(normalized):
-        raise TeamLeadError('invalid_trc20_address')
     try:
-        decoded = _base58decode(normalized)
-    except ValueError as exc:
-        raise TeamLeadError('invalid_trc20_address') from exc
-    if len(decoded) != 25:
-        raise TeamLeadError('invalid_trc20_address')
-    if decoded[0] != 0x41:
-        raise TeamLeadError('invalid_trc20_network')
-    body, checksum = decoded[:-4], decoded[-4:]
-    hashed = hashlib.sha256(hashlib.sha256(body).digest()).digest()
-    if hashed[:4] != checksum:
-        raise TeamLeadError('invalid_trc20_address')
-    return normalized
+        return validate_tron_address(wallet_address)
+    except TronAddressError as exc:
+        raise TeamLeadError(exc.code) from exc
 
 
 async def create_teamlead_settlement(

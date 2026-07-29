@@ -7,8 +7,8 @@ import qrcode
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.tron import TronAddressError, validate_trc20_address
 from app.models import PlatformCryptoWallet
-from app.services.teamlead import TeamLeadError, validate_trc20_address
 
 
 PLATFORM_WALLET_ASSET = 'USDT'
@@ -29,7 +29,7 @@ class PlatformWalletChange:
 def normalize_platform_wallet_address(address: str) -> str:
     try:
         return validate_trc20_address(address)
-    except TeamLeadError as exc:
+    except TronAddressError as exc:
         raise PlatformWalletError(str(exc)) from exc
 
 

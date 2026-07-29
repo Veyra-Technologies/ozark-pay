@@ -388,28 +388,33 @@ def test_existing_ui_rate_route_uses_general_quote_object(monkeypatch):
     assert response['stale'] is False
 
 
-def test_existing_settlement_rate_keeps_general_quote_contract(monkeypatch):
+def test_merchant_settlement_rate_requires_strict_live_ask(monkeypatch):
     import app.services.settlements as settlements
 
-    async def general_quote():
-        return RapiraRateQuote(
-            rate_rub=Decimal('81.42'),
-            source='Rapira',
-            updated_at=datetime.now(timezone.utc),
+    async def strict_quote():
+        now = datetime.now(timezone.utc)
+        return RollingRapiraQuote(
+            symbol='USDT/RUB',
+            rate=Decimal('81.42'),
+            side='ask',
+            source='rapira_live',
+            provider_timestamp=None,
+            fetched_at=now,
+            freshness_basis='fetched_at',
             stale=False,
-            cache_seconds=15,
+            provider_field='askPrice',
         )
 
     monkeypatch.setattr(
         settlements,
-        'get_rapira_rub_usdt_quote',
-        general_quote,
+        'get_strict_rolling_ask_quote',
+        strict_quote,
     )
 
     rate_rub, source = asyncio.run(settlements.settlement_rate_rub())
 
     assert rate_rub == Decimal('81.4200')
-    assert source == 'Rapira'
+    assert source == 'rapira_live'
 
 
 def test_settle_only_path_never_calls_strict_rolling_quote(monkeypatch):
