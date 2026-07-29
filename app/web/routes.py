@@ -398,8 +398,9 @@ def _session_changed_page(request: Request):
     _mark_session_event(request, SESSION_IDENTITY_CHANGED_CODE)
     realm = request_auth_realm(request)
     response = templates.TemplateResponse(
-        'session_changed.html',
-        {
+        request=request,
+        name='session_changed.html',
+        context={
             'request': request,
             **branding_context(),
             'message': SESSION_IDENTITY_CHANGED_MESSAGE,
@@ -670,8 +671,9 @@ def merchant_credentials_response(
 ):
     realm = request_auth_realm(request) or realm_for_role(actor.role) or 'staff'
     response = templates.TemplateResponse(
-        'merchant_credentials.html',
-        {
+        request=request,
+        name='merchant_credentials.html',
+        context={
             'request': request,
             'user': actor,
             **branding_context(),
@@ -909,21 +911,41 @@ def login_context(request: Request, error: str | None = None):
 
 @router.get('/login', response_class=HTMLResponse)
 async def login_page(request: Request, error: str | None = None):
-    return templates.TemplateResponse('login.html', login_context(request, error))
+    return templates.TemplateResponse(
+        request=request,
+        name='login.html',
+        context=login_context(request, error),
+    )
 
 
 @router.post('/login')
 async def login_submit(request: Request, email: str = Form(...), password: str = Form(...), otp: str = Form(''), db: AsyncSession = Depends(get_db)):
     retry_after = await hit_rate_limit('web-login', request, email, settings.LOGIN_RATE_LIMIT)
     if retry_after:
-        return templates.TemplateResponse('login.html', login_context(request, 'Слишком много попыток входа. Повторите позже.'), status_code=429)
+        return templates.TemplateResponse(
+            request=request,
+            name='login.html',
+            context=login_context(
+                request,
+                'Слишком много попыток входа. Повторите позже.',
+            ),
+            status_code=429,
+        )
     email = email.strip().lower()
     user = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     ip = client_ip(request)
     if user and await is_auth_temporarily_locked(user, 'login'):
         await audit(db, 'account_locked', 'user', actor_id=user.id, ip=ip, details={'scope': 'login'})
         await db.commit()
-        return templates.TemplateResponse('login.html', login_context(request, 'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.'), status_code=429)
+        return templates.TemplateResponse(
+            request=request,
+            name='login.html',
+            context=login_context(
+                request,
+                'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.',
+            ),
+            status_code=429,
+        )
     password_ok = bool(user and user.is_active and not user.is_locked and verify_password(password, user.password_hash))
     if not password_ok:
         if user and user.is_active and not user.is_locked:
@@ -932,19 +954,40 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
                 await audit(db, 'account_locked', 'user', actor_id=user.id, ip=ip, details={'scope': 'login'})
         await audit(db, 'failed_login', 'user', target_id=email, ip=ip)
         await db.commit()
-        return templates.TemplateResponse('login.html', login_context(request, 'Неверный email или пароль'), status_code=401)
+        return templates.TemplateResponse(
+            request=request,
+            name='login.html',
+            context=login_context(request, 'Неверный email или пароль'),
+            status_code=401,
+        )
     if user.twofa_enabled:
         if await is_auth_temporarily_locked(user, '2fa'):
             await audit(db, 'account_locked', 'user', actor_id=user.id, ip=ip, details={'scope': '2fa'})
             await db.commit()
-            return templates.TemplateResponse('login.html', login_context(request, 'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.'), status_code=429)
+            return templates.TemplateResponse(
+                request=request,
+                name='login.html',
+                context=login_context(
+                    request,
+                    'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.',
+                ),
+                status_code=429,
+            )
         if not user.twofa_secret or not otp or not pyotp.TOTP(decrypt_secret(user.twofa_secret)).verify(otp, valid_window=1):
             locked = await record_auth_failure(user, '2fa', '2fa')
             await audit(db, '2fa_failed', 'user', actor_id=user.id, ip=ip)
             if locked:
                 await audit(db, 'account_locked', 'user', actor_id=user.id, ip=ip, details={'scope': '2fa'})
             await db.commit()
-            return templates.TemplateResponse('login.html', login_context(request, 'Нужен корректный 2FA код'), status_code=401)
+            return templates.TemplateResponse(
+                request=request,
+                name='login.html',
+                context=login_context(
+                    request,
+                    'Нужен корректный 2FA код',
+                ),
+                status_code=401,
+            )
         await audit(db, '2fa_success', 'user', actor_id=user.id, ip=ip)
     realm = realm_for_role(user.role)
     expected_realm = request.scope.get('expected_auth_realm')
@@ -952,8 +995,12 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
         await audit(db, 'web_login_realm_rejected', 'user', actor_id=user.id, ip=ip, details={'expected_realm': expected_realm or ''})
         await db.commit()
         return templates.TemplateResponse(
-            'login.html',
-            login_context(request, 'Эта учётная запись относится к другому кабинету.'),
+            request=request,
+            name='login.html',
+            context=login_context(
+                request,
+                'Эта учётная запись относится к другому кабинету.',
+            ),
             status_code=403,
         )
     await record_auth_success(user, 'login')
@@ -3423,8 +3470,9 @@ async def cabinet_by_role(request: Request, role: str, db: AsyncSession = Depend
     if user.role != role and user.role != Role.superadmin.value:
         realm = request_auth_realm(request) or realm_for_role(user.role)
         return templates.TemplateResponse(
-            'forbidden.html',
-            {
+            request=request,
+            name='forbidden.html',
+            context={
                 'request': request,
                 'user': user,
                 'requested_role': role,
@@ -3956,8 +4004,9 @@ async def cabinet_deposit_rows(request: Request, db: AsyncSession = Depends(get_
     if not user:
         return JSONResponse({'code': 'authentication_required'}, status_code=401)
     return templates.TemplateResponse(
-        '_deposit_rows.html',
-        await _deposit_partial_context(request, user, db),
+        request=request,
+        name='_deposit_rows.html',
+        context=await _deposit_partial_context(request, user, db),
         headers={'Cache-Control': 'no-store'},
     )
 
@@ -4077,8 +4126,9 @@ async def _teamlead_own_cabinet(
         }
     )
     return templates.TemplateResponse(
-        'teamlead.html',
-        {
+        request=request,
+        name='teamlead.html',
+        context={
             'request': request,
             **branding_context(),
             'user': user,
@@ -5077,7 +5127,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         }
         for operator in get_enabled_mobile_operators()
     ]
-    return templates.TemplateResponse('cabinet.html', {
+    context = {
         'request': request,
         'msg': message,
         'session_view_token': session_view_fingerprint(request.session),
@@ -5183,4 +5233,9 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'aggregator_secret_flash': aggregator_secret_flash,
         'payouts': payouts,
         'security_qr': totp_qr_data_uri(user.email, decrypt_secret(user.twofa_secret)) if user.twofa_secret else None,
-    })
+    }
+    return templates.TemplateResponse(
+        request=request,
+        name='cabinet.html',
+        context=context,
+    )
