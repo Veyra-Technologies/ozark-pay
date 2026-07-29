@@ -29,6 +29,7 @@ tmp/
 *.key
 *.p12
 *.pfx
+nginx/certs/
 id_rsa
 id_dsa
 secrets.json

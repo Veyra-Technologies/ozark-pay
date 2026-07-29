@@ -1,0 +1,236 @@
+name: Release gates
+
+on:
+  pull_request:
+  push:
+    branches:
+      - 'release/**'
+      - 'hardening/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gates-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.12'
+  ENV: test
+  SECRET_KEY: ci-only-secret-key-with-at-least-thirty-two-characters
+  ENCRYPTION_KEY: X0djOf3Ag4hSfN_PmH-aPSBaZGYoWsdFBGFzlNH3wlg=
+  SUPERADMIN_PASSWORD: ci-only-superadmin-password
+  SUPERADMIN_2FA_SECRET: JBSWY3DPEHPK3PXP
+  DATABASE_URL: postgresql+asyncpg://ozark_ci:ozark_ci@localhost:5432/ozark_ci
+  SYNC_DATABASE_URL: postgresql+psycopg://ozark_ci:ozark_ci@localhost:5432/ozark_ci
+  TEST_DATABASE_URL: postgresql+asyncpg://ozark_ci:ozark_ci@localhost:5432/ozark_ci
+  REDIS_URL: redis://localhost:6379/0
+  CELERY_BROKER_URL: redis://localhost:6379/1
+  CELERY_RESULT_BACKEND: redis://localhost:6379/2
+  RAPIRA_RATES_ENABLED: 'false'
+
+jobs:
+  unit-integration:
+    name: Unit and integration
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ozark_ci
+          POSTGRES_PASSWORD: ozark_ci
+          POSTGRES_DB: ozark_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ozark_ci -d ozark_ci"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install application
+        run: python -m pip install .
+      - name: Upgrade database
+        run: python -m alembic upgrade head
+      - name: Run full test suite
+        run: python -m pytest -q
+      - name: Compile Python
+        run: python -m compileall -q app scripts
+      - name: Compile Jinja and import OpenAPI
+        run: >-
+          python -m pytest -q
+          tests/test_rolling_unit.py::test_application_imports_openapi_and_templates_compile
+
+  migration:
+    name: PostgreSQL migrations
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ozark_ci
+          POSTGRES_PASSWORD: ozark_ci
+          POSTGRES_DB: ozark_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ozark_ci -d ozark_ci"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install application
+        run: python -m pip install .
+      - name: Clean upgrade and drift check
+        run: |
+          python -m alembic upgrade head
+          python -m alembic current
+          test "$(python -m alembic heads | sed '/^$/d' | wc -l)" -eq 1
+          python -m alembic check
+      - name: Previous-head downgrade and repeat upgrade
+        run: |
+          python -m alembic downgrade 0023_webhook_hardening
+          python -m alembic current
+          python -m alembic upgrade head
+          python -m alembic current
+          python -m alembic check
+      - name: Migration compatibility and downgrade guards
+        run: python -m pytest -q tests/test_migrations_postgres.py
+
+  concurrency:
+    name: PostgreSQL concurrency
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ozark_ci
+          POSTGRES_PASSWORD: ozark_ci
+          POSTGRES_DB: ozark_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ozark_ci -d ozark_ci"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Install application
+        run: python -m pip install .
+      - name: Upgrade database
+        run: python -m alembic upgrade head
+      - name: Repeat race-sensitive tests three times
+        run: |
+          for attempt in 1 2 3; do
+            echo "Concurrency pass ${attempt}/3"
+            python -m pytest -q \
+              tests/test_merchant_hmac_v2_postgres.py::test_hmac_v2_replay_idempotency_tamper_and_fail_closed \
+              tests/test_settlement_hardening_postgres.py::test_concurrent_requests_create_one_pending_and_one_hold \
+              tests/test_webhook_hardening_postgres.py::test_claim_race_stale_lease_scanner_enqueue_recovery_and_manual_retry \
+              tests/test_rolling_postgres.py::test_concurrent_paid_at_outstanding_boundary_consumes_once_and_credits_overflow_once \
+              tests/test_teamlead_postgres.py::test_postgres_concurrent_settlement_paid_and_final_processing_are_single_effect
+          done
+
+  docker-build:
+    name: Docker release build
+    runs-on: ubuntu-24.04
+    env:
+      APP_ENV_FILE: .env.production.example
+      POSTGRES_PASSWORD: ci-only-postgres-password
+      REDIS_PASSWORD: ci-only-redis-password
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Validate production Compose
+        run: >-
+          docker compose -p ozark-pay-test-ci-build
+          -f docker-compose.production.yml config --quiet
+      - name: Build api worker and beat
+        run: >-
+          docker compose -p ozark-pay-test-ci-build
+          -f docker-compose.production.yml build api worker beat
+      - name: Verify TLS material is absent from application image
+        run: |
+          docker image inspect ozark-pay-test-ci-build-api:latest >/dev/null
+          docker run --rm --entrypoint sh \
+            ozark-pay-test-ci-build-api:latest -lc \
+            'test ! -e /app/nginx/certs/privkey.pem && test ! -e /app/nginx/certs/fullchain.pem'
+      - name: Tear down Compose objects
+        if: always()
+        run: >-
+          docker compose -p ozark-pay-test-ci-build
+          -f docker-compose.production.yml down -v --remove-orphans
+
+  security:
+    name: Security and repository hygiene
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+      - name: Reject release artifacts and environment files
+        run: python scripts/check_release_artifacts.py
+      - name: Check patch whitespace
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "pull_request" ]]; then
+            git diff --check "${{ github.event.pull_request.base.sha }}...HEAD"
+          else
+            git diff --check HEAD^ HEAD
+          fi
+      - name: Full-history secret scan
+        run: >-
+          docker run --rm
+          -v "${{ github.workspace }}:/repo"
+          ghcr.io/gitleaks/gitleaks:v8.30.1
+          git --source=/repo --redact --no-banner --log-opts=--all
+      - name: Dependency audit
+        run: |
+          python -m pip install . pip-audit==2.10.1
+          python -m pip_audit --strict
