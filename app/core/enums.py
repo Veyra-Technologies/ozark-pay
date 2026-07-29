@@ -23,16 +23,22 @@ class DepositStatus(StrEnum):
     appeal_opened = 'appeal_opened'
 
 
-class MerchantSettlementMode(StrEnum):
-    postpaid = 'postpaid'
-    rolling = 'rolling'
-
-
 class RollingAccountStatus(StrEnum):
     active = 'active'
     exhausted = 'exhausted'
     suspended = 'suspended'
-    closed = 'closed'
+
+
+class RollingTransferStatus(StrEnum):
+    pending_confirmation = 'pending_confirmation'
+    confirmed = 'confirmed'
+    disputed = 'disputed'
+    cancelled = 'cancelled'
+
+
+class RollingConsumptionType(StrEnum):
+    recovery = 'recovery'
+    reversal = 'reversal'
 
 
 class RollingAllocationStatus(StrEnum):
@@ -40,6 +46,11 @@ class RollingAllocationStatus(StrEnum):
     paid = 'paid'
     released = 'released'
     reversed = 'reversed'
+
+
+class RollingEligibilityStatus(StrEnum):
+    eligible = 'eligible'
+    ineligible = 'ineligible'
 
 
 class RollingLedgerType(StrEnum):
