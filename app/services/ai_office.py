@@ -401,7 +401,7 @@ async def save_ai_integration_config(
     config.max_retries = clean_retries
     config.verify_tls = bool(verify_tls)
     config.selected_events = clean_events
-    # Commands and background delivery are explicitly outside v2.0-rc1.
+    # Commands and background delivery are explicitly outside v2.0-rc2.
     config.inbound_commands_enabled = False
     config.updated_by = actor_id
     await db.flush()

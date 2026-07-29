@@ -1,13 +1,13 @@
-# Ozark Pay 2.0.0-rc1 manual QA
+# Ozark Pay 2.0.0-rc2 manual QA
 
 Run this checklist on an approved local or staging environment. Do not use
 production funds, production wallet credentials, or real AI Office secrets.
 
 ## Preconditions
 
-- `/version` returns `2.0.0-rc1`.
+- `/version` returns `2.0.0-rc2`.
 - `/health` and `/ready` return HTTP 200.
-- Alembic current is `0020_rolling_confirmation_flow`.
+- Alembic current is `0024_required_schema_indexes`.
 - A Superadmin has working 2FA.
 - Separate Admin, Trader/Operator, Support, Merchant and TeamLead test
   accounts are available.
@@ -86,9 +86,9 @@ production funds, production wallet credentials, or real AI Office secrets.
 2. Confirm preflight does not change row counts, Alembic revision, wallet
    version, balances, deposits, settlements, or audit records.
 3. Run `python -m scripts.smoke_v2`; confirm request logs contain only GET.
-4. Confirm `/health` includes version `2.0.0-rc1`.
-5. Confirm `/version` returns exactly `{"version":"2.0.0-rc1"}`.
-6. Confirm the Superadmin footer displays `Ozark Pay 2.0.0-rc1`.
+4. Confirm `/health` includes version `2.0.0-rc2`.
+5. Confirm `/version` returns exactly `{"version":"2.0.0-rc2"}`.
+6. Confirm the Superadmin footer displays `Ozark Pay 2.0.0-rc2`.
 7. Confirm OpenAPI is skipped when disabled and remains protected when enabled.
 
 ## D. Financial regression

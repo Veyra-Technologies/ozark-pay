@@ -1,6 +1,6 @@
-# Ozark Pay 2.0.0-rc1 release notes
+# Ozark Pay 2.0.0-rc2 release notes
 
-`2.0.0-rc1` is a release candidate prepared for independent audit. It is not a
+`2.0.0-rc2` is a release candidate prepared for independent audit. It is not a
 production release. Manual QA, security review and financial reconciliation
 must be approved before promotion to `2.0.0`.
 
@@ -21,6 +21,14 @@ This release candidate includes:
 - a versioned, display-only platform USDT TRC20 wallet with Base58Check
   validation and QR rendering;
 - encrypted AI Office settings, disabled by default;
+- production startup separated from migration, bootstrap, and demo seed;
+- canonical Merchant API HMAC v2, Redis-backed nonce replay protection, and
+  immutable idempotency fingerprints;
+- leased webhook delivery with terminal dead letters and independently rotated
+  webhook signing keys;
+- aligned ORM metadata and required PostgreSQL lookup indexes;
+- pinned GitHub Actions release gates for PostgreSQL, migrations, concurrency,
+  Docker, repository hygiene, secret scanning, and dependency audit;
 - release preflight, GET-only smoke checks and PostgreSQL migration tests.
 
 The platform wallet does not watch TRON, detect deposits, credit balances or
@@ -32,7 +40,7 @@ commands, access the database or mutate payments in this release candidate.
 The release contains one Alembic head:
 
 ```text
-0020_rolling_confirmation_flow
+0024_required_schema_indexes
 ```
 
 Relevant release migrations are:
@@ -43,7 +51,11 @@ Relevant release migrations are:
 - `0017_teamlead`;
 - `0018_platform_crypto_wallet`;
 - `0019_ai_office_config`;
-- `0020_rolling_confirmation_flow`.
+- `0020_rolling_confirmation_flow`;
+- `0021_settlement_hardening`;
+- `0022_hmac_v2_idempotency`;
+- `0023_webhook_hardening`;
+- `0024_required_schema_indexes`.
 
 Migration `0020` preserves existing merchant, trader and TeamLead balances. It
 creates synthetic confirmed transfers only for legacy accounts that contain
@@ -128,7 +140,7 @@ not authorized until that gate is independently completed.
 Before promotion:
 
 - complete the manual QA checklist;
-- independently review migrations `0014` through `0020`;
+- independently review migrations `0014` through `0024`;
 - verify financial reconciliation on an approved non-production copy;
 - confirm no environment files, credentials, backups, dumps, archives or
   private operational discovery are present in the published branch;

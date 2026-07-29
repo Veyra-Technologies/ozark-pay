@@ -2,7 +2,7 @@
 
 Ozark Pay is a FastAPI payment-processing platform for merchant deposits,
 settlements, trader operations and audited finance workflows. This repository
-contains the `2.0.0-rc1` release candidate for independent review. It is not a
+contains the `2.0.0-rc2` release candidate for independent review. It is not a
 production release and must not be deployed without a separate security,
 financial and operational approval.
 
@@ -12,13 +12,17 @@ financial and operational approval.
 - merchant-confirmed Rolling funding with immutable evidence and FIFO recovery;
 - immutable Deposit lifecycle and expiry handling;
 - TeamLead attribution, accrual, settlement and platform-expense accounting;
-- strict live Rapira ask quotes for Rolling;
+- strict live Rapira ask quotes for Rolling and merchant settle;
+- canonical Merchant API HMAC v2 with replay protection and retry-safe
+  idempotency;
+- leased webhook delivery, terminal dead letters, and independent rotating
+  signing keys;
 - versioned display-only USDT TRC20 wallet and QR rendering;
 - disabled-by-default AI Office settings;
-- PostgreSQL migrations through `0020_rolling_confirmation_flow`;
+- PostgreSQL migrations through `0024_required_schema_indexes`;
 - release preflight, smoke checks and PostgreSQL regression tests.
 
-See [Ozark Pay 2.0.0-rc1 release notes](docs/release-v2.0.md) for the complete
+See [Ozark Pay 2.0.0-rc2 release notes](docs/release-v2.0.md) for the complete
 review scope and known limitations.
 
 ## Architecture
@@ -79,7 +83,7 @@ data. `scripts.seed` is restricted to local/development/test demo data and is
 never part of application startup.
 
 After startup, verify `/version`, `/health` and `/ready`. The expected version is
-`2.0.0-rc1`.
+`2.0.0-rc2`.
 
 ## Tests
 
@@ -104,7 +108,7 @@ git diff --check
 ```
 
 The expected single Alembic head is
-`0020_rolling_confirmation_flow`. Run migrations only against an explicitly
+`0024_required_schema_indexes`. Run migrations only against an explicitly
 selected disposable or approved local database. Migration execution against
 staging or production is outside the scope of this repository publication.
 
@@ -131,8 +135,13 @@ They must never be used as real secrets.
 - [Rolling confirmation and FIFO accounting](docs/rolling.md)
 - [TeamLead accounting](docs/teamlead.md)
 - [Manual QA checklist](docs/manual-qa-v2.0.md)
-- [Known baseline Alembic drift](docs/review-alembic-drift.md)
+- [Alembic schema alignment](docs/review-alembic-drift.md)
+- [Merchant integration](docs/merchant-integration.md)
+- [Merchant HMAC v2](docs/merchant-hmac-v2.md)
+- [Webhook integration](docs/webhook-integration.md)
+- [Security policy](SECURITY.md)
 
 No backup, database dump, private discovery, local environment file or real
-credential belongs in Git history. Report security findings privately to the
-repository maintainers rather than opening a public issue with sensitive data.
+credential belongs in Git history. Follow the
+[private vulnerability-reporting policy](SECURITY.md) rather than opening a
+public issue with sensitive data.

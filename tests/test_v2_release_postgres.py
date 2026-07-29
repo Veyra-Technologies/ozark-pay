@@ -1123,7 +1123,7 @@ def test_release_version_preflight_read_only_and_smoke_get_only(monkeypatch):
                         200,
                         json={
                             'status': 'ok',
-                            'version': '2.0.0-rc1',
+                            'version': '2.0.0-rc2',
                         },
                     )
                 if request.url.path == '/ready':
@@ -1131,7 +1131,7 @@ def test_release_version_preflight_read_only_and_smoke_get_only(monkeypatch):
                 if request.url.path == '/version':
                     return httpx.Response(
                         200,
-                        json={'version': '2.0.0-rc1'},
+                        json={'version': '2.0.0-rc2'},
                     )
                 return httpx.Response(
                     200,
@@ -1157,7 +1157,7 @@ def test_release_version_preflight_read_only_and_smoke_get_only(monkeypatch):
             ) as client:
                 response = await client.get('/version')
                 assert response.status_code == 200
-                assert response.json() == {'version': '2.0.0-rc1'}
+                assert response.json() == {'version': '2.0.0-rc2'}
         finally:
             await application_engine.dispose()
             await engine.dispose()

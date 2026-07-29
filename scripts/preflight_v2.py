@@ -60,7 +60,7 @@ def check_environment() -> list[Check]:
     return [
         _check(
             'APP_VERSION',
-            settings.APP_VERSION == '2.0.0-rc1',
+            settings.APP_VERSION == '2.0.0-rc2',
             settings.APP_VERSION,
         ),
         _check(

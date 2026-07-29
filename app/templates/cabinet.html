@@ -1135,7 +1135,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% elif s == 'Интеграция с AI-офисом' %}
   {% if user.role == 'superadmin' %}
   {% set ai = ai_office_config %}
-  <div class="note">Интеграция не должна включаться в production до настройки M2M-аутентификации и разрешений AI-офиса. В v2.0-rc1 доступны только безопасное хранение конфигурации и ручной GET Test connection; события и входящие команды не отправляются.</div>
+  <div class="note">Интеграция не должна включаться в production до настройки M2M-аутентификации и разрешений AI-офиса. В v2.0-rc2 доступны только безопасное хранение конфигурации и ручной GET Test connection; события и входящие команды не отправляются.</div>
   <div class="detail-grid">
     <div class="detail-card"><b>Enabled</b>{{ 'yes' if ai.enabled else 'no' }}</div>
     <div class="detail-card"><b>Environment</b>{{ ai.environment }}</div>
