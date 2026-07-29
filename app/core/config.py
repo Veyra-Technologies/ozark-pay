@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_FAIL_CLOSED_IN_PRODUCTION: bool = True
     RATE_LIMIT_REDIS_FAILURE_RETRY_AFTER_SECONDS: int = 30
     HMAC_TIMESTAMP_TOLERANCE_SECONDS: int = 300
+    MERCHANT_HMAC_V1_ENABLED: bool = False
     SESSION_COOKIE_NAME: str = 'processing_session'
     SESSION_COOKIE_MAX_AGE_SECONDS: int = 7200
     CSRF_TRUSTED_ORIGINS: str = 'http://localhost:8000,http://127.0.0.1:8000'

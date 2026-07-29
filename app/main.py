@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select, text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.core.config import settings
+from app.core.api_errors import MerchantApiError
 from app.core.branding import get_branding
 from app.core.enums import Role
 from app.core.logging import configure_logging
@@ -35,6 +36,26 @@ app=FastAPI(
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.exception_handler(MerchantApiError)
+async def merchant_api_error_handler(
+    request: Request,
+    exc: MerchantApiError,
+) -> ORJSONResponse:
+    error = {
+        'code': exc.code,
+        'message': exc.message,
+        'request_id': str(request.scope.get('request_id') or ''),
+    }
+    if exc.details:
+        error['details'] = exc.details
+    return CustomORJSONResponse(
+        status_code=exc.status_code,
+        content={'error': error},
+    )
+
+
 if settings.trusted_hosts and '*' not in settings.trusted_hosts:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list, allow_credentials=True, allow_methods=['GET','POST','PUT','PATCH','DELETE'], allow_headers=['*'])

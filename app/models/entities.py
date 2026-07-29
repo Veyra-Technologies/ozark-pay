@@ -127,6 +127,7 @@ class Deposit(Base, TimestampMixin):
     merchant_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('merchants.id', ondelete='CASCADE'), index=True)
     external_id: Mapped[str]=mapped_column(String(128), index=True)
     idempotency_key: Mapped[str|None]=mapped_column(String(128), nullable=True, index=True)
+    request_fingerprint: Mapped[str|None]=mapped_column(String(64), nullable=True)
     amount: Mapped[Decimal]=mapped_column(Numeric(18,2))
     currency: Mapped[str]=mapped_column(String(8), default='RUB')
     method: Mapped[str]=mapped_column(String(32))
@@ -152,6 +153,7 @@ class Payout(Base, TimestampMixin):
     merchant_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('merchants.id', ondelete='CASCADE'), index=True)
     external_id: Mapped[str]=mapped_column(String(128), index=True)
     idempotency_key: Mapped[str|None]=mapped_column(String(128), nullable=True, index=True)
+    request_fingerprint: Mapped[str|None]=mapped_column(String(64), nullable=True)
     amount: Mapped[Decimal]=mapped_column(Numeric(18,2))
     currency: Mapped[str]=mapped_column(String(8), default='RUB')
     method: Mapped[str]=mapped_column(String(32))
@@ -162,6 +164,13 @@ class Payout(Base, TimestampMixin):
         UniqueConstraint('merchant_id','external_id', name='uq_payout_merchant_external'),
         UniqueConstraint('merchant_id','idempotency_key', name='uq_payout_merchant_idempotency'),
     )
+
+
+@event.listens_for(Deposit, 'before_update')
+@event.listens_for(Payout, 'before_update')
+def protect_api_request_fingerprint(mapper, connection, target):
+    if inspect(target).attrs.request_fingerprint.history.has_changes():
+        raise ValueError('request_fingerprint is immutable')
 
 
 class MerchantSettlement(Base, TimestampMixin):

@@ -1,8 +1,10 @@
+import hashlib
+import json
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +22,7 @@ from app.models import (
 )
 from app.schemas.common import PaymentCreate, PayoutCreate
 from app.core.config import settings
+from app.core.api_errors import MerchantApiError
 from app.core.enums import DepositStatus, PaymentMethod, PayoutStatus, RiskDecision
 from app.core.payment_methods import normalize_payment_method, payment_method_label
 from app.core.requisite_providers import requisite_provider_payload
@@ -60,9 +63,12 @@ async def log_req(db, merchant, request, status=200):
     db.add(ApiRequestLog(merchant_id=merchant.id, method=request.method, path=request.url.path, ip=client_ip(request), status_code=status, request_id=request.headers.get('X-Request-ID','')))
 
 IDEMPOTENCY_CONFLICT = 'idempotency_conflict'
+IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
 MERCHANT_ERROR_MESSAGES = {
     'idempotency_conflict': 'Same idempotency key or external_id was used with different payment fields.',
+    'missing_idempotency_key': 'Idempotency-Key is required for mutating requests.',
+    'invalid_idempotency_key': 'Idempotency-Key must be 1-128 printable characters.',
     'metadata_callback_url_not_supported': 'metadata.callback_url is not supported; configure merchant webhook_url in integration settings.',
     'not_found': 'Operation was not found.',
     'risk_denied': 'Operation was rejected by risk control.',
@@ -82,14 +88,12 @@ MERCHANT_ERROR_MESSAGES = {
 }
 
 
-def merchant_error(status_code: int, code: str, message: str | None = None, details: dict | None = None) -> HTTPException:
-    return HTTPException(
+def merchant_error(status_code: int, code: str, message: str | None = None, details: dict | None = None) -> MerchantApiError:
+    return MerchantApiError(
         status_code,
-        {
-            'code': code,
-            'message': message or MERCHANT_ERROR_MESSAGES.get(code, code),
-            'details': details or {},
-        },
+        code,
+        message or MERCHANT_ERROR_MESSAGES.get(code, code),
+        details,
     )
 
 
@@ -125,24 +129,58 @@ def _requisite_error_code(message: str) -> str:
     return 'requisites_busy_or_limited'
 
 
-def _same_deposit(dep: Deposit, data: PaymentCreate, idempotency_key: str) -> bool:
+def _request_fingerprint(kind: str, data: PaymentCreate | PayoutCreate) -> str:
+    serialized = json.dumps(
+        {
+            'kind': kind,
+            'payload': data.model_dump(mode='json'),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(',', ':'),
+    ).encode('utf-8')
+    return hashlib.sha256(serialized).hexdigest()
+
+
+def _idempotency_key(request: Request, fallback: str) -> str:
+    candidate = (
+        getattr(request.state, 'idempotency_key', None)
+        or request.headers.get('Idempotency-Key')
+        or fallback
+    ).strip()
+    if not candidate:
+        raise merchant_error(400, 'missing_idempotency_key')
+    if (
+        len(candidate) > IDEMPOTENCY_KEY_MAX_LENGTH
+        or any(ord(char) < 32 or ord(char) == 127 for char in candidate)
+    ):
+        raise merchant_error(400, 'invalid_idempotency_key')
+    return candidate
+
+
+def _same_deposit(
+    dep: Deposit,
+    data: PaymentCreate,
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> bool:
     return (
         dep.external_id == data.external_id
         and dep.idempotency_key == idempotency_key
-        and dep.amount == data.amount
-        and dep.currency == data.currency
-        and dep.method == data.method.value
+        and dep.request_fingerprint == request_fingerprint
     )
 
 
-def _same_payout(payout: Payout, data: PayoutCreate, idempotency_key: str) -> bool:
+def _same_payout(
+    payout: Payout,
+    data: PayoutCreate,
+    idempotency_key: str,
+    request_fingerprint: str,
+) -> bool:
     return (
         payout.external_id == data.external_id
         and payout.idempotency_key == idempotency_key
-        and payout.amount == data.amount
-        and payout.currency == data.currency
-        and payout.method == data.method.value
-        and payout.destination == data.destination
+        and payout.request_fingerprint == request_fingerprint
     )
 
 
@@ -194,16 +232,16 @@ def _idempotent_payout_response(payout: Payout) -> dict:
     }
 
 
-async def _existing_deposit_or_conflict(db: AsyncSession, merchant: Merchant, data: PaymentCreate, idempotency_key: str) -> Deposit | None:
+async def _existing_deposit_or_conflict(db: AsyncSession, merchant: Merchant, data: PaymentCreate, idempotency_key: str, request_fingerprint: str) -> Deposit | None:
     existing = await _find_existing_deposit(db, merchant, idempotency_key, data.external_id)
-    if existing and not _same_deposit(existing, data, idempotency_key):
+    if existing and not _same_deposit(existing, data, idempotency_key, request_fingerprint):
         raise merchant_error(409, IDEMPOTENCY_CONFLICT)
     return existing
 
 
-async def _existing_payout_or_conflict(db: AsyncSession, merchant: Merchant, data: PayoutCreate, idempotency_key: str) -> Payout | None:
+async def _existing_payout_or_conflict(db: AsyncSession, merchant: Merchant, data: PayoutCreate, idempotency_key: str, request_fingerprint: str) -> Payout | None:
     existing = await _find_existing_payout(db, merchant, idempotency_key, data.external_id)
-    if existing and not _same_payout(existing, data, idempotency_key):
+    if existing and not _same_payout(existing, data, idempotency_key, request_fingerprint):
         raise merchant_error(409, IDEMPOTENCY_CONFLICT)
     return existing
 
@@ -268,14 +306,15 @@ async def _rolling_fields_for_deposit(db: AsyncSession, dep: Deposit) -> dict:
     }
 
 @router.post('/deposits')
-async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth), idempotency_key: str | None = Header(default=None, alias='Idempotency-Key')):
-    idem = (idempotency_key or data.external_id).strip()[:128]
+async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
+    idem = _idempotency_key(request, data.external_id)
+    request_fingerprint = _request_fingerprint('deposit', data)
     callback_url = (data.metadata or {}).get('callback_url')
     if callback_url:
         await log_req(db, merchant, request, 422)
         await db.commit()
         raise merchant_error(422, 'metadata_callback_url_not_supported')
-    existing = await _existing_deposit_or_conflict(db, merchant, data, idem)
+    existing = await _existing_deposit_or_conflict(db, merchant, data, idem, request_fingerprint)
     if existing:
         await log_req(db,merchant,request); await db.commit()
         return await _idempotent_deposit_response(db, existing)
@@ -358,7 +397,7 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
         await log_req(db,merchant,request,409); await db.commit()
         message = str(exc)
         raise merchant_error(409, _requisite_error_code(message), message)
-    dep=Deposit(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, amount=data.amount, currency=data.currency, method=data.method.value, status=DepositStatus.pending.value, requisites_id=selected_requisite.requisite.id, client_ip=ip, created_at=deposit_created_at, expires_at=new_deposit_expires_at(), metadata_json={**(data.metadata or {}), **selected_requisite.settlement_metadata(), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
+    dep=Deposit(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, request_fingerprint=request_fingerprint, amount=data.amount, currency=data.currency, method=data.method.value, status=DepositStatus.pending.value, requisites_id=selected_requisite.requisite.id, client_ip=ip, created_at=deposit_created_at, expires_at=new_deposit_expires_at(), metadata_json={**(data.metadata or {}), **selected_requisite.settlement_metadata(), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
     db.add(dep)
     try:
         await db.flush()
@@ -378,7 +417,7 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
         )
     except IntegrityError as exc:
         await db.rollback()
-        existing = await _existing_deposit_or_conflict(db, merchant, data, idem)
+        existing = await _existing_deposit_or_conflict(db, merchant, data, idem, request_fingerprint)
         if existing:
             await log_req(db,merchant,request); await db.commit()
             return await _idempotent_deposit_response(db, existing)
@@ -434,9 +473,10 @@ async def cancel_deposit(external_id: str, request: Request, db: AsyncSession=De
     return {'id':dep.id,'external_id':dep.external_id,'status':dep.status,'amount':dep.amount}
 
 @router.post('/payouts')
-async def create_payout(data: PayoutCreate, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth), idempotency_key: str | None = Header(default=None, alias='Idempotency-Key')):
-    idem = (idempotency_key or data.external_id).strip()[:128]
-    existing = await _existing_payout_or_conflict(db, merchant, data, idem)
+async def create_payout(data: PayoutCreate, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
+    idem = _idempotency_key(request, data.external_id)
+    request_fingerprint = _request_fingerprint('payout', data)
+    existing = await _existing_payout_or_conflict(db, merchant, data, idem, request_fingerprint)
     if existing:
         await log_req(db,merchant,request); await db.commit()
         return _idempotent_payout_response(existing)
@@ -447,13 +487,13 @@ async def create_payout(data: PayoutCreate, request: Request, db: AsyncSession=D
         if risk.decision == RiskDecision.deny:
             raise merchant_error(403, 'risk_denied', risk.reason or MERCHANT_ERROR_MESSAGES['risk_denied'])
         raise merchant_error(403, 'manual_review_required')
-    p=Payout(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, amount=data.amount, currency=data.currency, method=data.method.value, status=PayoutStatus.pending.value, destination=data.destination, metadata_json={**(data.metadata or {}), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
+    p=Payout(merchant_id=merchant.id, external_id=data.external_id, idempotency_key=idem, request_fingerprint=request_fingerprint, amount=data.amount, currency=data.currency, method=data.method.value, status=PayoutStatus.pending.value, destination=data.destination, metadata_json={**(data.metadata or {}), 'risk_score': risk.score, 'risk_reason': risk.reason, 'integration_mode': getattr(request.state, 'merchant_api_key_mode', 'unknown')})
     db.add(p)
     try:
         await db.flush()
     except IntegrityError as exc:
         await db.rollback()
-        existing = await _existing_payout_or_conflict(db, merchant, data, idem)
+        existing = await _existing_payout_or_conflict(db, merchant, data, idem, request_fingerprint)
         if existing:
             await log_req(db,merchant,request); await db.commit()
             return _idempotent_payout_response(existing)
