@@ -69,7 +69,6 @@
         <input type="number" name="requested_usdt" min="0.000001" step="0.000001" required>
         <label>Кошелёк TRC20</label>
         <input name="wallet_address" minlength="34" maxlength="34" pattern="T[1-9A-HJ-NP-Za-km-z]{33}" required placeholder="T...">
-        <div class="note">В момент отправки backend получает свежий live askPrice Rapira до DB-lock, сохраняет rate snapshot и замораживает эквивалент requested + 5 USDT.</div>
         <button type="submit">Создать settle</button>
       </form>
     {% endif %}

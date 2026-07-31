@@ -221,13 +221,23 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 .rolling-copy-wrap{display:flex;align-items:center;gap:8px;max-width:100%}
 .rolling-copy-btn{min-height:28px!important;padding:0 10px!important;font-size:12px!important;border-radius:8px!important}
 .rolling-copy-value{max-width:calc(100% - 96px);display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#dff9ff}
+.rolling-amount{color:#f3fcff;font-size:25px;line-height:1.15;font-variant-numeric:tabular-nums;font-weight:750}
+.rolling-secondary-id{font-size:12px;color:#9fc1cf;word-break:break-all}
+.rolling-source-pill{display:inline-flex;align-items:center;min-height:24px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:850;background:rgba(120,221,245,.10);border:1px solid rgba(152,237,255,.20);line-height:1}
+.rolling-source-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .rolling-details-preview{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#d7f2fa}
 .rolling-hidden{display:none}
 .rolling-empty{padding:18px;color:var(--muted);background:rgba(8,22,36,.54);text-align:center}
+.rolling-card-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:2px}
+.rolling-card-actions .primary,
+.rolling-card-actions .dangerbtn,
+.rolling-card-actions .secondary{min-height:34px}
 .release-footer{max-width:1680px;margin:0 auto;padding:0 24px 24px;color:var(--muted);font-size:12px;text-align:right}
 @media(max-width:700px){.platform-wallet-card{grid-template-columns:1fr}.platform-wallet-qr{width:190px}}
 </style>
 </head>
+{% set environment_label = (environment_name or '') %}
+{% set is_rehearsal_environment = 'rehearsal' in (environment_label | lower) %}
 <body>
 <div class="top">
   <div class="top-brand"><h2>{{ brand.product_name }}</h2><div>{{ title }} · {{ user.email }}</div></div>
@@ -235,7 +245,10 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <b>Rapira RUB/USDT: <span data-rapira-rate>{{ rapira_rate.rate_rub }}</span></b>
     <span class="compact-note">Updated: <span data-rapira-updated>{% if rapira_rate.updated_at %}{{ rapira_rate.updated_at.strftime('%H:%M:%S') }}{% else %}—{% endif %}</span></span>
     <span class="rate-stale {% if rapira_rate.stale %}active{% endif %}" data-rapira-stale>курс устарел</span>
-    <span class="compact-note" data-rapira-source>{{ rapira_rate.rate_source }}</span>
+    <span class="compact-note" data-rapira-source>
+      {% if rapira_rate.rate_source == 'rapira_live' %}Rapira{% else %}{{ rapira_rate.rate_source }}{% endif %}
+      {% if is_rehearsal_environment %}<span class="pill-muted" style="margin-left:8px">QA MOCK</span>{% endif %}
+    </span>
   </div>
   <div class="top-actions">{% if user.role == 'superadmin' %}<a href="/docs" target="_blank">Swagger</a> · {% endif %}<form method="post" action="{{ logout_path }}" class="logout-form">{{ csrf_input(request) }}<button class="secondary" type="submit">Выйти</button></form></div>
 </div>
@@ -276,8 +289,6 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% else %}<p class="muted">Нет доступа.</p>{% endif %}
 
   {% elif s == 'TeamLead' %}
-  <div class="note">TeamLead получает отдельный расход платформы от gross успешного Deposit. Начисление не уменьшает Trader income, сумму к выплате мерчанту, settle или Rolling recovery.</div>
-  <div class="note">Для супер-админа: процент TeamLead может превысить маржу сделки, что приведет к warning в finance-monitoring.</div>
   {% if user.role == 'superadmin' %}
   <form method="post" action="{{ cabinet_base }}/teamlead/assignments" class="panel" data-confirm="Закрыть текущее назначение трейдера, если оно есть, и создать новую историческую запись?">{{ csrf_input(request) }}
     <h3>Назначить / переназначить трейдера</h3>
@@ -1035,21 +1046,79 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% if pending_rolling_transfers %}
   <div class="rolling-card">
     {% for transfer in pending_rolling_transfers %}
+    {% set transfer_id_text = transfer.id|string %}
+    {% set transfer_source = transfer.source or 'Rapira' %}
+    {% set transfer_source_label = 'Rapira' if transfer_source == 'rapira_live' else transfer_source %}
     <div class="panel rolling-form-card">
-      <div class="section-head"><h3>Входящий Rolling transfer #{{ transfer.sequence_no }}</h3><span class="status-pill status-wait">ожидает подтверждения</span></div>
+      <div class="section-head">
+        <div class="heading">
+          <h3>Rolling-перевод #{{ transfer.sequence_no }}</h3>
+          <div class="rolling-secondary-id">Внутренний ID: {{ transfer_id_text[:8] }}…{{ transfer_id_text[-8:] }}</div>
+        </div>
+        <span class="status-pill status-wait">Ожидает подтверждения</span>
+      </div>
       <div class="detail-grid">
-        <div class="detail-card"><b>Amount</b>{{ transfer.amount_usdt }} USDT</div>
-        <div class="detail-card"><b>Network</b>{{ transfer.network }}</div>
-        <div class="detail-card"><b>Sent at</b>{{ transfer.sent_at|dt_full }}</div>
-        <div class="detail-card"><b>Destination</b><div class="rolling-copy-wrap"><span class="rolling-copy-value cell-mono" title="{{ transfer.destination_address }}">{{ transfer.destination_address }}</span><button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.destination_address }}">Copy</button></div></div>
-        <div class="detail-card"><b>Tx hash</b><div class="rolling-copy-wrap"><span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash }}</span><button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}">Copy</button></div></div>
+        <div class="detail-card">
+          <b>Сумма</b>
+          <div class="rolling-amount">{{ "{:,.2f}".format(transfer.amount_usdt|float) | replace(',', ' ') }} USDT</div>
+        </div>
+        <div class="detail-card"><b>Сеть</b>{{ transfer.network or 'TRC20' }}</div>
+        <div class="detail-card"><b>Дата отправки</b>{{ transfer.sent_at|dt_compact }} UTC</div>
+        <div class="detail-card">
+          <b>Источник</b>
+          <div class="rolling-source-row">
+            <span class="rolling-source-pill">{{ transfer_source_label }}</span>
+            {% if is_rehearsal_environment %}<span class="pill-muted">QA MOCK</span>{% endif %}
+          </div>
+        </div>
+        <div class="detail-card">
+          <b>Destination</b>
+          <div class="rolling-copy-wrap">
+            <span class="rolling-copy-value cell-mono" title="{{ transfer.destination_address }}">{{ transfer.destination_address[:8] }}…{{ transfer.destination_address[-8:] }}</span>
+            <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.destination_address }}">Копировать</button>
+          </div>
+        </div>
+        <div class="detail-card">
+          <b>Tx hash</b>
+          <div class="rolling-copy-wrap">
+            <span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash[:8] }}…{{ transfer.tx_hash[-8:] if transfer.tx_hash else '—' }}</span>
+            {% if transfer.tx_hash %}
+            <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}">Копировать</button>
+            {% endif %}
+          </div>
+        </div>
       </div>
-      {% if transfer.comment %}<div class="compact-note">{{ transfer.comment }}</div>{% endif %}
-      <div class="actions-row">
-        <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/confirm" data-confirm="Подтвердить фактическое получение {{ transfer.amount_usdt }} USDT?">{{ csrf_input(request) }}<button class="primary" type="submit">Подтвердить получение</button></form>
-        <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/dispute" data-confirm="Сообщить Superadmin о проблеме с переводом?">{{ csrf_input(request) }}<input name="reason" required maxlength="500" placeholder="Обязательно укажите причину"><button class="dangerbtn" type="submit">Сообщить о проблеме</button></form>
+      {% if transfer.comment %}
+      <div class="compact-note">Комментарий к переводу: {{ transfer.comment }}</div>
+      {% endif %}
+      <div class="rolling-card-actions">
+        <button class="primary" type="button" data-modal-open="rolling-transfer-confirm-{{ transfer.id }}">Подтвердить получение</button>
+        <button class="secondary" type="button" data-modal-open="rolling-transfer-dispute-{{ transfer.id }}">Сообщить о проблеме</button>
       </div>
-    </div>
+      <div id="rolling-transfer-confirm-{{ transfer.id }}" class="modal">
+        <div class="modalbox">
+          <h2>Подтверждение поступления</h2>
+          <p>Подтвердить получение {{ "{:,.2f}".format(transfer.amount_usdt|float) | replace(',', ' ') }} USDT?</p>
+          <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/confirm" data-confirm="Подтвердить получение {{ "{:,.2f}".format(transfer.amount_usdt|float) | replace(',', ' ') }} USDT?" class="modal-actions">
+            {{ csrf_input(request) }}
+            <button class="primary" type="submit">Подтвердить</button>
+            <button class="secondary" type="button" data-modal-close="rolling-transfer-confirm-{{ transfer.id }}">Отмена</button>
+          </form>
+        </div>
+      </div>
+      <div id="rolling-transfer-dispute-{{ transfer.id }}" class="modal">
+        <div class="modalbox">
+          <h2>Сообщить о проблеме</h2>
+          <p>Укажите причину проблемы и отправьте сообщение Superadmin.</p>
+          <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/dispute" class="modal-actions" data-confirm="Отправить сообщение о проблеме?">
+            {{ csrf_input(request) }}
+            <textarea name="reason" required maxlength="500" rows="3" placeholder="Опишите проблему"></textarea>
+            <button class="dangerbtn" type="submit">Отправить сообщение</button>
+            <button class="secondary" type="button" data-modal-close="rolling-transfer-dispute-{{ transfer.id }}">Отмена</button>
+          </form>
+        </div>
+      </div>
+      </div>
     {% endfor %}
   </div>
   {% endif %}
@@ -1135,7 +1204,6 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% elif s == 'Интеграция с AI-офисом' %}
   {% if user.role == 'superadmin' %}
   {% set ai = ai_office_config %}
-  <div class="note">Интеграция не должна включаться в production до настройки M2M-аутентификации и разрешений AI-офиса. В v2.0-rc2 доступны только безопасное хранение конфигурации и ручной GET Test connection; события и входящие команды не отправляются.</div>
   <div class="detail-grid">
     <div class="detail-card"><b>Enabled</b>{{ 'yes' if ai.enabled else 'no' }}</div>
     <div class="detail-card"><b>Environment</b>{{ ai.environment }}</div>
@@ -1149,8 +1217,18 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% if ai.last_error_code %}<div class="note"><b>{{ ai.last_error_code }}</b>: {{ ai.last_error_message_redacted }}</div>{% endif %}
   <form method="post" action="{{ cabinet_base }}/ai-office/config" class="panel" data-confirm="Сохранить настройки AI Office без запуска интеграции?">
     {{ csrf_input(request) }}
-    <h3>Интеграция с AI-офисом</h3>
+    <h3>Настройки подключения</h3>
     <label><input class="check-inline" type="checkbox" name="enabled" {% if ai.enabled %}checked{% endif %}> Enabled</label>
+    {% set ai_activation_error = request.query_params.get('msg', '') %}
+    {% if ai_activation_error == 'ai_office_m2m_auth_required' %}
+    <div class="note" data-ai-office-activation-error>Выберите обязательный M2M Auth type и настройте соответствующий credential перед включением интеграции.</div>
+    {% elif ai_activation_error == 'ai_office_credential_required' %}
+    <div class="note" data-ai-office-activation-error>Добавьте credential для выбранного M2M Auth type перед включением интеграции.</div>
+    {% elif ai_activation_error == 'ai_office_production_activation_not_available' %}
+    <div class="note" data-ai-office-activation-error>Production activation недоступна, пока не выполнены обязательные условия безопасного подключения.</div>
+    {% else %}
+    <div data-ai-office-activation-error hidden></div>
+    {% endif %}
     <div class="row">
       <div><label>Environment</label><select name="environment">{% for env_name in ['local','staging','production'] %}<option value="{{ env_name }}" {% if ai.environment == env_name %}selected{% endif %}>{{ env_name }}</option>{% endfor %}</select></div>
       <div><label>Auth type</label><select name="auth_type">{% for auth_name in ['none','bearer','api_key','hmac'] %}<option value="{{ auth_name }}" {% if ai.auth_type == auth_name %}selected{% endif %}>{{ auth_name }}</option>{% endfor %}</select></div>
@@ -1579,7 +1657,11 @@ async function copyValueToClipboard(rawValue, button){
   if(!value){return;}
   try{
     await navigator.clipboard.writeText(value);
-    if(button){button.textContent='Скопировано';}
+    if(button){
+      const originalText=button.textContent;
+      button.textContent='Скопировано';
+      window.setTimeout(()=>{button.textContent=originalText;},1600);
+    }
   }catch(error){
     const input=document.createElement('textarea');
     input.value=value;
@@ -1590,7 +1672,11 @@ async function copyValueToClipboard(rawValue, button){
     input.select();
     document.execCommand('copy');
     input.remove();
-    if(button){button.textContent='Скопировано';}
+    if(button){
+      const originalText=button.textContent;
+      button.textContent='Скопировано';
+      window.setTimeout(()=>{button.textContent=originalText;},1600);
+    }
   }
 }
 document.querySelectorAll('[data-copy-platform-wallet]').forEach(button=>button.addEventListener('click',()=>copyValueToClipboard(button.dataset.copyPlatformWallet, button)));
@@ -1660,8 +1746,9 @@ function formatRateUpdated(value){
 }
 function updateRapiraRateView(data){
   if(!data||!data.rate_rub){return;}
+  const source = data.rate_source || data.source || 'Rapira';
   document.querySelectorAll('[data-rapira-rate]').forEach(el=>{el.textContent=formatRateValue(data.rate_rub,4);});
-  document.querySelectorAll('[data-rapira-source]').forEach(el=>{el.textContent=data.rate_source||data.source||'Rapira';});
+  document.querySelectorAll('[data-rapira-source]').forEach(el=>{el.textContent=source === 'rapira_live' ? 'Rapira' : source;});
   document.querySelectorAll('[data-rapira-updated]').forEach(el=>{el.textContent=formatRateUpdated(data.updated_at);});
   document.querySelectorAll('[data-rapira-stale]').forEach(el=>{el.classList.toggle('active',Boolean(data.stale));});
   if(data.fee_usdt){document.querySelectorAll('[data-settlement-fee-usdt]').forEach(el=>{el.textContent=formatRateValue(data.fee_usdt,2);});}
@@ -2231,4 +2318,3 @@ setInterval(()=>{
 </script>
 </body>
 </html>
-

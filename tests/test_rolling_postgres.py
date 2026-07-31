@@ -1404,7 +1404,17 @@ def test_route_level_superadmin_registration_and_merchant_confirmation():
                     '/merchant/cabinet?section=wallet'
                 )
                 assert cabinet.status_code == 200
-                assert 'Подтвердить получение' in cabinet.text
+                assert 'data-modal-open="rolling-transfer-confirm-' in cabinet.text
+                assert 'id="rolling-transfer-confirm-' in cabinet.text
+                assert 'data-modal-open="rolling-transfer-dispute-' in cabinet.text
+                assert 'id="rolling-transfer-dispute-' in cabinet.text
+                confirm_form_start = cabinet.text.index('id="rolling-transfer-confirm-')
+                confirm_form_end = cabinet.text.index('id="rolling-transfer-dispute-', confirm_form_start)
+                confirm_form_block = cabinet.text[confirm_form_start:confirm_form_end]
+                assert 'textarea name="reason"' not in confirm_form_block
+                dispute_form_start = confirm_form_end
+                dispute_form_block = cabinet.text[dispute_form_start:dispute_form_start + 900]
+                assert 'textarea name="reason"' in dispute_form_block
                 merchant_csrf = merchant_client.cookies[
                     'processing_merchant_csrf'
                 ]

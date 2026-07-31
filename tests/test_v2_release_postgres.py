@@ -903,11 +903,52 @@ def test_ai_office_routes_require_superadmin_2fa_csrf_and_never_render_secrets(
                 assert login.status_code == 303
                 cabinet = await client.get('/staff/cabinet')
                 assert 'Интеграция с AI-офисом' in cabinet.text
+                assert (
+                    'Интеграция не должна включаться в production'
+                    not in cabinet.text
+                )
+                assert '<h3>Интеграция с AI-офисом</h3>' not in cabinet.text
+                assert '<h3>Настройки подключения</h3>' in cabinet.text
+                assert 'data-ai-office-activation-error hidden' in cabinet.text
                 missing_csrf = await client.post(
                     '/staff/cabinet/ai-office/config',
                     data={'environment': 'local'},
                 )
                 assert missing_csrf.status_code == 403
+                unsafe_enable = await client.post(
+                    '/staff/cabinet/ai-office/config',
+                    data={
+                        'csrf_token': _csrf_from_html(cabinet),
+                        'enabled': 'on',
+                        'environment': 'staging',
+                        'base_url': 'https://ai.example.test',
+                        'health_path': '/api/health',
+                        'auth_type': 'none',
+                        'timeout_seconds': '5',
+                        'connect_timeout_seconds': '2',
+                        'max_retries': '0',
+                        'change_reason': 'verify M2M activation guard',
+                    },
+                )
+                assert unsafe_enable.status_code == 303
+                assert (
+                    'ai_office_m2m_auth_required'
+                    in unsafe_enable.headers['location']
+                )
+                unsafe_page = await client.get(
+                    '/staff/cabinet'
+                    '?section=ai-office'
+                    '&msg=ai_office_m2m_auth_required'
+                )
+                assert 'data-ai-office-activation-error' in unsafe_page.text
+                assert (
+                    'Выберите обязательный M2M Auth type'
+                    in unsafe_page.text
+                )
+                assert (
+                    'data-ai-office-activation-error hidden'
+                    not in unsafe_page.text
+                )
                 saved = await client.post(
                     '/staff/cabinet/ai-office/config',
                     data={
