@@ -257,6 +257,11 @@ async def _payment_details_for_deposit(db: AsyncSession, dep: Deposit) -> dict |
         'receiver_name': req.full_name or req.owner_name,
         'requisite': reveal_text(req.value_encrypted),
         'bank': provider.get('bank', ''),
+        'bank_name': (
+            provider.get('bank', '')
+            if provider.get('provider_type') == 'bank'
+            else ''
+        ),
         'exact_amount': str(dep.amount),
         'currency': dep.currency,
         'method': method,

@@ -61,6 +61,11 @@ class SelectedPaymentRequisite:
             'receiver_name': self.requisite.full_name or self.requisite.owner_name,
             'requisite': self.value,
             'bank': provider.get('bank', ''),
+            'bank_name': (
+                provider.get('bank', '')
+                if provider.get('provider_type') == 'bank'
+                else ''
+            ),
             'exact_amount': str(self.exact_amount),
             'currency': 'RUB',
             'method': method,
