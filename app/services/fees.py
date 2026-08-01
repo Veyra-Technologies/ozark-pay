@@ -15,7 +15,10 @@ from app.services.ledger import (
     record_platform_income,
 )
 from app.services.rolling import apply_merchant_financing
-from app.services.teamlead import accrue_teamlead_commission
+from app.services.teamlead import (
+    accrue_teamlead_commission,
+    accrue_teamlead_merchant_commission,
+)
 
 
 async def settle_deposit_credit(
@@ -103,6 +106,12 @@ async def settle_deposit_credit(
         f'platform income for {description}',
     )
     teamlead_accrual = await accrue_teamlead_commission(
+        db,
+        deposit=deposit,
+        snapshot=snapshot,
+        platform_income_rub=platform_income,
+    )
+    await accrue_teamlead_merchant_commission(
         db,
         deposit=deposit,
         snapshot=snapshot,

@@ -14,6 +14,7 @@ from app.models import (
     OperationFeeSnapshot,
     PlatformLedgerEntry,
     TeamLeadAccrual,
+    TeamLeadMerchantAccrual,
     User,
 )
 from app.services.fee_tiers import money
@@ -150,12 +151,24 @@ async def platform_income_dashboard(
             ).group_by(TeamLeadAccrual.status)
         )).all()
         accrual_totals = {row[0]: money(row[1]) for row in accrual_rows}
+        merchant_accrual_rows = (await db.execute(
+            select(
+                TeamLeadMerchantAccrual.status,
+                func.coalesce(func.sum(TeamLeadMerchantAccrual.accrual_rub), 0),
+            ).where(
+                TeamLeadMerchantAccrual.deposit_id.in_(settled_operation_ids),
+            ).group_by(TeamLeadMerchantAccrual.status)
+        )).all()
+        merchant_accrual_totals = {
+            row[0]: money(row[1]) for row in merchant_accrual_rows
+        }
         expected_teamlead_expense = money(sum(
-            accrual_totals.values(),
+            (*accrual_totals.values(), *merchant_accrual_totals.values()),
             Decimal('0.00'),
         ))
-        expected_teamlead_expense_reversal = accrual_totals.get(
-            'reversed', Decimal('0.00')
+        expected_teamlead_expense_reversal = money(
+            accrual_totals.get('reversed', Decimal('0.00'))
+            + merchant_accrual_totals.get('reversed', Decimal('0.00'))
         )
         expense_rows = (await db.execute(
             select(

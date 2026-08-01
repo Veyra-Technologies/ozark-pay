@@ -298,15 +298,31 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <label>Причина</label><input name="reason" maxlength="500" required>
     <button class="primary" type="submit">Сохранить историческое назначение</button>
   </form>
+  <form method="post" action="{{ cabinet_base }}/teamlead/merchant-assignments" class="panel" data-confirm="Закрыть текущее назначение мерчанта и создать новую историческую запись?">{{ csrf_input(request) }}
+    <h3>Назначить / переназначить мерчанта</h3>
+    <div class="row">
+      <div><label>TeamLead</label><select name="teamlead_id" required>{% for row in teamlead_admin_rows %}<option value="{{ row.user.id }}">{{ row.user.email }}</option>{% endfor %}</select></div>
+      <div><label>Мерчант</label><select name="merchant_id" required>{% for merchant in merchants %}<option value="{{ merchant.id }}">{{ merchant.name }}</option>{% endfor %}</select></div>
+      <div><label>Процент от paid gross</label><input type="number" name="commission_percent" min="0" max="100" step="0.000001" required></div>
+      <div><label>Valid from (UTC)</label><input type="datetime-local" name="valid_from"></div>
+    </div>
+    <label>Причина</label><input name="reason" maxlength="500" required>
+    <button class="primary" type="submit">Сохранить историческое назначение</button>
+  </form>
   {% endif %}
   {% for row in teamlead_admin_rows %}
   {% set tl = row.user %}{% set bal = row.balance %}
   <div class="panel">
     <div class="section-head"><h3>{{ tl.email }}</h3>{% if tl.is_locked %}<span class="status-pill status-bad">locked</span>{% elif tl.is_active %}<span class="status-pill status-ok">active</span>{% else %}<span class="status-pill status-bad">disabled</span>{% endif %}</div>
-    <p class="muted">TeamLead ID: <span class="cell-mono">{{ tl.id }}</span> · активных трейдеров: {{ row.current_assignments|length }} · 2FA: {{ 'on' if tl.twofa_enabled else 'setup required' }}</p>
+    <p class="muted">Активных трейдеров: {{ row.current_assignments|length }} · мерчантов: {{ row.current_merchant_assignments|length }} · 2FA: {{ 'on' if tl.twofa_enabled else 'setup required' }}</p>
     <div class="table-wrap"><table><tr><th>Текущий трейдер</th>{% if user.role == 'superadmin' %}<th>Процент</th><th>Effective from</th><th>Изменить процент</th>{% endif %}</tr>
       {% for assignment in row.current_assignments %}<tr><td>{{ row.trader_labels.get(assignment.trader_id, 'Archived trader') }}</td>{% if user.role == 'superadmin' %}<td>{{ assignment.commission_percent }}%</td><td>{{ assignment.effective_from|dt_full }}</td><td><form method="post" action="{{ cabinet_base }}/teamlead/assignments" data-confirm="Закрыть текущую запись и создать новую с новым процентом?">{{ csrf_input(request) }}<input type="hidden" name="teamlead_id" value="{{ tl.id }}"><input type="hidden" name="trader_id" value="{{ assignment.trader_id }}"><input type="number" name="commission_percent" min="0" max="100" step="0.000001" required><input name="reason" maxlength="500" required placeholder="Причина изменения"><button class="secondary" type="submit">Изменить</button></form></td>{% endif %}</tr>
       {% else %}<tr><td colspan="{{ 4 if user.role == 'superadmin' else 1 }}">Нет активных назначений.</td></tr>{% endfor %}
+    </table></div>
+    <h3>Текущие мерчанты</h3>
+    <div class="table-wrap"><table><tr><th>Мерчант</th><th>Процент</th><th>Valid from</th></tr>
+      {% for assignment in row.current_merchant_assignments %}<tr><td>{{ row.merchant_labels.get(assignment.merchant_id, 'Архивный мерчант') }}</td><td>{{ assignment.commission_percent }}%</td><td>{{ assignment.valid_from|dt_full }}</td></tr>
+      {% else %}<tr><td colspan="3">Нет активных назначений.</td></tr>{% endfor %}
     </table></div>
     {% if user.role == 'superadmin' %}
     <div class="detail-grid">
@@ -330,8 +346,12 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     </div>
     <h3>История назначений</h3>
     <div class="table-wrap"><table><tr><th>Трейдер</th><th>%</th><th>From</th><th>To</th><th>Создание</th><th>Закрытие</th></tr>{% for assignment in row.assignments %}<tr><td>{{ row.trader_labels.get(assignment.trader_id, 'Archived trader') }}</td><td>{{ assignment.commission_percent }}</td><td>{{ assignment.effective_from|dt_full }}</td><td>{{ assignment.effective_to|dt_full if assignment.effective_to else 'active' }}</td><td>{{ assignment.creation_reason }}</td><td>{{ assignment.close_reason or '—' }}</td></tr>{% else %}<tr><td colspan="6">История пуста.</td></tr>{% endfor %}</table></div>
+    <h3>История назначений мерчантов</h3>
+    <div class="table-wrap"><table><tr><th>Мерчант</th><th>%</th><th>From</th><th>To</th><th>Создание</th><th>Закрытие</th></tr>{% for assignment in row.merchant_assignments %}<tr><td>{{ row.merchant_labels.get(assignment.merchant_id, 'Архивный мерчант') }}</td><td>{{ assignment.commission_percent }}</td><td>{{ assignment.valid_from|dt_full }}</td><td>{{ assignment.valid_to|dt_full if assignment.valid_to else 'active' }}</td><td>{{ assignment.reason }}</td><td>{{ assignment.close_reason or '—' }}</td></tr>{% else %}<tr><td colspan="6">История пуста.</td></tr>{% endfor %}</table></div>
     <h3>Accrual history</h3>
     <div class="table-wrap"><table><tr><th>Дата</th><th>Deposit</th><th>Трейдер</th><th>Gross</th><th>% snapshot</th><th>Accrual</th><th>Available/debt</th><th>Status</th><th>Действие</th></tr>{% for accrual in row.accruals %}<tr><td>{{ accrual.created_at|dt_compact }}</td><td class="cell-mono">{{ accrual.deposit_id }}</td><td>{{ row.trader_labels.get(accrual.trader_id, 'Archived trader') }}</td><td>{{ accrual.gross_rub }}</td><td>{{ accrual.commission_percent_snapshot }}</td><td>{{ accrual.accrual_rub }}</td><td>{{ accrual.credited_to_available_rub }} / {{ accrual.applied_to_debt_rub }}</td><td>{{ accrual.status }}</td><td>{% if accrual.status == 'credited' %}<form method="post" action="{{ cabinet_base }}/teamlead/accruals/{{ accrual.deposit_id }}/reverse" data-confirm="Создать компенсирующий reversal?">{{ csrf_input(request) }}<input name="reason" maxlength="500" required placeholder="Причина reversal"><button class="dangerbtn" type="submit">Reverse</button></form>{% else %}{{ accrual.reversal_reason }}{% endif %}</td></tr>{% else %}<tr><td colspan="9">Начислений нет.</td></tr>{% endfor %}</table></div>
+    <h3>Merchant referral accrual history</h3>
+    <div class="table-wrap"><table><tr><th>Дата</th><th>Deposit</th><th>Мерчант</th><th>Gross</th><th>% snapshot</th><th>Accrual</th><th>Available/debt</th><th>Status</th><th>Действие</th></tr>{% for accrual in row.merchant_accruals %}<tr><td>{{ accrual.created_at|dt_compact }}</td><td class="cell-mono">{{ accrual.deposit_id }}</td><td>{{ row.merchant_labels.get(accrual.merchant_id, 'Архивный мерчант') }}</td><td>{{ accrual.gross_rub }}</td><td>{{ accrual.commission_percent_snapshot }}</td><td>{{ accrual.accrual_rub }}</td><td>{{ accrual.credited_to_available_rub }} / {{ accrual.applied_to_debt_rub }}</td><td>{{ accrual.status }}</td><td>{% if accrual.status == 'credited' %}<form method="post" action="{{ cabinet_base }}/teamlead/accruals/{{ accrual.deposit_id }}/reverse" data-confirm="Создать компенсирующий reversal?">{{ csrf_input(request) }}<input name="reason" maxlength="500" required placeholder="Причина reversal"><button class="dangerbtn" type="submit">Reverse</button></form>{% else %}{{ accrual.reversal_reason }}{% endif %}</td></tr>{% else %}<tr><td colspan="9">Начислений нет.</td></tr>{% endfor %}</table></div>
     <h3>Settlement queue и история</h3>
     <div class="table-wrap"><table><tr><th>Дата</th><th>Wallet</th><th>Requested + fee</th><th>Rate snapshot</th><th>Total RUB</th><th>Status</th><th>Обработка</th></tr>{% for settlement in row.settlements %}<tr><td>{{ settlement.requested_at|dt_compact }}</td><td class="cell-mono cell-wrap">{{ settlement.wallet_address }}</td><td>{{ settlement.requested_usdt }} + {{ settlement.fee_usdt }}</td><td>{{ settlement.rapira_rate_rub }} {{ settlement.rate_symbol }} {{ settlement.rate_side }}<br>{{ settlement.rate_source }} / {{ settlement.freshness_basis }}<br>fetched {{ settlement.fetched_at|dt_full }}{% if settlement.provider_timestamp %}<br>provider {{ settlement.provider_timestamp|dt_full }}{% endif %}</td><td>{{ settlement.total_debit_rub }}</td><td>{{ settlement.status }}</td><td>{% if settlement.status == 'pending' %}<form method="post" action="{{ cabinet_base }}/teamlead/settlements/{{ settlement.id }}/complete" data-confirm="Подтвердить выплату и запустить cooldown 168 часов?">{{ csrf_input(request) }}<input name="tx_hash" maxlength="160" required placeholder="TRC20 tx hash"><button class="primary" type="submit">Complete</button></form><form method="post" action="{{ cabinet_base }}/teamlead/settlements/{{ settlement.id }}/reject" data-confirm="Отклонить и вернуть frozen в available?">{{ csrf_input(request) }}<input name="reason" maxlength="500" required placeholder="Причина отказа"><button class="dangerbtn" type="submit">Reject</button></form>{% elif settlement.status == 'completed' %}<span class="cell-mono">{{ settlement.tx_hash }}</span>{% else %}{{ settlement.reject_reason }}{% endif %}</td></tr>{% else %}<tr><td colspan="7">Settlements нет.</td></tr>{% endfor %}</table></div>
     <h3>Immutable ledger</h3>
@@ -396,7 +416,19 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </table></div>
   {% if role in ['superadmin','admin'] %}{% for u in merchant_users %}{% set mc = merchant_credentials.get(u.id|string) if merchant_credentials is defined else none %}
   <div id="merchantModal{{ u.id }}" class="modal" {% if mc %}data-commission-modal="merchant:{{ mc.merchant_id }}"{% endif %}><div class="modalbox"><h2>{{ u.email }} <span class="badge">merchant</span></h2>
+    {% set merchant_tl_rows = merchant_teamlead_assignments.get(mc.merchant_id, []) if mc else [] %}
     <div class="grid"><div class="metric"><b>Название</b><p>{{ mc.name if mc else '—' }}</p></div><div class="metric"><b>Merchant ID</b><p class="cell-mono cell-ellipsis" title="{{ mc.merchant_id if mc else '—' }}">{{ mc.merchant_id if mc else '—' }}</p></div><div class="metric"><b>Статус</b><p>{{ 'active' if u.is_active and not u.is_locked else 'недоступен' }}</p></div><div class="metric"><b>Webhook</b><p class="cell-ellipsis" title="{{ mc.webhook_url if mc and mc.webhook_url else '—' }}">{{ mc.webhook_url if mc and mc.webhook_url else '—' }}</p></div></div>
+    {% if mc %}
+    <div class="panel">
+      <h3>TeamLead за мерчанта</h3>
+      {% set active_merchant_tl = merchant_tl_rows|selectattr('valid_to', 'none')|list %}
+      {% if active_merchant_tl %}{% set active_assignment = active_merchant_tl[0] %}
+      <div class="detail-grid"><div class="detail-card"><b>Текущий TeamLead</b>{{ teamlead_user_labels.get(active_assignment.teamlead_id, 'Архивный TeamLead') }}</div><div class="detail-card"><b>Процент</b>{{ active_assignment.commission_percent }}%</div><div class="detail-card"><b>Действует с</b>{{ active_assignment.valid_from|dt_full }}</div></div>
+      {% if role == 'superadmin' %}<form method="post" action="{{ cabinet_base }}/teamlead/merchant-assignments/{{ mc.merchant_id }}/close" data-confirm="Закрыть текущее назначение TeamLead?">{{ csrf_input(request) }}<div class="row"><div><label>Valid to (UTC)</label><input type="datetime-local" name="valid_to"></div><div><label>Причина</label><input name="reason" maxlength="500" required></div></div><button class="dangerbtn" type="submit">Закрыть назначение</button></form>{% endif %}
+      {% else %}<div class="muted">TeamLead не назначен.</div>{% endif %}
+      <h3>История</h3><div class="table-wrap"><table><tr><th>TeamLead</th><th>%</th><th>From</th><th>To</th><th>Причина</th></tr>{% for assignment in merchant_tl_rows %}<tr><td>{{ teamlead_user_labels.get(assignment.teamlead_id, 'Архивный TeamLead') }}</td><td>{{ assignment.commission_percent }}</td><td>{{ assignment.valid_from|dt_full }}</td><td>{{ assignment.valid_to|dt_full if assignment.valid_to else 'active' }}</td><td>{{ assignment.reason }}{% if assignment.close_reason %}<br><span class="muted">{{ assignment.close_reason }}</span>{% endif %}</td></tr>{% else %}<tr><td colspan="5">История пуста.</td></tr>{% endfor %}</table></div>
+    </div>
+    {% endif %}
     {% if mc and u.is_active and not u.is_locked %}{{ commission_tier_form('Комиссия мерчанта по чекам', 'merchant', mc.merchant_id, cabinet_base ~ '/merchants/' ~ mc.merchant_id ~ '/commission-tiers', commission_tiers_by_entity.get('merchant:' ~ mc.merchant_id, {})) }}{% else %}<div class="note">Комиссии доступны только для активного незаблокированного мерчанта.</div>{% endif %}
     {% if mc and merchant_finance_rows.get(mc.merchant_id) %}
     {% set finance = merchant_finance_rows.get(mc.merchant_id) %}

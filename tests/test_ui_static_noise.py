@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CABINET = (ROOT / "app/templates/cabinet.html").read_text(encoding="utf-8")
 TEAMLEAD = (ROOT / "app/templates/teamlead.html").read_text(encoding="utf-8")
+MERCHANT_API = (ROOT / "app/api/v1/merchant.py").read_text(encoding="utf-8")
 
 
 def test_teamlead_static_helper_banners_are_absent():
@@ -108,3 +109,27 @@ def test_rapira_source_is_humanized_and_mock_badge_is_rehearsal_only():
         "'rehearsal' in (environment_label | lower)"
         in CABINET
     )
+
+
+def test_teamlead_merchant_referral_controls_and_source_labels_are_visible():
+    assert 'action="{{ cabinet_base }}/teamlead/merchant-assignments"' in CABINET
+    assert (
+        '/teamlead/merchant-assignments/{{ mc.merchant_id }}/close'
+        in CABINET
+    )
+    assert 'Доход за трейдеров' in TEAMLEAD
+    assert 'Доход за мерчантов' in TEAMLEAD
+    assert 'За трейдера' in TEAMLEAD
+    assert 'За мерчанта' in TEAMLEAD
+    assert '{{ row.deposit_id }}' not in TEAMLEAD
+    assert 'TeamLead ID:' not in CABINET
+
+
+def test_merchant_api_does_not_expose_teamlead_referral_internals():
+    lowered = MERCHANT_API.lower()
+    assert 'teamleadmerchant' not in lowered
+    assert 'teamlead_merchant' not in lowered
+    assert 'merchant_referral' not in lowered
+    assert 'teamlead_id' not in lowered
+    assert 'teamlead_rate' not in lowered
+    assert 'teamlead_commission' not in lowered

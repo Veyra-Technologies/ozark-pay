@@ -70,6 +70,11 @@ class TeamLeadAccrualStatus(StrEnum):
     reversed = 'reversed'
 
 
+class TeamLeadReferralSource(StrEnum):
+    trader_referral = 'trader_referral'
+    merchant_referral = 'merchant_referral'
+
+
 class TeamLeadSettlementStatus(StrEnum):
     pending = 'pending'
     completed = 'completed'

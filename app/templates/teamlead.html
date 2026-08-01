@@ -37,6 +37,8 @@
     <div class="metric"><b>Общий заработок</b><strong>{{ balance.total_earned_rub }} RUB</strong></div>
     <div class="metric"><b>Уже выплачено с fee</b><strong>{{ balance.total_paid_rub }} RUB</strong></div>
     <div class="metric"><b>Gross назначенных сделок</b><strong>{{ total_gross_rub }} RUB</strong></div>
+    <div class="metric"><b>Доход за трейдеров</b><strong>{{ trader_income_rub }} RUB</strong><span class="muted">оборот {{ trader_gross_rub }} RUB</span></div>
+    <div class="metric"><b>Доход за мерчантов</b><strong>{{ merchant_income_rub }} RUB</strong><span class="muted">оборот {{ merchant_gross_rub }} RUB</span></div>
   </div>
 
   <section class="panel">
@@ -44,7 +46,17 @@
     <div class="note">Показываются только идентификатор кабинета, email и финансовая статистика TeamLead. Реквизиты, карты и телефоны недоступны.</div>
     <div class="table"><table>
       <tr><th>Трейдер</th><th>Процент</th><th>Успешный gross</th><th>Начислено</th><th>Операций</th></tr>
-      {% for row in trader_rows %}<tr><td><b>{{ row.email }}</b><br><span class="mono muted">{{ row.id }}</span></td><td>{{ row.commission_percent }}%</td><td>{{ row.gross_rub }} RUB</td><td>{{ row.accrual_rub }} RUB</td><td>{{ row.operations }}</td></tr>
+      {% for row in trader_rows %}<tr><td><b>{{ row.email }}</b></td><td>{{ row.commission_percent }}%</td><td>{{ row.gross_rub }} RUB</td><td>{{ row.accrual_rub }} RUB</td><td>{{ row.operations }}</td></tr>
+      {% else %}<tr><td colspan="5">Активных назначений пока нет.</td></tr>{% endfor %}
+    </table></div>
+  </section>
+
+  <section class="panel">
+    <div class="section-title"><h2>Мои мерчанты</h2><span class="badge">{{ merchant_rows|length }}</span></div>
+    <div class="note">Показаны только название и финансовая статистика TeamLead. API credentials и внутренние данные мерчанта недоступны.</div>
+    <div class="table"><table>
+      <tr><th>Мерчант</th><th>Процент</th><th>Успешный gross</th><th>Начислено</th><th>Операций</th></tr>
+      {% for row in merchant_rows %}<tr><td><b>{{ row.name }}</b></td><td>{{ row.commission_percent }}%</td><td>{{ row.gross_rub }} RUB</td><td>{{ row.accrual_rub }} RUB</td><td>{{ row.operations }}</td></tr>
       {% else %}<tr><td colspan="5">Активных назначений пока нет.</td></tr>{% endfor %}
     </table></div>
   </section>
@@ -75,10 +87,19 @@
   </section>
 
   <section class="panel">
-    <h2>История начислений</h2>
+    <h2>Начисления за трейдеров</h2>
     <div class="table"><table>
-      <tr><th>Дата</th><th>Deposit</th><th>Трейдер</th><th>Gross</th><th>% snapshot</th><th>Начисление</th><th>В available</th><th>В debt</th><th>Статус</th></tr>
-      {% for row in accruals %}<tr><td>{{ row.created_at|dt_compact }}</td><td class="mono">{{ row.deposit_id }}</td><td>{{ teamlead_trader_labels.get(row.trader_id, 'Archived trader') }}</td><td>{{ row.gross_rub }}</td><td>{{ row.commission_percent_snapshot }}%</td><td>{{ row.accrual_rub }}</td><td>{{ row.credited_to_available_rub }}</td><td>{{ row.applied_to_debt_rub }}</td><td>{{ row.status }}{% if row.reversal_reason %}<br><span class="bad">{{ row.reversal_reason }}</span>{% endif %}</td></tr>
+      <tr><th>Дата</th><th>Источник</th><th>Трейдер</th><th>Gross</th><th>% snapshot</th><th>Начисление</th><th>В available</th><th>В debt</th><th>Статус</th></tr>
+      {% for row in accruals %}<tr><td>{{ row.created_at|dt_compact }}</td><td><span class="badge">За трейдера</span></td><td>{{ teamlead_trader_labels.get(row.trader_id, 'Archived trader') }}</td><td>{{ row.gross_rub }}</td><td>{{ row.commission_percent_snapshot }}%</td><td>{{ row.accrual_rub }}</td><td>{{ row.credited_to_available_rub }}</td><td>{{ row.applied_to_debt_rub }}</td><td>{{ row.status }}{% if row.reversal_reason %}<br><span class="bad">{{ row.reversal_reason }}</span>{% endif %}</td></tr>
+      {% else %}<tr><td colspan="9">Начислений нет.</td></tr>{% endfor %}
+    </table></div>
+  </section>
+
+  <section class="panel">
+    <h2>Начисления за мерчантов</h2>
+    <div class="table"><table>
+      <tr><th>Дата</th><th>Источник</th><th>Мерчант</th><th>Gross</th><th>% snapshot</th><th>Начисление</th><th>В available</th><th>В debt</th><th>Статус</th></tr>
+      {% for row in merchant_accruals %}<tr><td>{{ row.created_at|dt_compact }}</td><td><span class="badge">За мерчанта</span></td><td>{{ teamlead_merchant_labels.get(row.merchant_id, 'Архивный мерчант') }}</td><td>{{ row.gross_rub }}</td><td>{{ row.commission_percent_snapshot }}%</td><td>{{ row.accrual_rub }}</td><td>{{ row.credited_to_available_rub }}</td><td>{{ row.applied_to_debt_rub }}</td><td>{{ row.status }}{% if row.reversal_reason %}<br><span class="bad">{{ row.reversal_reason }}</span>{% endif %}</td></tr>
       {% else %}<tr><td colspan="9">Начислений нет.</td></tr>{% endfor %}
     </table></div>
   </section>
@@ -96,9 +117,9 @@
     <h2>Immutable ledger и reconciliation</h2>
     <div class="note {{ 'ok' if reconciliation.reconciled else 'bad' }}"><b>{{ 'Reconciled' if reconciliation.reconciled else 'Обнаружено расхождение' }}</b> · {{ reconciliation.checks }}</div>
     <div class="table"><table>
-      <tr><th>Дата</th><th>Тип</th><th>Сумма RUB</th><th>Available after</th><th>Frozen after</th><th>Debt after</th><th>Причина</th></tr>
-      {% for row in ledger %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.entry_type }}</td><td>{{ row.amount_rub }}</td><td>{{ row.available_after }}</td><td>{{ row.frozen_after }}</td><td>{{ row.debt_after }}</td><td>{{ row.reason }}</td></tr>
-      {% else %}<tr><td colspan="7">Ledger пуст.</td></tr>{% endfor %}
+      <tr><th>Дата</th><th>Тип</th><th>Источник</th><th>Сумма RUB</th><th>Available after</th><th>Frozen after</th><th>Debt after</th><th>Причина</th></tr>
+      {% for row in ledger %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.entry_type }}</td><td>{% if row.source_type == 'merchant_referral' %}За мерчанта{% elif row.source_type == 'trader_referral' or row.accrual_id %}За трейдера{% else %}Общий баланс{% endif %}</td><td>{{ row.amount_rub }}</td><td>{{ row.available_after }}</td><td>{{ row.frozen_after }}</td><td>{{ row.debt_after }}</td><td>{{ row.reason }}</td></tr>
+      {% else %}<tr><td colspan="8">Ledger пуст.</td></tr>{% endfor %}
     </table></div>
   </section>
 

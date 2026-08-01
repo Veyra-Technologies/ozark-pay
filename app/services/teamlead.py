@@ -20,14 +20,18 @@ from app.core.enums import (
     Role,
     TeamLeadAccrualStatus,
     TeamLeadLedgerType,
+    TeamLeadReferralSource,
     TeamLeadSettlementStatus,
 )
 from app.models import (
     Deposit,
+    Merchant,
     OperationFeeSnapshot,
     TeamLeadAccrual,
     TeamLeadBalance,
     TeamLeadLedgerEntry,
+    TeamLeadMerchantAccrual,
+    TeamLeadMerchantAssignment,
     TeamLeadSettlement,
     TeamLeadTraderAssignment,
     User,
@@ -237,6 +241,142 @@ async def resolve_assignment_for_deposit(
     return (await db.execute(statement)).scalar_one_or_none()
 
 
+async def create_or_replace_merchant_assignment(
+    db: AsyncSession,
+    *,
+    teamlead_id: UUID,
+    merchant_id: UUID,
+    commission_percent: Decimal,
+    actor_id: UUID,
+    reason: str,
+    valid_from: datetime | None = None,
+) -> TeamLeadMerchantAssignment:
+    reason = (reason or '').strip()
+    if not reason:
+        raise TeamLeadError('merchant_assignment_reason_required')
+    valid_from = _utc(valid_from or datetime.now(timezone.utc))
+    commission_percent = _percent(commission_percent)
+    teamlead = (await db.execute(
+        select(User).where(User.id == teamlead_id)
+    )).scalar_one_or_none()
+    merchant = (await db.execute(
+        select(Merchant).where(Merchant.id == merchant_id).with_for_update()
+    )).scalar_one_or_none()
+    if (
+        not teamlead
+        or teamlead.role != Role.teamlead.value
+        or not teamlead.is_active
+        or teamlead.is_locked
+    ):
+        raise TeamLeadError('invalid_teamlead')
+    if merchant is None or merchant.is_archived:
+        raise TeamLeadError('invalid_merchant')
+
+    current = (await db.execute(
+        select(TeamLeadMerchantAssignment)
+        .where(
+            TeamLeadMerchantAssignment.merchant_id == merchant_id,
+            TeamLeadMerchantAssignment.valid_to.is_(None),
+        )
+        .with_for_update()
+    )).scalar_one_or_none()
+    current_id = None
+    if current:
+        if valid_from <= _utc(current.valid_from):
+            raise TeamLeadConflict('merchant_assignment_valid_from_conflict')
+        current.valid_to = valid_from
+        current.closed_by = actor_id
+        current.close_reason = reason
+        current_id = current.id
+        await db.flush()
+
+    overlap = select(TeamLeadMerchantAssignment.id).where(
+        TeamLeadMerchantAssignment.merchant_id == merchant_id,
+        or_(
+            TeamLeadMerchantAssignment.valid_to.is_(None),
+            TeamLeadMerchantAssignment.valid_to > valid_from,
+        ),
+    )
+    if current_id is not None:
+        overlap = overlap.where(TeamLeadMerchantAssignment.id != current_id)
+    if (await db.execute(overlap.limit(1))).scalar_one_or_none() is not None:
+        raise TeamLeadConflict('merchant_assignment_period_overlap')
+
+    assignment = TeamLeadMerchantAssignment(
+        teamlead_id=teamlead_id,
+        merchant_id=merchant_id,
+        commission_percent=commission_percent,
+        valid_from=valid_from,
+        created_by=actor_id,
+        reason=reason,
+    )
+    db.add(assignment)
+    await _ensure_balance_row(db, teamlead_id)
+    await db.flush()
+    return assignment
+
+
+async def close_merchant_assignment(
+    db: AsyncSession,
+    *,
+    merchant_id: UUID,
+    actor_id: UUID,
+    reason: str,
+    valid_to: datetime | None = None,
+) -> TeamLeadMerchantAssignment:
+    reason = (reason or '').strip()
+    if not reason:
+        raise TeamLeadError('merchant_assignment_close_reason_required')
+    valid_to = _utc(valid_to or datetime.now(timezone.utc))
+    merchant = (await db.execute(
+        select(Merchant).where(Merchant.id == merchant_id).with_for_update()
+    )).scalar_one_or_none()
+    if merchant is None:
+        raise TeamLeadError('invalid_merchant')
+    current = (await db.execute(
+        select(TeamLeadMerchantAssignment)
+        .where(
+            TeamLeadMerchantAssignment.merchant_id == merchant_id,
+            TeamLeadMerchantAssignment.valid_to.is_(None),
+        )
+        .with_for_update()
+    )).scalar_one_or_none()
+    if current is None:
+        raise TeamLeadError('merchant_assignment_not_found')
+    if valid_to <= _utc(current.valid_from):
+        raise TeamLeadConflict('merchant_assignment_valid_to_conflict')
+    current.valid_to = valid_to
+    current.closed_by = actor_id
+    current.close_reason = reason
+    await db.flush()
+    return current
+
+
+async def resolve_merchant_assignment_for_deposit(
+    db: AsyncSession,
+    *,
+    deposit: Deposit,
+    lock: bool = False,
+) -> TeamLeadMerchantAssignment | None:
+    created_at = _utc(deposit.created_at)
+    statement = (
+        select(TeamLeadMerchantAssignment)
+        .where(
+            TeamLeadMerchantAssignment.merchant_id == deposit.merchant_id,
+            TeamLeadMerchantAssignment.valid_from <= created_at,
+            or_(
+                TeamLeadMerchantAssignment.valid_to.is_(None),
+                TeamLeadMerchantAssignment.valid_to > created_at,
+            ),
+        )
+        .order_by(TeamLeadMerchantAssignment.valid_from.desc())
+        .limit(1)
+    )
+    if lock:
+        statement = statement.with_for_update()
+    return (await db.execute(statement)).scalar_one_or_none()
+
+
 def _ledger(
     *,
     balance: TeamLeadBalance,
@@ -246,17 +386,23 @@ def _ledger(
     idempotency_key: str,
     reason: str,
     accrual_id: UUID | None = None,
+    merchant_accrual_id: UUID | None = None,
     settlement_id: UUID | None = None,
     deposit_id: UUID | None = None,
+    merchant_id: UUID | None = None,
+    source_type: str | None = None,
     actor_id: UUID | None = None,
 ) -> TeamLeadLedgerEntry:
     return TeamLeadLedgerEntry(
         teamlead_id=teamlead_id,
         accrual_id=accrual_id,
+        merchant_accrual_id=merchant_accrual_id,
         settlement_id=settlement_id,
         deposit_id=deposit_id,
+        merchant_id=merchant_id,
         actor_id=actor_id,
         entry_type=entry_type,
+        source_type=source_type,
         amount_rub=_money(amount_rub),
         available_after=_money(balance.available_rub),
         frozen_after=_money(balance.frozen_rub),
@@ -324,6 +470,8 @@ async def accrue_teamlead_commission(
             teamlead_id=assignment.teamlead_id,
             accrual_id=accrual.id,
             deposit_id=deposit.id,
+            merchant_id=deposit.merchant_id,
+            source_type=TeamLeadReferralSource.trader_referral.value,
             entry_type=TeamLeadLedgerType.debt_offset.value,
             amount_rub=debt_offset,
             idempotency_key=f'teamlead:{deposit.id}:debt-offset',
@@ -335,6 +483,8 @@ async def accrue_teamlead_commission(
             teamlead_id=assignment.teamlead_id,
             accrual_id=accrual.id,
             deposit_id=deposit.id,
+            merchant_id=deposit.merchant_id,
+            source_type=TeamLeadReferralSource.trader_referral.value,
             entry_type=TeamLeadLedgerType.accrual_credit.value,
             amount_rub=available_credit,
             idempotency_key=f'teamlead:{deposit.id}:accrual-credit',
@@ -370,6 +520,169 @@ async def accrue_teamlead_commission(
                 'teamlead_id': str(assignment.teamlead_id),
                 'platform_income_rub': str(_money(platform_income_rub)),
                 'teamlead_expense_rub': str(accrual_amount),
+            },
+        )
+    return accrual
+
+
+async def accrue_teamlead_merchant_commission(
+    db: AsyncSession,
+    *,
+    deposit: Deposit,
+    snapshot: OperationFeeSnapshot,
+    platform_income_rub: Decimal,
+) -> TeamLeadMerchantAccrual | None:
+    if deposit.status != 'paid':
+        return None
+    assignment = await resolve_merchant_assignment_for_deposit(
+        db,
+        deposit=deposit,
+        lock=True,
+    )
+    if assignment is None:
+        return None
+    balance = await get_teamlead_balance(db, assignment.teamlead_id, lock=True)
+    existing = (await db.execute(
+        select(TeamLeadMerchantAccrual)
+        .where(
+            TeamLeadMerchantAccrual.deposit_id == deposit.id,
+            TeamLeadMerchantAccrual.source_type
+            == TeamLeadReferralSource.merchant_referral.value,
+        )
+        .with_for_update()
+    )).scalar_one_or_none()
+    if existing:
+        return existing
+
+    gross = _money(snapshot.calculation_base_amount)
+    if gross != _money(deposit.amount):
+        raise TeamLeadError('teamlead_merchant_gross_snapshot_mismatch')
+    accrual_amount = _money(
+        gross * _percent(assignment.commission_percent) / Decimal('100')
+    )
+    debt_offset = min(_money(balance.debt_rub), accrual_amount)
+    available_credit = _money(accrual_amount - debt_offset)
+    balance.debt_rub = _money(balance.debt_rub - debt_offset)
+    balance.available_rub = _money(balance.available_rub + available_credit)
+    balance.total_earned_rub = _money(
+        balance.total_earned_rub + accrual_amount
+    )
+
+    accrual = TeamLeadMerchantAccrual(
+        teamlead_id=assignment.teamlead_id,
+        merchant_id=deposit.merchant_id,
+        assignment_id=assignment.id,
+        deposit_id=deposit.id,
+        source_type=TeamLeadReferralSource.merchant_referral.value,
+        gross_rub=gross,
+        commission_percent_snapshot=_percent(assignment.commission_percent),
+        accrual_rub=accrual_amount,
+        credited_to_available_rub=available_credit,
+        applied_to_debt_rub=debt_offset,
+        status=TeamLeadAccrualStatus.credited.value,
+    )
+    db.add(accrual)
+    await db.flush()
+    if debt_offset:
+        db.add(_ledger(
+            balance=balance,
+            teamlead_id=assignment.teamlead_id,
+            merchant_accrual_id=accrual.id,
+            deposit_id=deposit.id,
+            merchant_id=deposit.merchant_id,
+            source_type=TeamLeadReferralSource.merchant_referral.value,
+            entry_type=TeamLeadLedgerType.debt_offset.value,
+            amount_rub=debt_offset,
+            idempotency_key=(
+                f'teamlead:{deposit.id}:merchant-referral:debt-offset'
+            ),
+            reason='Merchant referral accrual applied to outstanding debt',
+        ))
+    if available_credit:
+        db.add(_ledger(
+            balance=balance,
+            teamlead_id=assignment.teamlead_id,
+            merchant_accrual_id=accrual.id,
+            deposit_id=deposit.id,
+            merchant_id=deposit.merchant_id,
+            source_type=TeamLeadReferralSource.merchant_referral.value,
+            entry_type=TeamLeadLedgerType.accrual_credit.value,
+            amount_rub=available_credit,
+            idempotency_key=(
+                f'teamlead:{deposit.id}:merchant-referral:accrual-credit'
+            ),
+            reason='TeamLead merchant referral commission from paid gross',
+        ))
+    await record_platform_teamlead_expense(
+        db,
+        deposit.merchant_id,
+        accrual_amount,
+        deposit.id,
+        f'teamlead:{deposit.id}:merchant-referral:platform-expense',
+        'TeamLead merchant referral commission expense',
+    )
+    if accrual_amount > _money(platform_income_rub):
+        await audit_event(
+            db,
+            'teamlead_merchant_referral_loss_making_operation',
+            'deposit',
+            None,
+            deposit.id,
+            None,
+            {
+                'deposit_id': str(deposit.id),
+                'teamlead_id': str(assignment.teamlead_id),
+                'merchant_id': str(deposit.merchant_id),
+                'platform_income_rub': str(_money(platform_income_rub)),
+                'teamlead_expense_rub': str(accrual_amount),
+                'source_type': TeamLeadReferralSource.merchant_referral.value,
+            },
+        )
+        logger.warning(
+            'teamlead_merchant_referral_loss_making_operation',
+            extra={
+                'deposit_id': str(deposit.id),
+                'teamlead_id': str(assignment.teamlead_id),
+                'merchant_id': str(deposit.merchant_id),
+                'platform_income_rub': str(_money(platform_income_rub)),
+                'teamlead_expense_rub': str(accrual_amount),
+                'source_type': TeamLeadReferralSource.merchant_referral.value,
+            },
+        )
+    trader_accrual_amount = (await db.execute(
+        select(TeamLeadAccrual.accrual_rub).where(
+            TeamLeadAccrual.deposit_id == deposit.id
+        )
+    )).scalar_one_or_none()
+    combined_expense = _money(
+        accrual_amount + _money(trader_accrual_amount or Decimal('0.00'))
+    )
+    if trader_accrual_amount is not None and combined_expense > _money(
+        platform_income_rub
+    ):
+        await audit_event(
+            db,
+            'teamlead_combined_referral_loss_making_operation',
+            'deposit',
+            None,
+            deposit.id,
+            None,
+            {
+                'deposit_id': str(deposit.id),
+                'platform_income_rub': str(_money(platform_income_rub)),
+                'teamlead_expense_rub': str(combined_expense),
+                'source_types': [
+                    TeamLeadReferralSource.trader_referral.value,
+                    TeamLeadReferralSource.merchant_referral.value,
+                ],
+            },
+        )
+        logger.warning(
+            'teamlead_combined_referral_loss_making_operation',
+            extra={
+                'deposit_id': str(deposit.id),
+                'platform_income_rub': str(_money(platform_income_rub)),
+                'teamlead_expense_rub': str(combined_expense),
             },
         )
     return accrual
@@ -424,6 +737,8 @@ async def reverse_teamlead_accrual(
         teamlead_id=accrual.teamlead_id,
         accrual_id=accrual.id,
         deposit_id=deposit.id,
+        merchant_id=deposit.merchant_id,
+        source_type=TeamLeadReferralSource.trader_referral.value,
         actor_id=actor_id,
         entry_type=TeamLeadLedgerType.accrual_reversal.value,
         amount_rub=reversal,
@@ -439,6 +754,109 @@ async def reverse_teamlead_accrual(
         reason,
     )
     return accrual
+
+
+async def reverse_teamlead_merchant_accrual(
+    db: AsyncSession,
+    *,
+    deposit_id: UUID,
+    actor_id: UUID,
+    reason: str,
+    now: datetime | None = None,
+) -> TeamLeadMerchantAccrual | None:
+    reason = (reason or '').strip()
+    if not reason:
+        raise TeamLeadError('reversal_reason_required')
+    now = _utc(now or datetime.now(timezone.utc))
+    deposit = (await db.execute(
+        select(Deposit).where(Deposit.id == deposit_id).with_for_update()
+    )).scalar_one_or_none()
+    if deposit is None:
+        raise TeamLeadError('deposit_not_found')
+    accrual_hint = (await db.execute(
+        select(TeamLeadMerchantAccrual).where(
+            TeamLeadMerchantAccrual.deposit_id == deposit_id,
+            TeamLeadMerchantAccrual.source_type
+            == TeamLeadReferralSource.merchant_referral.value,
+        )
+    )).scalar_one_or_none()
+    if accrual_hint is None:
+        return None
+    balance = await get_teamlead_balance(
+        db,
+        accrual_hint.teamlead_id,
+        lock=True,
+    )
+    accrual = (await db.execute(
+        select(TeamLeadMerchantAccrual)
+        .where(TeamLeadMerchantAccrual.id == accrual_hint.id)
+        .with_for_update()
+    )).scalar_one()
+    if accrual.status == TeamLeadAccrualStatus.reversed.value:
+        return accrual
+
+    reversal = _money(accrual.accrual_rub)
+    from_available = min(_money(balance.available_rub), reversal)
+    balance.available_rub = _money(balance.available_rub - from_available)
+    balance.debt_rub = _money(balance.debt_rub + reversal - from_available)
+    balance.total_earned_rub = _money(balance.total_earned_rub - reversal)
+    accrual.status = TeamLeadAccrualStatus.reversed.value
+    accrual.reversed_at = now
+    accrual.reversal_reason = reason
+    db.add(_ledger(
+        balance=balance,
+        teamlead_id=accrual.teamlead_id,
+        merchant_accrual_id=accrual.id,
+        deposit_id=deposit.id,
+        merchant_id=deposit.merchant_id,
+        source_type=TeamLeadReferralSource.merchant_referral.value,
+        actor_id=actor_id,
+        entry_type=TeamLeadLedgerType.accrual_reversal.value,
+        amount_rub=reversal,
+        idempotency_key=(
+            f'teamlead:{deposit.id}:merchant-referral:accrual-reversal'
+        ),
+        reason=reason,
+    ))
+    await record_platform_teamlead_expense_reversal(
+        db,
+        deposit.merchant_id,
+        reversal,
+        deposit.id,
+        f'teamlead:{deposit.id}:merchant-referral:platform-expense-reversal',
+        reason,
+    )
+    return accrual
+
+
+async def reverse_teamlead_accruals_for_deposit(
+    db: AsyncSession,
+    *,
+    deposit_id: UUID,
+    actor_id: UUID,
+    reason: str,
+    now: datetime | None = None,
+) -> list[TeamLeadAccrual | TeamLeadMerchantAccrual]:
+    reversed_rows: list[TeamLeadAccrual | TeamLeadMerchantAccrual] = []
+    trader_accrual = await reverse_teamlead_accrual(
+        db,
+        deposit_id=deposit_id,
+        actor_id=actor_id,
+        reason=reason,
+        now=now,
+    )
+    if trader_accrual is not None:
+        reversed_rows.append(trader_accrual)
+    merchant_accrual = await reverse_teamlead_merchant_accrual(
+        db,
+        deposit_id=deposit_id,
+        actor_id=actor_id,
+        reason=reason,
+        now=now,
+    )
+    if merchant_accrual is not None:
+        reversed_rows.append(merchant_accrual)
+    return reversed_rows
 
 
 def _validate_live_quote(
@@ -771,6 +1189,12 @@ async def reconcile_teamlead_account(
     accrual_rows = (await db.execute(
         select(TeamLeadAccrual).where(TeamLeadAccrual.teamlead_id == teamlead_id)
     )).scalars().all()
+    merchant_accrual_rows = (await db.execute(
+        select(TeamLeadMerchantAccrual).where(
+            TeamLeadMerchantAccrual.teamlead_id == teamlead_id
+        )
+    )).scalars().all()
+    all_accrual_rows = [*accrual_rows, *merchant_accrual_rows]
     settlements = (await db.execute(
         select(TeamLeadSettlement).where(
             TeamLeadSettlement.teamlead_id == teamlead_id
@@ -783,19 +1207,27 @@ async def reconcile_teamlead_account(
     )).scalars().all()
 
     total_accrual = sum(
+        (_money(row.accrual_rub) for row in all_accrual_rows),
+        Decimal('0.00'),
+    )
+    trader_accrual = sum(
         (_money(row.accrual_rub) for row in accrual_rows),
+        Decimal('0.00'),
+    )
+    merchant_accrual = sum(
+        (_money(row.accrual_rub) for row in merchant_accrual_rows),
         Decimal('0.00'),
     )
     reversed_accrual = sum(
         (
             _money(row.accrual_rub)
-            for row in accrual_rows
+            for row in all_accrual_rows
             if row.status == TeamLeadAccrualStatus.reversed.value
         ),
         Decimal('0.00'),
     )
     debt_offsets = sum(
-        (_money(row.applied_to_debt_rub) for row in accrual_rows),
+        (_money(row.applied_to_debt_rub) for row in all_accrual_rows),
         Decimal('0.00'),
     )
     completed_total = sum(
@@ -891,6 +1323,8 @@ async def reconcile_teamlead_account(
         'teamlead_id': str(teamlead_id),
         'totals': {
             'total_accrual_rub': _money(total_accrual),
+            'trader_referral_accrual_rub': _money(trader_accrual),
+            'merchant_referral_accrual_rub': _money(merchant_accrual),
             'reversed_accrual_rub': _money(reversed_accrual),
             'debt_offsets_rub': _money(debt_offsets),
             'completed_settlements_rub': _money(completed_total),

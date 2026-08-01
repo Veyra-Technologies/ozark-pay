@@ -671,7 +671,7 @@ def test_postgres_v2_clean_0017_to_0018_to_0019_downgrade_and_reupgrade():
         with psycopg.connect(database_url) as db:
             assert db.execute(
                 'SELECT version_num FROM alembic_version'
-            ).fetchone()[0] == '0024_required_schema_indexes'
+            ).fetchone()[0] == '0025_teamlead_merchant_referrals'
     finally:
         with psycopg.connect(admin_url, autocommit=True) as admin:
             admin.execute(
@@ -1839,6 +1839,182 @@ def test_postgres_0023_normalizes_attempts_and_guards_signing_key_downgrade():
             assert db.execute(
                 'SELECT version_num FROM alembic_version'
             ).fetchone()[0] == '0023_webhook_hardening'
+    finally:
+        with psycopg.connect(admin_url, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL('DROP DATABASE IF EXISTS {} WITH (FORCE)').format(
+                    sql.Identifier(database_name)
+                )
+            )
+
+
+def test_postgres_0025_preserves_existing_teamlead_finance_and_guards_activity():
+    admin_url, database_url, database_name = _database_urls()
+    with psycopg.connect(admin_url, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL('CREATE DATABASE {}').format(sql.Identifier(database_name))
+        )
+    try:
+        to_0024 = _alembic(
+            database_url,
+            'upgrade',
+            '0024_required_schema_indexes',
+        )
+        assert to_0024.returncode == 0, to_0024.stdout + to_0024.stderr
+        teamlead_id = uuid.uuid4()
+        trader_id = uuid.uuid4()
+        owner_id = uuid.uuid4()
+        merchant_id = uuid.uuid4()
+        assignment_id = uuid.uuid4()
+        balance_id = uuid.uuid4()
+        assigned_at = datetime.now(timezone.utc) - timedelta(days=30)
+        with psycopg.connect(database_url) as db:
+            for user_id, role, label in (
+                (teamlead_id, 'teamlead', 'teamlead'),
+                (trader_id, 'trader', 'trader'),
+                (owner_id, 'merchant', 'merchant'),
+            ):
+                db.execute(
+                    """
+                    INSERT INTO users (
+                        id, email, password_hash, role, is_active,
+                        is_locked, failed_login_count, twofa_enabled
+                    )
+                    VALUES (%s, %s, 'unused', %s, true, false, 0, false)
+                    """,
+                    (
+                        user_id,
+                        f'0025-{label}-{uuid.uuid4().hex}@example.test',
+                        role,
+                    ),
+                )
+            db.execute(
+                """
+                INSERT INTO merchants (
+                    id, owner_id, name, ip_whitelist, sandbox_mode
+                )
+                VALUES (%s, %s, '0025 clone merchant', '[]'::json, true)
+                """,
+                (merchant_id, owner_id),
+            )
+            db.execute(
+                """
+                INSERT INTO teamlead_trader_assignments (
+                    id, teamlead_id, trader_id, commission_percent,
+                    effective_from, created_by, creation_reason
+                )
+                VALUES (%s, %s, %s, 0.75, %s, %s, 'existing assignment')
+                """,
+                (
+                    assignment_id,
+                    teamlead_id,
+                    trader_id,
+                    assigned_at,
+                    teamlead_id,
+                ),
+            )
+            db.execute(
+                """
+                INSERT INTO teamlead_balances (
+                    id, teamlead_id, available_rub, frozen_rub,
+                    debt_rub, total_earned_rub, total_paid_rub
+                )
+                VALUES (%s, %s, 123.45, 67.89, 10.00, 500.00, 298.66)
+                """,
+                (balance_id, teamlead_id),
+            )
+            before = db.execute(
+                """
+                SELECT
+                    (SELECT count(*) FROM teamlead_trader_assignments),
+                    (SELECT coalesce(sum(available_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(frozen_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(debt_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(total_earned_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(total_paid_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT count(*) FROM teamlead_ledger_entries)
+                """
+            ).fetchone()
+            db.commit()
+
+        upgrade = _alembic(database_url, 'upgrade', 'head')
+        assert upgrade.returncode == 0, upgrade.stdout + upgrade.stderr
+        with psycopg.connect(database_url) as db:
+            assert db.execute(
+                'SELECT version_num FROM alembic_version'
+            ).fetchone()[0] == '0025_teamlead_merchant_referrals'
+            after = db.execute(
+                """
+                SELECT
+                    (SELECT count(*) FROM teamlead_trader_assignments),
+                    (SELECT coalesce(sum(available_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(frozen_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(debt_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(total_earned_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT coalesce(sum(total_paid_rub), 0)
+                       FROM teamlead_balances),
+                    (SELECT count(*) FROM teamlead_ledger_entries)
+                """
+            ).fetchone()
+            assert after == before
+            assert db.execute(
+                'SELECT count(*) FROM teamlead_merchant_assignments'
+            ).fetchone()[0] == 0
+            assert db.execute(
+                'SELECT count(*) FROM teamlead_merchant_accruals'
+            ).fetchone()[0] == 0
+
+        clean_downgrade = _alembic(
+            database_url,
+            'downgrade',
+            '0024_required_schema_indexes',
+        )
+        assert clean_downgrade.returncode == 0, (
+            clean_downgrade.stdout + clean_downgrade.stderr
+        )
+        reupgrade = _alembic(database_url, 'upgrade', 'head')
+        assert reupgrade.returncode == 0, reupgrade.stdout + reupgrade.stderr
+        with psycopg.connect(database_url) as db:
+            db.execute(
+                """
+                INSERT INTO teamlead_merchant_assignments (
+                    id, teamlead_id, merchant_id, commission_percent,
+                    valid_from, created_by, reason
+                )
+                VALUES (%s, %s, %s, 1.25, %s, %s, 'downgrade guard')
+                """,
+                (
+                    uuid.uuid4(),
+                    teamlead_id,
+                    merchant_id,
+                    datetime.now(timezone.utc),
+                    teamlead_id,
+                ),
+            )
+            db.commit()
+        blocked = _alembic(
+            database_url,
+            'downgrade',
+            '0024_required_schema_indexes',
+        )
+        assert blocked.returncode != 0
+        assert (
+            'refusing TeamLead merchant referral downgrade after activity'
+            in blocked.stdout + blocked.stderr
+        )
+        with psycopg.connect(database_url) as db:
+            assert db.execute(
+                'SELECT version_num FROM alembic_version'
+            ).fetchone()[0] == '0025_teamlead_merchant_referrals'
     finally:
         with psycopg.connect(admin_url, autocommit=True) as admin:
             admin.execute(

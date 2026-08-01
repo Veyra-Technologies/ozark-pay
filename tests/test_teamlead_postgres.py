@@ -38,6 +38,8 @@ from app.models import (
     TeamLeadAccrual,
     TeamLeadBalance,
     TeamLeadLedgerEntry,
+    TeamLeadMerchantAccrual,
+    TeamLeadMerchantAssignment,
     TeamLeadSettlement,
     TeamLeadTraderAssignment,
     User,
@@ -51,15 +53,20 @@ from app.services.teamlead import (
     TeamLeadError,
     TeamLeadSettlementUnavailable,
     accrue_teamlead_commission,
+    accrue_teamlead_merchant_commission,
     adjust_teamlead_balance,
+    close_merchant_assignment,
     complete_teamlead_settlement,
     create_or_replace_assignment,
+    create_or_replace_merchant_assignment,
     create_teamlead_settlement,
     reconcile_teamlead_account,
     reject_teamlead_settlement,
     resolve_assignment_for_deposit,
+    resolve_merchant_assignment_for_deposit,
     validate_trc20_address,
     reverse_teamlead_accrual,
+    reverse_teamlead_accruals_for_deposit,
 )
 
 
@@ -1083,6 +1090,15 @@ def test_postgres_concurrent_settlement_paid_and_final_processing_are_single_eff
                     reason='concurrency assignment',
                     effective_from=datetime.now(timezone.utc) - timedelta(days=1),
                 )
+                await create_or_replace_merchant_assignment(
+                    setup,
+                    teamlead_id=actors['teamlead_b'].id,
+                    merchant_id=actors['merchant'].id,
+                    commission_percent=Decimal('0.750000'),
+                    actor_id=actors['superadmin'].id,
+                    reason='concurrency merchant assignment',
+                    valid_from=datetime.now(timezone.utc) - timedelta(days=1),
+                )
                 deposit, _ = await _deposit(setup, actors)
                 ids = {
                     key: value.id
@@ -1175,11 +1191,16 @@ def test_postgres_concurrent_settlement_paid_and_final_processing_are_single_eff
                     )
                 ) == 1
                 assert await verify.scalar(
+                    select(func.count(TeamLeadMerchantAccrual.id)).where(
+                        TeamLeadMerchantAccrual.deposit_id == ids['deposit']
+                    )
+                ) == 1
+                assert await verify.scalar(
                     select(func.count(PlatformLedgerEntry.id)).where(
                         PlatformLedgerEntry.operation_id == ids['deposit'],
                         PlatformLedgerEntry.entry_type == 'teamlead_expense',
                     )
-                ) == 1
+                ) == 2
         finally:
             await engine.dispose()
 
@@ -1513,6 +1534,362 @@ def test_postgres_teamlead_2fa_onboarding_route_level_then_access_cabinet():
                 final_cabinet = await client.get('/staff/cabinet')
                 assert final_cabinet.status_code == 200
                 assert 'TeamLead' in final_cabinet.text
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_teamlead_merchant_assignment_history_and_created_at_attribution():
+    async def scenario():
+        engine = create_async_engine(_database_url())
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                actors = await _actors(db)
+                base = datetime.now(timezone.utc) - timedelta(days=10)
+                before, before_snapshot = await _deposit(
+                    db,
+                    actors,
+                    created_at=base - timedelta(hours=1),
+                )
+                first = await create_or_replace_merchant_assignment(
+                    db,
+                    teamlead_id=actors['teamlead_a'].id,
+                    merchant_id=actors['merchant'].id,
+                    commission_percent=Decimal('1.250000'),
+                    actor_id=actors['superadmin'].id,
+                    reason='initial merchant referral',
+                    valid_from=base,
+                )
+                assert await accrue_teamlead_merchant_commission(
+                    db,
+                    deposit=before,
+                    snapshot=before_snapshot,
+                    platform_income_rub=before_snapshot.platform_income_amount,
+                ) is None
+                await _pay(db, actors, before)
+                assert await db.scalar(
+                    select(func.count(TeamLeadMerchantAccrual.id)).where(
+                        TeamLeadMerchantAccrual.deposit_id == before.id
+                    )
+                ) == 0
+
+                during, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base + timedelta(hours=1),
+                )
+                resolved = await resolve_merchant_assignment_for_deposit(
+                    db,
+                    deposit=during,
+                )
+                assert resolved.id == first.id
+                await _pay(db, actors, during)
+                during_accrual = await db.scalar(
+                    select(TeamLeadMerchantAccrual).where(
+                        TeamLeadMerchantAccrual.deposit_id == during.id
+                    )
+                )
+                assert during_accrual.commission_percent_snapshot == Decimal(
+                    '1.250000'
+                )
+
+                second = await create_or_replace_merchant_assignment(
+                    db,
+                    teamlead_id=actors['teamlead_b'].id,
+                    merchant_id=actors['merchant'].id,
+                    commission_percent=Decimal('2.000000'),
+                    actor_id=actors['superadmin'].id,
+                    reason='merchant reassigned',
+                    valid_from=base + timedelta(days=2),
+                )
+                after, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base + timedelta(days=3),
+                )
+                assert (
+                    await resolve_merchant_assignment_for_deposit(
+                        db,
+                        deposit=after,
+                    )
+                ).id == second.id
+                await _pay(db, actors, after)
+                after_accrual = await db.scalar(
+                    select(TeamLeadMerchantAccrual).where(
+                        TeamLeadMerchantAccrual.deposit_id == after.id
+                    )
+                )
+                assert after_accrual.teamlead_id == actors['teamlead_b'].id
+                assert first.valid_to == second.valid_from
+                assert await db.scalar(
+                    select(func.count(TeamLeadMerchantAssignment.id)).where(
+                        TeamLeadMerchantAssignment.merchant_id
+                        == actors['merchant'].id,
+                        TeamLeadMerchantAssignment.valid_to.is_(None),
+                    )
+                ) == 1
+
+                await close_merchant_assignment(
+                    db,
+                    merchant_id=actors['merchant'].id,
+                    actor_id=actors['superadmin'].id,
+                    reason='merchant referral ended',
+                    valid_to=base + timedelta(days=4),
+                )
+                after_close, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base + timedelta(days=5),
+                )
+                await _pay(db, actors, after_close)
+                assert await db.scalar(
+                    select(func.count(TeamLeadMerchantAccrual.id)).where(
+                        TeamLeadMerchantAccrual.deposit_id == after_close.id
+                    )
+                ) == 0
+                with pytest.raises(
+                    TeamLeadConflict,
+                    match='merchant_assignment_period_overlap',
+                ):
+                    await create_or_replace_merchant_assignment(
+                        db,
+                        teamlead_id=actors['teamlead_a'].id,
+                        merchant_id=actors['merchant'].id,
+                        commission_percent=Decimal('3.000000'),
+                        actor_id=actors['superadmin'].id,
+                        reason='must not overlap history',
+                        valid_from=base + timedelta(days=1),
+                    )
+                await db.rollback()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_postgres_independent_referral_matrix_shared_balance_settlement_and_reversal():
+    async def scenario():
+        engine = create_async_engine(_database_url())
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                actors = await _actors(db)
+                base = datetime.now(timezone.utc) - timedelta(days=10)
+                trader_balance_before = Decimal(
+                    actors['trader_a'].trader_balance
+                )
+
+                without_assignments, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base - timedelta(days=1),
+                )
+                await _pay(db, actors, without_assignments)
+                assert await db.scalar(
+                    select(func.count(TeamLeadAccrual.id)).where(
+                        TeamLeadAccrual.deposit_id == without_assignments.id
+                    )
+                ) == 0
+                assert await db.scalar(
+                    select(func.count(TeamLeadMerchantAccrual.id)).where(
+                        TeamLeadMerchantAccrual.deposit_id
+                        == without_assignments.id
+                    )
+                ) == 0
+
+                await create_or_replace_merchant_assignment(
+                    db,
+                    teamlead_id=actors['teamlead_b'].id,
+                    merchant_id=actors['merchant'].id,
+                    commission_percent=Decimal('1.000000'),
+                    actor_id=actors['superadmin'].id,
+                    reason='merchant-only interval',
+                    valid_from=base,
+                )
+                merchant_only, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base + timedelta(days=1),
+                )
+                await _pay(db, actors, merchant_only)
+                assert await db.scalar(
+                    select(func.count(TeamLeadAccrual.id)).where(
+                        TeamLeadAccrual.deposit_id == merchant_only.id
+                    )
+                ) == 0
+                assert (await db.scalar(
+                    select(TeamLeadMerchantAccrual).where(
+                        TeamLeadMerchantAccrual.deposit_id == merchant_only.id
+                    )
+                )).accrual_rub == Decimal('1000.00')
+
+                await create_or_replace_assignment(
+                    db,
+                    teamlead_id=actors['teamlead_a'].id,
+                    trader_id=actors['trader_a'].id,
+                    commission_percent=Decimal('0.500000'),
+                    actor_id=actors['superadmin'].id,
+                    reason='trader referral starts',
+                    effective_from=base + timedelta(days=2),
+                )
+                different_teamleads, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base + timedelta(days=3),
+                )
+                await _pay(db, actors, different_teamleads)
+                assert (await db.scalar(
+                    select(TeamLeadAccrual).where(
+                        TeamLeadAccrual.deposit_id == different_teamleads.id
+                    )
+                )).teamlead_id == actors['teamlead_a'].id
+                assert (await db.scalar(
+                    select(TeamLeadMerchantAccrual).where(
+                        TeamLeadMerchantAccrual.deposit_id
+                        == different_teamleads.id
+                    )
+                )).teamlead_id == actors['teamlead_b'].id
+
+                await create_or_replace_merchant_assignment(
+                    db,
+                    teamlead_id=actors['teamlead_a'].id,
+                    merchant_id=actors['merchant'].id,
+                    commission_percent=Decimal('1.000000'),
+                    actor_id=actors['superadmin'].id,
+                    reason='same TeamLead for both sources',
+                    valid_from=base + timedelta(days=4),
+                )
+                same_teamlead, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base + timedelta(days=5),
+                )
+                first_result = await _pay(db, actors, same_teamlead)
+                repeated_result = await settle_deposit_credit(
+                    db,
+                    merchant_id=actors['merchant'].id,
+                    method=same_teamlead.method,
+                    amount=same_teamlead.amount,
+                    operation_id=same_teamlead.id,
+                    description='merchant referral idempotency repeat',
+                )
+                assert first_result['merchant_payable_amount'] == '90000.00'
+                assert repeated_result['merchant_payable_amount'] == '90000.00'
+                assert await db.scalar(
+                    select(func.count(TeamLeadAccrual.id)).where(
+                        TeamLeadAccrual.deposit_id == same_teamlead.id
+                    )
+                ) == 1
+                assert await db.scalar(
+                    select(func.count(TeamLeadMerchantAccrual.id)).where(
+                        TeamLeadMerchantAccrual.deposit_id == same_teamlead.id
+                    )
+                ) == 1
+                assert await db.scalar(
+                    select(func.count(TeamLeadLedgerEntry.id)).where(
+                        TeamLeadLedgerEntry.deposit_id == same_teamlead.id,
+                        TeamLeadLedgerEntry.source_type == 'trader_referral',
+                    )
+                ) == 1
+                assert await db.scalar(
+                    select(func.count(TeamLeadLedgerEntry.id)).where(
+                        TeamLeadLedgerEntry.deposit_id == same_teamlead.id,
+                        TeamLeadLedgerEntry.source_type == 'merchant_referral',
+                    )
+                ) == 1
+
+                balance_a = await db.scalar(
+                    select(TeamLeadBalance).where(
+                        TeamLeadBalance.teamlead_id == actors['teamlead_a'].id
+                    )
+                )
+                balance_b = await db.scalar(
+                    select(TeamLeadBalance).where(
+                        TeamLeadBalance.teamlead_id == actors['teamlead_b'].id
+                    )
+                )
+                assert balance_a.available_rub == Decimal('2000.00')
+                assert balance_b.available_rub == Decimal('2000.00')
+
+                settlement_at = datetime.now(timezone.utc)
+                settlement = await create_teamlead_settlement(
+                    db,
+                    teamlead_id=actors['teamlead_a'].id,
+                    requested_usdt=Decimal('15'),
+                    wallet_address=WALLET,
+                    idempotency_key=f'combined-sources-{uuid.uuid4()}',
+                    quote=_quote(rate='100', at=settlement_at),
+                    now=settlement_at,
+                )
+                await complete_teamlead_settlement(
+                    db,
+                    settlement_id=settlement.id,
+                    actor_id=actors['superadmin'].id,
+                    tx_hash=f'combined-sources-{uuid.uuid4()}',
+                    now=settlement_at,
+                )
+                assert balance_a.available_rub == Decimal('0.00')
+                assert balance_a.total_paid_rub == Decimal('1500.00')
+
+                reversed_rows = await reverse_teamlead_accruals_for_deposit(
+                    db,
+                    deposit_id=same_teamlead.id,
+                    actor_id=actors['superadmin'].id,
+                    reason='reverse both independent referrals',
+                )
+                assert len(reversed_rows) == 2
+                assert balance_a.debt_rub == Decimal('1500.00')
+                future, _ = await _deposit(
+                    db,
+                    actors,
+                    created_at=base + timedelta(days=6),
+                )
+                await _pay(db, actors, future)
+                assert balance_a.debt_rub == Decimal('0.00')
+                assert balance_a.available_rub == Decimal('0.00')
+                assert balance_a.total_earned_rub == Decimal('2000.00')
+
+                merchant_balance = await db.scalar(
+                    select(Balance).where(
+                        Balance.merchant_id == actors['merchant'].id
+                    )
+                )
+                assert merchant_balance.available == Decimal('450000.00')
+                assert actors['trader_a'].trader_balance == trader_balance_before
+                assert await db.scalar(
+                    select(func.count(MerchantRollingAllocation.id)).where(
+                        MerchantRollingAllocation.merchant_id
+                        == actors['merchant'].id
+                    )
+                ) == 0
+                report_a = await reconcile_teamlead_account(
+                    db,
+                    actors['teamlead_a'].id,
+                )
+                report_b = await reconcile_teamlead_account(
+                    db,
+                    actors['teamlead_b'].id,
+                )
+                assert report_a['reconciled'], report_a
+                assert report_b['reconciled'], report_b
+                assert report_a['totals'][
+                    'trader_referral_accrual_rub'
+                ] == Decimal('1500.00')
+                assert report_a['totals'][
+                    'merchant_referral_accrual_rub'
+                ] == Decimal('2000.00')
+                income = await platform_income_dashboard(
+                    db,
+                    merchant_id=actors['merchant'].id,
+                )
+                assert income['totals']['reconciled'] is True
+                assert income['totals']['expected_teamlead_expense'] == Decimal(
+                    '5500.00'
+                )
+                assert income['totals'][
+                    'expected_teamlead_expense_reversal'
+                ] == Decimal('1500.00')
+                await db.rollback()
         finally:
             await engine.dispose()
 

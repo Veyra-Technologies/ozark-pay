@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.db.session import get_db
-from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, MerchantWebhookSigningKey, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, MerchantRollingTransfer, MerchantRollingTransferConsumption, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
+from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, MerchantWebhookSigningKey, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, MerchantRollingTransfer, MerchantRollingTransferConsumption, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadMerchantAccrual, TeamLeadMerchantAssignment, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
@@ -110,13 +110,15 @@ from app.services.teamlead import (
     TEAMLEAD_SETTLEMENT_COOLDOWN,
     TeamLeadError,
     adjust_teamlead_balance,
+    close_merchant_assignment,
     complete_teamlead_settlement,
     create_or_replace_assignment,
+    create_or_replace_merchant_assignment,
     create_teamlead_settlement,
     get_teamlead_balance,
     reconcile_teamlead_account,
     reject_teamlead_settlement,
-    reverse_teamlead_accrual,
+    reverse_teamlead_accruals_for_deposit,
 )
 from app.services.platform_wallet import (
     PlatformWalletError,
@@ -3244,6 +3246,96 @@ async def teamlead_assignment_create(
     return _teamlead_redirect('Назначение TeamLead сохранено с историей')
 
 
+@router.post('/cabinet/teamlead/merchant-assignments')
+async def teamlead_merchant_assignment_create(
+    request: Request,
+    teamlead_id: str = Form(...),
+    merchant_id: str = Form(...),
+    commission_percent: str = Form(...),
+    reason: str = Form(...),
+    valid_from: str = Form(''),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        assignment = await create_or_replace_merchant_assignment(
+            db,
+            teamlead_id=UUID(teamlead_id),
+            merchant_id=UUID(merchant_id),
+            commission_percent=Decimal(commission_percent.replace(',', '.')),
+            actor_id=actor.id,
+            reason=reason,
+            valid_from=_fee_datetime(valid_from),
+        )
+        await audit(
+            db,
+            'teamlead_merchant_assignment_created',
+            'teamlead_merchant_assignment',
+            actor.id,
+            assignment.id,
+            client_ip(request),
+            {
+                'teamlead_id': str(assignment.teamlead_id),
+                'merchant_id': str(assignment.merchant_id),
+                'commission_percent': str(assignment.commission_percent),
+                'valid_from': assignment.valid_from.isoformat(),
+                'reason': reason[:500],
+            },
+        )
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        return _teamlead_redirect('teamlead_merchant_assignment_conflict')
+    except (TeamLeadError, ValueError, InvalidOperation) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect(
+        'Назначение TeamLead мерчанту сохранено с историей'
+    )
+
+
+@router.post('/cabinet/teamlead/merchant-assignments/{merchant_id}/close')
+async def teamlead_merchant_assignment_close(
+    request: Request,
+    merchant_id: str,
+    reason: str = Form(...),
+    valid_to: str = Form(''),
+    db: AsyncSession = Depends(get_db),
+):
+    actor = await _require_superadmin_web(request, db)
+    if isinstance(actor, RedirectResponse):
+        return actor
+    try:
+        assignment = await close_merchant_assignment(
+            db,
+            merchant_id=UUID(merchant_id),
+            actor_id=actor.id,
+            reason=reason,
+            valid_to=_fee_datetime(valid_to),
+        )
+        await audit(
+            db,
+            'teamlead_merchant_assignment_closed',
+            'teamlead_merchant_assignment',
+            actor.id,
+            assignment.id,
+            client_ip(request),
+            {
+                'teamlead_id': str(assignment.teamlead_id),
+                'merchant_id': str(assignment.merchant_id),
+                'valid_to': assignment.valid_to.isoformat(),
+                'reason': reason[:500],
+            },
+        )
+        await db.commit()
+    except (TeamLeadError, ValueError) as exc:
+        await db.rollback()
+        return _teamlead_redirect(str(exc))
+    return _teamlead_redirect('Назначение TeamLead мерчанту закрыто')
+
+
 @router.post('/cabinet/teamlead/settlements/request')
 async def teamlead_settlement_request(
     request: Request,
@@ -3382,22 +3474,31 @@ async def teamlead_accrual_reverse(
     if isinstance(actor, RedirectResponse):
         return actor
     try:
-        accrual = await reverse_teamlead_accrual(
+        accruals = await reverse_teamlead_accruals_for_deposit(
             db,
             deposit_id=UUID(deposit_id),
             actor_id=actor.id,
             reason=reason,
         )
-        if accrual is None:
+        if not accruals:
             raise TeamLeadError('teamlead_accrual_not_found')
         await audit(
             db,
             'teamlead_accrual_reversed',
-            'teamlead_accrual',
+            'deposit',
             actor.id,
-            accrual.id,
+            UUID(deposit_id),
             client_ip(request),
-            {'deposit_id': deposit_id, 'reason': reason[:500]},
+            {
+                'deposit_id': deposit_id,
+                'reason': reason[:500],
+                'sources_reversed': [
+                    'merchant_referral'
+                    if isinstance(row, TeamLeadMerchantAccrual)
+                    else 'trader_referral'
+                    for row in accruals
+                ],
+            },
         )
         await db.commit()
     except (TeamLeadError, ValueError) as exc:
@@ -4038,7 +4139,30 @@ async def _teamlead_own_cabinet(
         )
         .order_by(TeamLeadTraderAssignment.effective_from)
     )).scalars().all()
-    trader_ids = {row.trader_id for row in assignments}
+    merchant_assignments = (await db.execute(
+        select(TeamLeadMerchantAssignment)
+        .where(
+            TeamLeadMerchantAssignment.teamlead_id == user.id,
+            TeamLeadMerchantAssignment.valid_to.is_(None),
+        )
+        .order_by(TeamLeadMerchantAssignment.valid_from)
+    )).scalars().all()
+    accruals = (await db.execute(
+        select(TeamLeadAccrual)
+        .where(TeamLeadAccrual.teamlead_id == user.id)
+        .order_by(TeamLeadAccrual.created_at.desc())
+        .limit(500)
+    )).scalars().all()
+    merchant_accruals = (await db.execute(
+        select(TeamLeadMerchantAccrual)
+        .where(TeamLeadMerchantAccrual.teamlead_id == user.id)
+        .order_by(TeamLeadMerchantAccrual.created_at.desc())
+        .limit(500)
+    )).scalars().all()
+    trader_ids = {
+        *(row.trader_id for row in assignments),
+        *(row.trader_id for row in accruals),
+    }
     traders = []
     if trader_ids:
         traders = (await db.execute(
@@ -4047,12 +4171,17 @@ async def _teamlead_own_cabinet(
             .order_by(User.email)
         )).all()
     trader_labels = {row[0]: row[1] for row in traders}
-    accruals = (await db.execute(
-        select(TeamLeadAccrual)
-        .where(TeamLeadAccrual.teamlead_id == user.id)
-        .order_by(TeamLeadAccrual.created_at.desc())
-        .limit(500)
-    )).scalars().all()
+    merchant_ids = {
+        *(row.merchant_id for row in merchant_assignments),
+        *(row.merchant_id for row in merchant_accruals),
+    }
+    merchant_labels = {}
+    if merchant_ids:
+        merchant_labels = dict((await db.execute(
+            select(Merchant.id, Merchant.name).where(
+                Merchant.id.in_(merchant_ids)
+            )
+        )).all())
     settlements = (await db.execute(
         select(TeamLeadSettlement)
         .where(TeamLeadSettlement.teamlead_id == user.id)
@@ -4094,6 +4223,38 @@ async def _teamlead_own_cabinet(
             ),
         }
         for assignment in assignments
+    ]
+    stats_by_merchant: dict[str, dict] = {}
+    for accrual in merchant_accruals:
+        item = stats_by_merchant.setdefault(
+            str(accrual.merchant_id),
+            {
+                'gross_rub': Decimal('0.00'),
+                'accrual_rub': Decimal('0.00'),
+                'operations': 0,
+            },
+        )
+        item['gross_rub'] += Decimal(accrual.gross_rub)
+        if accrual.status == 'credited':
+            item['accrual_rub'] += Decimal(accrual.accrual_rub)
+        item['operations'] += 1
+    merchant_rows = [
+        {
+            'name': merchant_labels.get(
+                assignment.merchant_id,
+                'Архивный мерчант',
+            ),
+            'commission_percent': assignment.commission_percent,
+            **stats_by_merchant.get(
+                str(assignment.merchant_id),
+                {
+                    'gross_rub': Decimal('0.00'),
+                    'accrual_rub': Decimal('0.00'),
+                    'operations': 0,
+                },
+            ),
+        }
+        for assignment in merchant_assignments
     ]
     completed_times = [
         row.completed_at
@@ -4141,14 +4302,44 @@ async def _teamlead_own_cabinet(
             'msg': request.query_params.get('msg'),
             'balance': balance,
             'trader_rows': trader_rows,
+            'merchant_rows': merchant_rows,
             'teamlead_trader_labels': trader_labels,
+            'teamlead_merchant_labels': merchant_labels,
             'accruals': accruals,
+            'merchant_accruals': merchant_accruals,
             'settlements': settlements,
             'ledger': ledger,
             'pending_settlement': pending_settlement,
             'next_settlement_at': next_settlement_at,
             'total_gross_rub': sum(
+                (
+                    Decimal(row.gross_rub)
+                    for row in [*accruals, *merchant_accruals]
+                ),
+                Decimal('0.00'),
+            ),
+            'trader_gross_rub': sum(
                 (Decimal(row.gross_rub) for row in accruals),
+                Decimal('0.00'),
+            ),
+            'merchant_gross_rub': sum(
+                (Decimal(row.gross_rub) for row in merchant_accruals),
+                Decimal('0.00'),
+            ),
+            'trader_income_rub': sum(
+                (
+                    Decimal(row.accrual_rub)
+                    for row in accruals
+                    if row.status == 'credited'
+                ),
+                Decimal('0.00'),
+            ),
+            'merchant_income_rub': sum(
+                (
+                    Decimal(row.accrual_rub)
+                    for row in merchant_accruals
+                    if row.status == 'credited'
+                ),
                 Decimal('0.00'),
             ),
             'reconciliation': reconciliation,
@@ -4245,6 +4436,8 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     rolling_admin_rows = []
     merchant_finance_rows = {}
     teamlead_admin_rows = []
+    merchant_teamlead_assignments = {}
+    teamlead_user_labels = {}
     platform_wallet = None
     platform_wallet_history = []
     platform_wallet_actor_labels = {}
@@ -4395,10 +4588,13 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     users = (await db.execute(select(User).where(User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value] else []
     merchant_users = [u for u in users if u.role == Role.merchant.value]
     trader_users = (await db.execute(select(User).where(User.role.in_([Role.operator.value, Role.trader.value]), User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else []
+    merchants = (await db.execute(select(Merchant).where(Merchant.is_archived.is_(False)).order_by(Merchant.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else ([merchant] if merchant else [])
     if user.role in {Role.superadmin.value, Role.admin.value}:
         teamlead_users = [row for row in users if row.role == Role.teamlead.value]
         teamlead_ids = {row.id for row in teamlead_users}
+        teamlead_user_labels = {row.id: row.email for row in teamlead_users}
         assignment_rows = []
+        merchant_assignment_rows = []
         if teamlead_ids:
             assignment_rows = (await db.execute(
                 select(TeamLeadTraderAssignment)
@@ -4408,6 +4604,45 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                     TeamLeadTraderAssignment.id.desc(),
                 )
             )).scalars().all()
+        merchant_ids_for_history = {row.id for row in merchants}
+        if merchant_ids_for_history:
+            merchant_assignment_rows = (await db.execute(
+                select(TeamLeadMerchantAssignment)
+                .where(
+                    TeamLeadMerchantAssignment.merchant_id.in_(
+                        merchant_ids_for_history
+                    )
+                )
+                .order_by(
+                    TeamLeadMerchantAssignment.valid_from.desc(),
+                    TeamLeadMerchantAssignment.id.desc(),
+                )
+            )).scalars().all()
+        historical_teamlead_ids = {
+            row.teamlead_id for row in merchant_assignment_rows
+        }
+        missing_teamlead_ids = historical_teamlead_ids.difference(
+            teamlead_user_labels
+        )
+        if missing_teamlead_ids:
+            teamlead_user_labels.update(dict((await db.execute(
+                select(User.id, User.email).where(
+                    User.id.in_(missing_teamlead_ids)
+                )
+            )).all()))
+        for assignment in merchant_assignment_rows:
+            merchant_teamlead_assignments.setdefault(
+                str(assignment.merchant_id),
+                [],
+            ).append(assignment)
+        teamlead_merchant_ids = {
+            row.merchant_id for row in merchant_assignment_rows
+        }
+        teamlead_merchant_labels = {
+            row.id: row.name
+            for row in merchants
+            if row.id in teamlead_merchant_ids
+        }
         teamlead_trader_ids = {row.trader_id for row in assignment_rows}
         teamlead_trader_labels = {}
         if teamlead_trader_ids:
@@ -4416,6 +4651,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             )).all())
         balances_by_teamlead = {}
         accruals_by_teamlead: dict[UUID, list] = {}
+        merchant_accruals_by_teamlead: dict[UUID, list] = {}
         settlements_by_teamlead: dict[UUID, list] = {}
         ledger_by_teamlead: dict[UUID, list] = {}
         if user.role == Role.superadmin.value and teamlead_ids:
@@ -4434,6 +4670,16 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 .limit(1000)
             )).scalars().all():
                 accruals_by_teamlead.setdefault(row.teamlead_id, []).append(row)
+            for row in (await db.execute(
+                select(TeamLeadMerchantAccrual)
+                .where(TeamLeadMerchantAccrual.teamlead_id.in_(teamlead_ids))
+                .order_by(TeamLeadMerchantAccrual.created_at.desc())
+                .limit(1000)
+            )).scalars().all():
+                merchant_accruals_by_teamlead.setdefault(
+                    row.teamlead_id,
+                    [],
+                ).append(row)
             for row in (await db.execute(
                 select(TeamLeadSettlement)
                 .where(TeamLeadSettlement.teamlead_id.in_(teamlead_ids))
@@ -4457,6 +4703,14 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             current_assignments = [
                 row for row in assignments if row.effective_to is None
             ]
+            merchant_assignments = [
+                row
+                for row in merchant_assignment_rows
+                if row.teamlead_id == teamlead_user.id
+            ]
+            current_merchant_assignments = [
+                row for row in merchant_assignments if row.valid_to is None
+            ]
             balance_row = balances_by_teamlead.get(teamlead_user.id)
             reconciliation = None
             if user.role == Role.superadmin.value and balance_row is not None:
@@ -4468,8 +4722,15 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 'assignments': assignments,
                 'current_assignments': current_assignments,
                 'trader_labels': teamlead_trader_labels,
+                'merchant_assignments': merchant_assignments,
+                'current_merchant_assignments': current_merchant_assignments,
+                'merchant_labels': teamlead_merchant_labels,
                 'balance': balance_row,
                 'accruals': accruals_by_teamlead.get(teamlead_user.id, []),
+                'merchant_accruals': merchant_accruals_by_teamlead.get(
+                    teamlead_user.id,
+                    [],
+                ),
                 'settlements': settlements_by_teamlead.get(teamlead_user.id, []),
                 'ledger': ledger_by_teamlead.get(teamlead_user.id, []),
                 'reconciliation': reconciliation,
@@ -4485,8 +4746,6 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         ]
     if not users and user.role == Role.support.value:
         users = trader_users
-    merchants = (await db.execute(select(Merchant).where(Merchant.is_archived.is_(False)).order_by(Merchant.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else ([merchant] if merchant else [])
-
     # Superadmin-only read-only view of existing merchant API credentials.
     # No users, keys or database records are recreated here.
     merchant_credentials = {}
@@ -5168,6 +5427,8 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'rolling_admin_rows': rolling_admin_rows,
         'merchant_finance_rows': merchant_finance_rows,
         'teamlead_admin_rows': teamlead_admin_rows,
+        'merchant_teamlead_assignments': merchant_teamlead_assignments,
+        'teamlead_user_labels': teamlead_user_labels,
         'platform_wallet': platform_wallet,
         'platform_wallet_history': platform_wallet_history,
         'platform_wallet_actor_labels': platform_wallet_actor_labels,
