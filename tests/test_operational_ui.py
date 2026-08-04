@@ -23,6 +23,7 @@ from app.web.view_models import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CABINET = (ROOT / "app/templates/cabinet.html").read_text(encoding="utf-8")
+DEPOSIT_ROWS = (ROOT / "app/templates/_deposit_rows.html").read_text(encoding="utf-8")
 ROUTES = (ROOT / "app/web/routes.py").read_text(encoding="utf-8")
 
 
@@ -202,3 +203,45 @@ def test_existing_post_routes_and_copy_full_values_remain_in_templates():
     assert 'action="{{ cabinet_base }}/antiscam/requisites/{{ r.id }}/pause"' in CABINET
     assert 'data-copy-value="{{ requisite_values.get(rid, \'\') }}"' in CABINET
     assert "bindCopyButtons(body)" in CABINET
+
+
+def test_trader_polling_is_bound_to_server_rendered_context():
+    assert 'data-partial-kind="trader-deposits"' in CABINET
+    assert 'data-view="active"' in CABINET
+    assert 'data-view="history"' in CABINET
+    assert 'data-refresh-url="{{ cabinet_base }}/partials/deposits"' in CABINET
+    assert "{% set deposit_auto_poll = role == user.role %}" in CABINET
+    assert "target.dataset.autoPoll!=='true'" in CABINET
+    assert "new URL(target.dataset.refreshUrl,window.location.origin)" in CABINET
+    assert "preview_role" not in CABINET
+    assert "client_role" not in CABINET
+
+
+def test_role_preview_uses_exact_read_only_refresh_instead_of_unsafe_polling():
+    assert "{% if not deposit_auto_poll %}" in CABINET
+    assert 'href="{{ deposit_page_url }}{% if request.url.query %}?{{ request.url.query }}{% endif %}#{{ section_id }}">Обновить</a>' in CABINET
+    assert "cabinet_base ~ '/' ~ role" in CABINET
+    assert "request.url.include_query_params(view='active', status='').query" in CABINET
+    assert "request.url.include_query_params(view='history', status='').query" in CABINET
+    assert 'action="{{ deposit_page_url }}"' in CABINET
+    assert 'href="{{ deposit_page_url }}?view={{ deposit_view }}"' in CABINET
+
+
+def test_poll_response_context_and_stale_sequence_are_checked_before_dom_update():
+    assert "new AbortController()" in CABINET
+    assert "const requestSequence=++depositPollSequence" in CABINET
+    assert "marker[1]!==expectedKind||marker[2]!==expectedView" in CABINET
+    assert "requestSequence!==depositPollSequence" in CABINET
+    assert "depositRowsTarget()!==target" in CABINET
+    assert "target.dataset.view!==expectedView" in CABINET
+    assert CABINET.index("requestSequence!==depositPollSequence") < CABINET.index("target.innerHTML=html")
+    assert "error.name==='AbortError'" in CABINET
+
+
+def test_deposit_partial_declares_kind_and_view_and_pagination_is_refreshed():
+    assert "ozark-partial:" in DEPOSIT_ROWS
+    assert "trader-deposits" in DEPOSIT_ROWS
+    assert "generic-deposits" in DEPOSIT_ROWS
+    assert "refreshTablePagination(target.closest('table'))" in CABINET
+    assert "const currentPage=Number(table.dataset.page||'1')" in CABINET
+    assert "table.dataset.page=String(page)" in CABINET

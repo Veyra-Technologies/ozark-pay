@@ -785,11 +785,14 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
   {% elif 'Пополн' in s %}
   {% if role in ['operator','trader'] %}
   {% set deposit_view = deposit_filters.get('view','active') %}
+  {% set deposit_auto_poll = role == user.role %}
+  {% set deposit_page_url = cabinet_base if deposit_auto_poll else cabinet_base ~ '/' ~ role %}
   <div class="operational-toolbar">
     <div class="operational-tabs" aria-label="Раздел заявок">
-      <a class="{{ 'active' if deposit_view == 'active' else '' }}" href="{{ request.url.include_query_params(view='active', status='') }}">Активные {{ deposit_aggregates.get('active_count',0) }}</a>
-      <a class="{{ 'active' if deposit_view == 'history' else '' }}" href="{{ request.url.include_query_params(view='history', status='') }}">История</a>
+      <a class="{{ 'active' if deposit_view == 'active' else '' }}" href="{{ deposit_page_url }}?{{ request.url.include_query_params(view='active', status='').query }}">Активные {{ deposit_aggregates.get('active_count',0) }}</a>
+      <a class="{{ 'active' if deposit_view == 'history' else '' }}" href="{{ deposit_page_url }}?{{ request.url.include_query_params(view='history', status='').query }}">История</a>
     </div>
+    {% if not deposit_auto_poll %}<a class="secondary btn-small" href="{{ deposit_page_url }}{% if request.url.query %}?{{ request.url.query }}{% endif %}#{{ section_id }}">Обновить</a>{% endif %}
   </div>
   <div class="summary-strip">
     <div class="summary-item"><b>Активные</b><strong>{{ deposit_aggregates.get('active_count',0) }}</strong></div>
@@ -797,11 +800,11 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
     <div class="summary-item"><b>Оплачено сегодня, UTC</b><strong>{{ deposit_aggregates.get('paid_today_count',0) }}</strong></div>
     <div class="summary-item"><b>Сумма сегодня, UTC</b><strong>{{ deposit_aggregates.get('paid_today_amount',0)|money_rub }}</strong></div>
   </div>
-  <form class="panel compact-filter" method="get" action="{{ cabinet_base }}">
+  <form class="panel compact-filter" method="get" action="{{ deposit_page_url }}">
     <input type="hidden" name="view" value="{{ deposit_view }}">
     <div class="search-field"><label>Поиск</label><input name="deposit_query" value="{{ deposit_filters.get('query','') }}" placeholder="ID, external ID или реквизит"></div>
     <button class="primary" type="submit">Найти</button>
-    <a class="secondary reset-link" href="{{ cabinet_base }}?view={{ deposit_view }}">Сбросить</a>
+    <a class="secondary reset-link" href="{{ deposit_page_url }}?view={{ deposit_view }}">Сбросить</a>
     <details class="filter-disclosure" {% if deposit_filters.get('amount') or deposit_filters.get('date') or deposit_filters.get('bank_code') or deposit_filters.get('payment_method') or deposit_filters.get('status') or deposit_filters.get('requisite') %}open{% endif %}>
       <summary>Фильтры</summary>
       <div class="filter-grid">
@@ -815,7 +818,7 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
     </details>
   </form>
   {% if deposit_view == 'active' %}
-  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Осталось</th><th>Сумма</th><th>Банк и метод</th><th>Реквизит / получатель</th><th>Статус</th><th class="action-column">Действие</th></tr></thead><tbody id="depositRows">
+  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Осталось</th><th>Сумма</th><th>Банк и метод</th><th>Реквизит / получатель</th><th>Статус</th><th class="action-column">Действие</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="active" data-refresh-url="{{ cabinet_base }}/partials/deposits" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
   {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
   <tr>
     <td data-label="Осталось"><span class="timer {{ 'timer-urgent' if dd.get('remaining_seconds',0) < 300 else ('timer-warning' if dd.get('remaining_seconds',0) < 600 else '') }}" data-countdown="{{ dd.get('remaining_seconds',0) }}">{{ '%02d:%02d'|format((dd.get('remaining_seconds',0)//60), (dd.get('remaining_seconds',0)%60)) }}</span></td>
@@ -828,7 +831,7 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
   {% else %}<tr><td colspan="6" class="table-empty">Активных заявок нет</td></tr>{% endfor %}
   </tbody></table></div>
   {% else %}
-  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Дата</th><th>Сумма</th><th>Банк и метод</th><th>Результат</th><th>Причина</th><th class="action-column">Подробнее</th></tr></thead><tbody id="depositRows">
+  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Дата</th><th>Сумма</th><th>Банк и метод</th><th>Результат</th><th>Причина</th><th class="action-column">Подробнее</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="history" data-refresh-url="{{ cabinet_base }}/partials/deposits" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
   {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
   <tr>
     <td data-label="Дата"><span class="text-date" title="{{ d.updated_at|dt_full }}">{{ d.updated_at|dt_compact }}</span></td>
@@ -2405,62 +2408,69 @@ function tablePageItems(current,total){
   items.push(total);
   return items;
 }
+function paginateTable(table,initialPage=1){
+  if(table._tablePager){table._tablePager.remove();table._tablePager=null;}
+  Array.from(table.rows).forEach(row=>{row.hidden=false;});
+  const allRows=Array.from(table.rows);
+  if(allRows.length<=1){delete table.dataset.paginated;delete table.dataset.page;return;}
+  const hasHeader=allRows[0].querySelectorAll('th').length>0;
+  const dataRows=allRows.slice(hasHeader?1:0);
+  const rows=dataRows.filter(row=>!(dataRows.length===1&&row.querySelector('td[colspan]')));
+  if(rows.length<=TABLE_PAGE_SIZE){delete table.dataset.paginated;delete table.dataset.page;return;}
+  table.dataset.paginated='1';
+  let page=initialPage;
+  const pager=document.createElement('div');
+  pager.className='table-pager';
+  table._tablePager=pager;
+  const wrap=table.closest('.table-wrap');
+  wrap.insertAdjacentElement('afterend',pager);
+  function render(){
+    const total=Math.ceil(rows.length/TABLE_PAGE_SIZE);
+    page=Math.min(Math.max(page,1),total);
+    table.dataset.page=String(page);
+    const from=(page-1)*TABLE_PAGE_SIZE;
+    const to=from+TABLE_PAGE_SIZE;
+    rows.forEach((row,index)=>{row.hidden=index<from||index>=to;});
+    pager.innerHTML='';
+    tablePageItems(page,total).forEach(item=>{
+      if(item==='...'){
+        const span=document.createElement('span');
+        span.textContent='...';
+        pager.appendChild(span);
+        return;
+      }
+      const button=document.createElement('button');
+      button.type='button';
+      button.textContent=String(item);
+      button.className=item===page?'active':'';
+      button.addEventListener('click',()=>{page=item;render();});
+      pager.appendChild(button);
+    });
+  }
+  render();
+}
 function initTablePagination(){
   document.querySelectorAll('.table-wrap table').forEach(table=>{
-    if(table.dataset.paginated==='1'){return;}
-    const allRows=Array.from(table.rows);
-    if(allRows.length<=1){return;}
-    const hasHeader=allRows[0].querySelectorAll('th').length>0;
-    const dataRows=allRows.slice(hasHeader?1:0);
-    const rows=dataRows.filter(row=>!(dataRows.length===1&&row.querySelector('td[colspan]')));
-    if(rows.length<=TABLE_PAGE_SIZE){return;}
-    table.dataset.paginated='1';
-    let page=1;
-    const pager=document.createElement('div');
-    pager.className='table-pager';
-    const wrap=table.closest('.table-wrap');
-    wrap.insertAdjacentElement('afterend',pager);
-    function render(){
-      const total=Math.ceil(rows.length/TABLE_PAGE_SIZE);
-      page=Math.min(Math.max(page,1),total);
-      const from=(page-1)*TABLE_PAGE_SIZE;
-      const to=from+TABLE_PAGE_SIZE;
-      rows.forEach((row,index)=>{row.hidden=index<from||index>=to;});
-      pager.innerHTML='';
-      tablePageItems(page,total).forEach(item=>{
-        if(item==='...'){
-          const span=document.createElement('span');
-          span.textContent='...';
-          pager.appendChild(span);
-          return;
-        }
-        const button=document.createElement('button');
-        button.type='button';
-        button.textContent=String(item);
-        button.className=item===page?'active':'';
-        button.addEventListener('click',()=>{page=item;render();});
-        pager.appendChild(button);
-      });
-    }
-    render();
+    if(table.dataset.paginated!=='1'){paginateTable(table);}
   });
+}
+function refreshTablePagination(table){
+  const currentPage=Number(table.dataset.page||'1');
+  paginateTable(table,currentPage);
 }
 initTablePagination();
 function formatTime(sec){const m=Math.floor(sec/60);const s=sec%60;return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');}
 const DEPOSIT_POLL_BASE_MS=Math.max(5000,Number('{{ cabinet_poll_interval_seconds|default(10) }}')*1000);
 let depositPollTimer=null;
 let depositPollFailures=0;
-let depositPollInFlight=false;
+let depositPollController=null;
+let depositPollSequence=0;
 let depositExpiryRefreshRequested=false;
 function depositRowsTarget(){
-  const table=document.querySelector('.trader-table table');
-  if(!table){return null;}
-  const body=table.tBodies&&table.tBodies.length?table.tBodies[0]:null;
-  if(body){body.id='depositRows';}
-  return body;
+  return document.querySelector('.section.active .trader-table tbody[data-partial-kind="trader-deposits"]');
 }
-function depositPartialUrl(){
-  const url=new URL('{{ cabinet_base }}/partials/deposits',window.location.origin);
+function depositPartialUrl(target){
+  const url=new URL(target.dataset.refreshUrl,window.location.origin);
   const current=new URLSearchParams(window.location.search);
   ['view','bank_code','payment_method','status','deposit_query','deposit_amount','deposit_requisite','deposit_date','merchant_trader_id','merchant_deal_id'].forEach(key=>{
     if(current.has(key)){url.searchParams.set(key,current.get(key));}
@@ -2469,7 +2479,8 @@ function depositPartialUrl(){
 }
 function scheduleDepositPoll(delay){
   clearTimeout(depositPollTimer);
-  if(sessionPollingStopped||!depositRowsTarget()){return;}
+  const target=depositRowsTarget();
+  if(sessionPollingStopped||!target||target.dataset.autoPoll!=='true'){return;}
   const hiddenMultiplier=document.hidden?6:1;
   depositPollTimer=setTimeout(refreshDepositRows,Math.max(250,delay*hiddenMultiplier));
 }
@@ -2487,12 +2498,18 @@ function bindDepositRowBehaviors(){
 }
 async function refreshDepositRows(){
   const target=depositRowsTarget();
-  if(!target||sessionPollingStopped||depositPollInFlight){return;}
-  depositPollInFlight=true;
+  if(!target||target.dataset.autoPoll!=='true'||sessionPollingStopped){return;}
+  if(depositPollController){depositPollController.abort();}
+  const controller=new AbortController();
+  depositPollController=controller;
+  const requestSequence=++depositPollSequence;
+  const expectedKind=target.dataset.partialKind;
+  const expectedView=target.dataset.view;
   try{
-    const response=await fetch(depositPartialUrl(),{
+    const response=await fetch(depositPartialUrl(target),{
       credentials:'same-origin',redirect:'manual',cache:'no-store',
-      headers:{'accept':'text/html','x-session-view':SESSION_VIEW_TOKEN}
+      headers:{'accept':'text/html','x-session-view':SESSION_VIEW_TOKEN},
+      signal:controller.signal
     });
     if(response.type==='opaqueredirect'||(response.status>=300&&response.status<400)||response.status===401){
       handlePollingAuthExpired();
@@ -2515,18 +2532,27 @@ async function refreshDepositRows(){
     if(/<html[\s>]/i.test(html)||/<form[^>]+(?:\/login|login)/i.test(html)){
       throw new Error('login page returned instead of partial');
     }
+    const marker=html.match(/^\s*<!--\s*ozark-partial:([a-z-]+):(active|history)\s*-->/);
+    if(!marker||marker[1]!==expectedKind||marker[2]!==expectedView){
+      throw new Error('unexpected polling context');
+    }
+    if(requestSequence!==depositPollSequence||depositRowsTarget()!==target||target.dataset.partialKind!==expectedKind||target.dataset.view!==expectedView){
+      return;
+    }
     target.innerHTML=html;
     bindDepositRowBehaviors();
+    refreshTablePagination(target.closest('table'));
     depositPollFailures=0;
     depositExpiryRefreshRequested=false;
     resetPollingBackoff();
     scheduleDepositPoll(DEPOSIT_POLL_BASE_MS);
   }catch(error){
+    if(error&&error.name==='AbortError'){return;}
     depositPollFailures=Math.min(depositPollFailures+1,5);
     showPollingNotice('Фоновое обновление операций временно недоступно. Страница остаётся открытой.',false);
     scheduleDepositPoll(Math.min(60000,DEPOSIT_POLL_BASE_MS*(2**depositPollFailures)));
   }finally{
-    depositPollInFlight=false;
+    if(requestSequence===depositPollSequence){depositPollController=null;}
   }
 }
 bindDepositRowBehaviors();
@@ -2534,6 +2560,7 @@ scheduleDepositPoll(DEPOSIT_POLL_BASE_MS);
 document.addEventListener('visibilitychange',()=>{
   scheduleDepositPoll(document.hidden?DEPOSIT_POLL_BASE_MS:250);
 });
+window.addEventListener('beforeunload',()=>{if(depositPollController){depositPollController.abort();}});
 setInterval(()=>{
   document.querySelectorAll('[data-countdown]').forEach(el=>{
     let left=parseInt(el.dataset.countdown||'0',10);

@@ -1,11 +1,14 @@
 import asyncio
+import html
 import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
+import pyotp
 import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -203,7 +206,15 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
                     password_hash=hash_password(password),
                     role=Role.merchant.value,
                 )
-                db.add_all([trader, other_trader, merchant_owner])
+                otp_secret = pyotp.random_base32()
+                superadmin = User(
+                    email=f"queue-superadmin-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.superadmin.value,
+                    twofa_enabled=True,
+                    twofa_secret=encrypt_secret(otp_secret),
+                )
+                db.add_all([trader, other_trader, merchant_owner, superadmin])
                 await db.flush()
                 merchant = Merchant(owner_id=merchant_owner.id, name=f"Queue merchant {suffix}")
                 db.add(merchant)
@@ -286,12 +297,53 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
                 assert login.status_code == 303
                 active = await client.get("/trader/cabinet?section=deposits&view=active")
                 history = await client.get("/trader/cabinet?section=deposits&view=history")
+                active_polls = [
+                    await client.get("/trader/cabinet/partials/deposits?view=active")
+                    for _ in range(2)
+                ]
+                history_polls = [
+                    await client.get("/trader/cabinet/partials/deposits?view=history")
+                    for _ in range(2)
+                ]
                 filtered = await client.get(
                     "/trader/cabinet?section=deposits&view=history"
                     "&bank_code=sberbank&payment_method=sbp&status=paid"
                 )
+                filtered_poll = await client.get(
+                    "/trader/cabinet/partials/deposits?view=history"
+                    "&bank_code=sberbank&payment_method=sbp&status=paid"
+                )
+                forbidden_preview = await client.get("/trader/cabinet/superadmin")
+
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="https://localhost",
+                follow_redirects=False,
+            ) as staff_client:
+                login_page = await staff_client.get("/staff/login")
+                login = await staff_client.post(
+                    "/staff/login",
+                    data={
+                        "csrf_token": _csrf(login_page),
+                        "email": superadmin.email,
+                        "password": password,
+                        "otp": pyotp.TOTP(otp_secret).now(),
+                    },
+                )
+                assert login.status_code == 303
+                preview_active = await staff_client.get(
+                    "/staff/cabinet/trader?section=deposits&view=active"
+                )
+                preview_history = await staff_client.get(
+                    "/staff/cabinet/trader?section=deposits&view=history"
+                )
 
             assert active.status_code == history.status_code == filtered.status_code == 200
+            assert 'data-auto-poll="true"' in active.text
+            assert 'data-auto-poll="true"' in history.text
+            assert all(response.status_code == 200 for response in active_polls + history_polls)
+            assert filtered_poll.status_code == 200
+            assert forbidden_preview.status_code == 403
             assert markers["urgent"] in active.text and markers["later"] in active.text
             assert active.text.index(markers["urgent"]) < active.text.index(markers["later"])
             assert markers["paid"] not in active.text and markers["failed"] not in active.text
@@ -306,6 +358,33 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
             assert "name=\"bank_code\"" in filtered.text
             assert "name=\"payment_method\"" in filtered.text
             assert "name=\"status\"" in filtered.text
+            for response in active_polls:
+                assert "ozark-partial:trader-deposits:active" in response.text
+                assert markers["urgent"] in response.text and markers["later"] in response.text
+                assert markers["paid"] not in response.text and markers["other"] not in response.text
+                assert "Обработать" in response.text
+            for response in history_polls:
+                assert "ozark-partial:trader-deposits:history" in response.text
+                assert markers["paid"] in response.text and markers["failed"] in response.text
+                assert markers["urgent"] not in response.text and markers["other"] not in response.text
+                assert "Подробнее" in response.text
+            assert markers["paid"] in filtered_poll.text
+            assert markers["failed"] not in filtered_poll.text
+            assert preview_active.status_code == preview_history.status_code == 200
+            assert 'data-auto-poll="false"' in preview_active.text
+            assert 'data-auto-poll="false"' in preview_history.text
+            assert ">Обновить</a>" in preview_active.text
+            refresh_match = re.search(r'href="([^"]+)">Обновить</a>', preview_active.text)
+            assert refresh_match
+            refresh_url = urlsplit(html.unescape(refresh_match.group(1)))
+            assert refresh_url.path == "/staff/cabinet/trader"
+            assert parse_qs(refresh_url.query) == {
+                "section": ["deposits"],
+                "view": ["active"],
+            }
+            assert refresh_url.fragment.startswith("sec")
+            assert 'action="/staff/cabinet/trader"' in preview_history.text
+            assert 'href="/staff/cabinet/trader?view=history"' in preview_history.text
 
             async with AsyncSession(engine) as verify:
                 persisted_trader = await verify.get(User, trader_id)

@@ -1,5 +1,6 @@
+{% set deposit_view = deposit_filters.get('view','active') %}
+<!-- ozark-partial:{{ 'trader-deposits' if role in ['operator','trader'] else 'generic-deposits' }}:{{ deposit_view }} -->
 {% if role in ['operator','trader'] %}
-  {% set deposit_view = deposit_filters.get('view','active') %}
   {% if deposit_view == 'active' %}
     {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
     <tr>
