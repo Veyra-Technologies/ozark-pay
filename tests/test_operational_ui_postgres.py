@@ -1,0 +1,327 @@
+import asyncio
+import os
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+
+import httpx
+import pytest
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+
+from app.core.enums import DepositStatus, Role
+from app.core.security import encrypt_secret, hash_password
+from app.db.session import engine as application_engine
+from app.main import app
+from app.models import Deposit, Merchant, Requisite, User, WebhookDeliveryAttempt, WebhookEvent
+
+
+def _database_url() -> str:
+    value = os.getenv("TEST_DATABASE_URL", "")
+    if not value:
+        pytest.skip("TEST_DATABASE_URL is required for operational UI tests")
+    if "postgresql" not in value:
+        pytest.fail("Operational UI integration tests require PostgreSQL")
+    if value.startswith("postgresql://"):
+        return value.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return value
+
+
+def _csrf(response: httpx.Response) -> str:
+    match = re.search(r'name="csrf_token"\s+value="([^"]+)"', response.text)
+    assert match
+    return match.group(1)
+
+
+def test_merchant_webhook_page_batches_scoped_attempts_without_mutation():
+    async def scenario():
+        await application_engine.dispose(close=False)
+        engine = create_async_engine(_database_url())
+        suffix = uuid.uuid4().hex
+        password = f"Merchant-webhook-{suffix}"
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                owner_a = User(
+                    email=f"webhook-a-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.merchant.value,
+                )
+                owner_b = User(
+                    email=f"webhook-b-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.merchant.value,
+                )
+                db.add_all([owner_a, owner_b])
+                await db.flush()
+                merchant_a = Merchant(owner_id=owner_a.id, name=f"Merchant A {suffix}")
+                merchant_b = Merchant(owner_id=owner_b.id, name=f"Merchant B {suffix}")
+                db.add_all([merchant_a, merchant_b])
+                await db.flush()
+                marker_a = f"VISIBLE-A-{suffix}"
+                marker_b = f"FORBIDDEN-B-{suffix}"
+                event_a = WebhookEvent(
+                    merchant_id=merchant_a.id,
+                    event_type="deposit.paid",
+                    payload={
+                        "operation_type": "deposit",
+                        "external_id": marker_a,
+                        "status": "paid",
+                        "amount": "1250.00",
+                        "currency": "RUB",
+                        "api_key": f"API-SECRET-{suffix}",
+                        "note": "<script>alert(1)</script>",
+                    },
+                    status="failed",
+                    attempts=1,
+                    last_error=f"Authorization: EVENT-SECRET-{suffix}",
+                    last_status_code=500,
+                )
+                event_b = WebhookEvent(
+                    merchant_id=merchant_b.id,
+                    event_type="deposit.failed",
+                    payload={"external_id": marker_b, "status": "failed"},
+                    status="failed",
+                    attempts=1,
+                )
+                db.add_all([event_a, event_b])
+                await db.flush()
+                attempt_a = WebhookDeliveryAttempt(
+                    webhook_event_id=event_a.id,
+                    attempt_no=1,
+                    status="failed",
+                    status_code=500,
+                    error=f"Cookie: ATTEMPT-SECRET-{suffix}",
+                    response_snippet='{"message":"<img src=x onerror=alert(1)>","token":"hidden"}',
+                )
+                attempt_b = WebhookDeliveryAttempt(
+                    webhook_event_id=event_b.id,
+                    attempt_no=1,
+                    status="failed",
+                    status_code=500,
+                    response_snippet=marker_b,
+                )
+                db.add_all([attempt_a, attempt_b])
+                await db.commit()
+                event_a_id = event_a.id
+                event_b_id = event_b.id
+                attempt_a_id = attempt_a.id
+
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="https://localhost",
+                follow_redirects=False,
+            ) as client:
+                login_page = await client.get("/merchant/login")
+                login = await client.post(
+                    "/merchant/login",
+                    data={
+                        "csrf_token": _csrf(login_page),
+                        "email": owner_a.email,
+                        "password": password,
+                    },
+                )
+                assert login.status_code == 303
+
+                attempt_queries = []
+
+                def count_attempt_query(_conn, _cursor, statement, _parameters, _context, _many):
+                    if "from webhook_delivery_attempts" in statement.lower():
+                        attempt_queries.append(statement)
+
+                event.listen(
+                    application_engine.sync_engine,
+                    "before_cursor_execute",
+                    count_attempt_query,
+                )
+                try:
+                    page = await client.get("/merchant/cabinet?section=webhook")
+                finally:
+                    event.remove(
+                        application_engine.sync_engine,
+                        "before_cursor_execute",
+                        count_attempt_query,
+                    )
+
+            assert page.status_code == 200, page.text[:1000]
+            assert len(attempt_queries) == 1
+            assert marker_a in page.text
+            assert marker_b not in page.text
+            assert str(event_b_id) not in page.text
+            assert f"API-SECRET-{suffix}" not in page.text
+            assert f"EVENT-SECRET-{suffix}" not in page.text
+            assert f"ATTEMPT-SECRET-{suffix}" not in page.text
+            assert "[redacted]" in page.text
+            assert "<script>alert(1)</script>" not in page.text
+            assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
+            assert "<img src=x onerror=alert(1)>" not in page.text
+            assert "&lt;img src=x onerror=alert(1)&gt;" in page.text
+            assert 'data-modal-open="webhookDetail' in page.text
+
+            async with AsyncSession(engine) as verify:
+                persisted_event = await verify.get(WebhookEvent, event_a_id)
+                persisted_attempt = await verify.get(WebhookDeliveryAttempt, attempt_a_id)
+                assert persisted_event is not None
+                assert persisted_event.status == "failed"
+                assert persisted_event.attempts == 1
+                assert persisted_attempt is not None
+                assert persisted_attempt.status == "failed"
+                assert await verify.scalar(
+                    select(WebhookEvent.id).where(WebhookEvent.id == event_b_id)
+                ) == event_b_id
+        finally:
+            await application_engine.dispose()
+            await engine.dispose()
+
+    asyncio.run(scenario())
+
+
+def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
+    async def scenario():
+        await application_engine.dispose(close=False)
+        engine = create_async_engine(_database_url())
+        suffix = uuid.uuid4().hex
+        password = f"Trader-queue-{suffix}"
+        now = datetime.now(timezone.utc)
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                trader = User(
+                    email=f"queue-trader-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.trader.value,
+                    trader_balance=Decimal("9000.00"),
+                    trader_hold=Decimal("1250.00"),
+                )
+                other_trader = User(
+                    email=f"queue-other-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.trader.value,
+                )
+                merchant_owner = User(
+                    email=f"queue-merchant-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.merchant.value,
+                )
+                db.add_all([trader, other_trader, merchant_owner])
+                await db.flush()
+                merchant = Merchant(owner_id=merchant_owner.id, name=f"Queue merchant {suffix}")
+                db.add(merchant)
+                await db.flush()
+                requisite = Requisite(
+                    trader_id=trader.id,
+                    owner_name="Queue Owner",
+                    full_name="Queue Owner",
+                    method="sbp",
+                    value_encrypted=encrypt_secret(f"+7999000{suffix[-4:]}"),
+                    bank_code="sberbank",
+                    bank_name="СберБанк",
+                    daily_limit=Decimal("100000.00"),
+                    operation_limit=10,
+                    simultaneous_limit=2,
+                    min_check=Decimal("100.00"),
+                    max_check=Decimal("50000.00"),
+                )
+                other_requisite = Requisite(
+                    trader_id=other_trader.id,
+                    owner_name="Other Owner",
+                    full_name="Other Owner",
+                    method="sbp",
+                    value_encrypted=encrypt_secret(f"+7888000{suffix[-4:]}"),
+                    bank_code="sberbank",
+                    bank_name="СберБанк",
+                )
+                db.add_all([requisite, other_requisite])
+                await db.flush()
+
+                markers = {
+                    "urgent": f"ACTIVE-URGENT-{suffix}",
+                    "later": f"ACTIVE-LATER-{suffix}",
+                    "paid": f"HISTORY-PAID-{suffix}",
+                    "failed": f"HISTORY-FAILED-{suffix}",
+                    "other": f"FORBIDDEN-OTHER-{suffix}",
+                }
+
+                def deposit(marker, status, req, expires, amount="1000.00"):
+                    return Deposit(
+                        merchant_id=merchant.id,
+                        external_id=marker,
+                        idempotency_key=marker,
+                        amount=Decimal(amount),
+                        currency="RUB",
+                        method="sbp",
+                        status=status,
+                        requisites_id=req.id,
+                        metadata_json={},
+                        expires_at=expires,
+                    )
+
+                rows = [
+                    deposit(markers["later"], DepositStatus.pending.value, requisite, now + timedelta(minutes=12)),
+                    deposit(markers["urgent"], DepositStatus.pending.value, requisite, now + timedelta(minutes=3)),
+                    deposit(markers["paid"], DepositStatus.paid.value, requisite, now + timedelta(minutes=15), "2500.00"),
+                    deposit(markers["failed"], DepositStatus.failed.value, requisite, now + timedelta(minutes=15)),
+                    deposit(markers["other"], DepositStatus.pending.value, other_requisite, now + timedelta(minutes=2)),
+                ]
+                db.add_all(rows)
+                await db.commit()
+                trader_id = trader.id
+                row_ids = [row.id for row in rows]
+
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="https://localhost",
+                follow_redirects=False,
+            ) as client:
+                login_page = await client.get("/trader/login")
+                login = await client.post(
+                    "/trader/login",
+                    data={
+                        "csrf_token": _csrf(login_page),
+                        "email": trader.email,
+                        "password": password,
+                    },
+                )
+                assert login.status_code == 303
+                active = await client.get("/trader/cabinet?section=deposits&view=active")
+                history = await client.get("/trader/cabinet?section=deposits&view=history")
+                filtered = await client.get(
+                    "/trader/cabinet?section=deposits&view=history"
+                    "&bank_code=sberbank&payment_method=sbp&status=paid"
+                )
+
+            assert active.status_code == history.status_code == filtered.status_code == 200
+            assert markers["urgent"] in active.text and markers["later"] in active.text
+            assert active.text.index(markers["urgent"]) < active.text.index(markers["later"])
+            assert markers["paid"] not in active.text and markers["failed"] not in active.text
+            assert markers["other"] not in active.text
+            assert markers["paid"] in history.text and markers["failed"] in history.text
+            assert markers["urgent"] not in history.text and markers["later"] not in history.text
+            assert markers["paid"] in filtered.text and markers["failed"] not in filtered.text
+            assert "Активные</b><strong>2</strong>" in filtered.text
+            assert "Истекают до 5 минут</b><strong class=\"danger\">1</strong>" in filtered.text
+            assert "Оплачено сегодня, UTC</b><strong>1</strong>" in filtered.text
+            assert "2 500 ₽" in filtered.text
+            assert "name=\"bank_code\"" in filtered.text
+            assert "name=\"payment_method\"" in filtered.text
+            assert "name=\"status\"" in filtered.text
+
+            async with AsyncSession(engine) as verify:
+                persisted_trader = await verify.get(User, trader_id)
+                assert persisted_trader is not None
+                assert persisted_trader.trader_balance == Decimal("9000.00")
+                assert persisted_trader.trader_hold == Decimal("1250.00")
+                persisted_rows = (
+                    await verify.execute(select(Deposit).where(Deposit.id.in_(row_ids)))
+                ).scalars().all()
+                assert {row.status for row in persisted_rows} == {
+                    DepositStatus.pending.value,
+                    DepositStatus.paid.value,
+                    DepositStatus.failed.value,
+                }
+        finally:
+            await application_engine.dispose()
+            await engine.dispose()
+
+    asyncio.run(scenario())

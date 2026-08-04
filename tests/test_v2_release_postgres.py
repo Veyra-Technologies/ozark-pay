@@ -542,7 +542,7 @@ def test_wallet_routes_permissions_empty_state_and_qr_from_active_database_row()
                     },
                 )
                 assert denied.status_code == 303
-                assert '2FA' in denied.headers['location']
+                assert 'ui_error=twofa_required' in denied.headers['location']
 
             async with httpx.AsyncClient(
                 transport=transport,
@@ -938,16 +938,13 @@ def test_ai_office_routes_require_superadmin_2fa_csrf_and_never_render_secrets(
                 unsafe_page = await client.get(
                     '/staff/cabinet'
                     '?section=ai-office'
-                    '&msg=ai_office_m2m_auth_required'
+                    '&ui_error=ai_office_m2m_auth_required'
                 )
                 assert 'data-ai-office-activation-error' in unsafe_page.text
+                assert 'data-ui-code="ai_office_m2m_auth_required"' in unsafe_page.text
                 assert (
                     'Выберите обязательный M2M Auth type'
                     in unsafe_page.text
-                )
-                assert (
-                    'data-ai-office-activation-error hidden'
-                    not in unsafe_page.text
                 )
                 saved = await client.post(
                     '/staff/cabinet/ai-office/config',
@@ -1070,7 +1067,7 @@ def test_ai_office_routes_require_superadmin_2fa_csrf_and_never_render_secrets(
                     },
                 )
                 assert denied.status_code == 303
-                assert '2FA' in denied.headers['location']
+                assert 'ui_error=twofa_required' in denied.headers['location']
         finally:
             await application_engine.dispose()
             await engine.dispose()

@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CABINET = (ROOT / "app/templates/cabinet.html").read_text(encoding="utf-8")
 TEAMLEAD = (ROOT / "app/templates/teamlead.html").read_text(encoding="utf-8")
 MERCHANT_API = (ROOT / "app/api/v1/merchant.py").read_text(encoding="utf-8")
+UI_MESSAGES = (ROOT / "app/web/ui_messages.py").read_text(encoding="utf-8")
 
 
 def test_teamlead_static_helper_banners_are_absent():
@@ -30,12 +31,12 @@ def test_ai_office_static_banner_and_duplicate_heading_are_absent():
 
 def test_ai_office_activation_warning_is_dynamic_and_specific():
     assert "data-ai-office-activation-error hidden" in CABINET
-    assert "ai_office_m2m_auth_required" in CABINET
-    assert "ai_office_credential_required" in CABINET
-    assert "Выберите обязательный M2M Auth type" in CABINET
+    assert "ai_office_m2m_auth_required" in UI_MESSAGES
+    assert "ai_office_credential_required" in UI_MESSAGES
+    assert "Выберите обязательный M2M Auth type" in UI_MESSAGES
     assert (
         "Добавьте credential для выбранного M2M Auth type"
-        in CABINET
+        in UI_MESSAGES
     )
 
 
