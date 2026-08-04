@@ -10,7 +10,7 @@
     a{color:#8ec5ff}.top{display:flex;justify-content:space-between;align-items:center;padding:18px 28px;background:#0c192b;border-bottom:1px solid #243653}
     .wrap{max-width:1440px;margin:auto;padding:24px}.panel,.metric{background:#0d1b2d;border:1px solid #253957;border-radius:14px;padding:18px;margin-bottom:18px}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:14px}.metric b{display:block;color:#94a9c6;margin-bottom:8px}.metric strong{font-size:22px}
-    h1,h2,h3{margin-top:0}.muted{color:#93a6c1}.msg,.note{padding:12px 14px;border-radius:10px;background:#102a42;border:1px solid #28547b;margin-bottom:18px}
+    h1,h2,h3{margin-top:0}.muted{color:#93a6c1}.note,.ui-message{padding:12px 14px;border-radius:10px;background:#102a42;border:1px solid #28547b;margin-bottom:18px}.ui-message-validation{border-color:#8b672a;background:#332613}.ui-message-action,.ui-message-blocking{border-color:#8b4f2a;background:#342015}.ui-message-security{border-color:#8b3540;background:#35171c}
     .bad{color:#ff9999}.ok{color:#82e6ad}.wait{color:#ffd985}.badge{display:inline-block;padding:3px 9px;border-radius:999px;background:#1a3555}
     table{width:100%;border-collapse:collapse;min-width:760px}.table{overflow:auto}th,td{text-align:left;padding:10px;border-bottom:1px solid #263a57;vertical-align:top}th{color:#91a7c6}
     input,select{width:100%;padding:10px 11px;margin:5px 0 12px;border-radius:8px;border:1px solid #38506f;background:#091525;color:#edf4ff}
@@ -21,6 +21,11 @@
   </style>
 </head>
 <body>
+{% macro render_ui_message(scopes) -%}
+  {% if ui_message and ui_message.section in scopes %}
+  <div class="ui-message ui-message-{{ ui_message.kind }}" role="alert" data-ui-message data-ui-field="{{ ui_message.field or '' }}" data-ui-form="{{ ui_message.form_or_modal }}" data-ui-code="{{ ui_message.code }}">{{ ui_message.message }}</div>
+  {% endif %}
+{%- endmacro %}
 <header class="top">
   <div><b>{{ brand.product_name }}</b> · <span class="badge">TeamLead</span><br><span class="muted">{{ user.email }}</span></div>
   <form class="logout" method="post" action="{{ logout_path }}">{{ csrf_input(request) }}<button class="secondary" type="submit">Выйти</button></form>
@@ -28,8 +33,6 @@
 <main class="wrap">
   <h1>{{ title }}</h1>
   <p class="muted">{{ description }}</p>
-  {% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
-
   <div class="grid">
     <div class="metric"><b>Available</b><strong>{{ balance.available_rub }} RUB</strong></div>
     <div class="metric"><b>Frozen</b><strong>{{ balance.frozen_rub }} RUB</strong></div>
@@ -63,6 +66,7 @@
 
   <section class="panel">
     <h2>Вывод USDT TRC20</h2>
+    {{ render_ui_message(['teamlead','settlements']) }}
     <div class="grid">
       <div class="metric"><b>Получает TeamLead</b><strong>requested USDT</strong></div>
       <div class="metric"><b>Комиссия сверх выплаты</b><strong>5 USDT</strong></div>
@@ -125,6 +129,7 @@
 
   <section class="panel">
     <h2>Безопасность</h2>
+    {{ render_ui_message(['security']) }}
     <div class="note">2FA обязательна для TeamLead и для каждого финансового запроса. Отключение 2FA для этой роли запрещено.</div>
     <form method="post" action="{{ cabinet_base }}/security/password" data-confirm="Изменить пароль и завершить текущие сессии?">
       {{ csrf_input(request) }}
