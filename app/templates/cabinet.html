@@ -301,8 +301,8 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
   <p class="muted">{{ description }}</p>
   <div class="grid">
     <div class="metric"><b>Кабинет</b><p><span class="badge">{{ 'trader' if role in ['operator','trader'] else role }}</span></p></div>
-    <div class="metric"><b>Баланс</b><p>{% if role in ['operator','trader'] %}{{ user.trader_balance }} RUB{% elif balance %}{{ balance.available }} RUB{% else %}0.00 RUB{% endif %}</p></div>
-    <div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ user.trader_hold }} RUB{% elif balance %}{{ balance.frozen }} RUB{% else %}0.00 RUB{% endif %}</p></div>
+    <div class="metric"><b>Баланс</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_balance }} RUB{% elif balance %}{{ balance.available }} RUB{% else %}0.00 RUB{% endif %}</p></div>
+    <div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_hold }} RUB{% elif balance %}{{ balance.frozen }} RUB{% else %}0.00 RUB{% endif %}</p></div>
   </div>
 
   {% elif s == 'Создать кабинет' %}
@@ -681,6 +681,7 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
   </table></div>
   {% for t in trader_users %}{% set detail = trader_details.get(t.id|string, {}) %}{% set st = detail.get('stats', trader_stats.get(t.id|string, {})) %}
   <div id="traderModal{{ t.id }}" class="modal" data-commission-modal="trader:{{ t.id }}"><div class="modalbox"><h2>{{ t.email }} <span class="badge">trader</span></h2>
+    {% if trader_preview_urls.get(t.id|string) %}<a class="secondary btn-small" data-preview-trader="{{ t.id }}" href="{{ trader_preview_urls.get(t.id|string) }}">Открыть кабинет Trader</a>{% endif %}
     <div class="detail-grid">
       <div class="detail-card"><b>Баланс</b>{{ t.trader_balance }} RUB</div>
       <div class="detail-card"><b>Доступно</b>{{ st.get('available','0.00') }} RUB</div>
@@ -785,12 +786,12 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
   {% elif 'Пополн' in s %}
   {% if role in ['operator','trader'] %}
   {% set deposit_view = deposit_filters.get('view','active') %}
-  {% set deposit_auto_poll = role == user.role %}
-  {% set deposit_page_url = cabinet_base if deposit_auto_poll else cabinet_base ~ '/' ~ role %}
+  {% set deposit_auto_poll = role == user.role or trader_preview_active %}
+  {% set deposit_page_url = cabinet_base if role == user.role else cabinet_base ~ '/' ~ role %}
   <div class="operational-toolbar">
     <div class="operational-tabs" aria-label="Раздел заявок">
       <a class="{{ 'active' if deposit_view == 'active' else '' }}" href="{{ deposit_page_url }}?{{ request.url.include_query_params(view='active', status='').query }}">Активные {{ deposit_aggregates.get('active_count',0) }}</a>
-      <a class="{{ 'active' if deposit_view == 'history' else '' }}" href="{{ deposit_page_url }}?{{ request.url.include_query_params(view='history', status='').query }}">История</a>
+      <a class="{{ 'active' if deposit_view == 'history' else '' }}" href="{{ deposit_page_url }}?{{ request.url.include_query_params(view='history', status='').query }}">История {{ deposit_aggregates.get('history_count',0) }}</a>
     </div>
     {% if not deposit_auto_poll %}<a class="secondary btn-small" href="{{ deposit_page_url }}{% if request.url.query %}?{{ request.url.query }}{% endif %}#{{ section_id }}">Обновить</a>{% endif %}
   </div>
@@ -818,7 +819,7 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
     </details>
   </form>
   {% if deposit_view == 'active' %}
-  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Осталось</th><th>Сумма</th><th>Банк и метод</th><th>Реквизит / получатель</th><th>Статус</th><th class="action-column">Действие</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="active" data-refresh-url="{{ cabinet_base }}/partials/deposits" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
+  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Осталось</th><th>Сумма</th><th>Банк и метод</th><th>Реквизит / получатель</th><th>Статус</th><th class="action-column">Действие</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="active" data-refresh-url="{{ deposit_refresh_url }}" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
   {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
   <tr>
     <td data-label="Осталось"><span class="timer {{ 'timer-urgent' if dd.get('remaining_seconds',0) < 300 else ('timer-warning' if dd.get('remaining_seconds',0) < 600 else '') }}" data-countdown="{{ dd.get('remaining_seconds',0) }}">{{ '%02d:%02d'|format((dd.get('remaining_seconds',0)//60), (dd.get('remaining_seconds',0)%60)) }}</span></td>
@@ -826,12 +827,12 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
     <td data-label="Банк и метод"><div class="cell-stack"><span class="cell-main">{{ dd.get('provider_name') or dd.get('bank') or '—' }}</span><span class="cell-badge">{{ d.method|payment_method_label }}</span></div></td>
     <td data-label="Реквизит / получатель"><div class="cell-stack"><div class="copy-line"><span class="cell-mono cell-ellipsis" title="{{ dd.get('requisite') or '—' }}">{{ dd.get('requisite') or '—' }}</span><button class="secondary icon-copy" type="button" data-copy-value="{{ dd.get('requisite') or '' }}">Copy</button></div><span class="cell-muted cell-ellipsis" title="{{ dd.get('receiver_name') or '—' }}">{{ dd.get('receiver_name') or '—' }}</span></div></td>
     <td data-label="Статус"><span class="status-pill status-wait">{{ d.status|deposit_status_label }}</span></td>
-    <td data-label="Действие" class="action-column"><div class="actions-row"><button class="secondary btn-small details-button" type="button" data-modal-open="depositDetail{{ d.id }}">Подробнее</button><form method="post" action="{{ cabinet_base }}/deposits/{{ d.id }}/confirm" data-confirm="Принять пополнение {{ d.amount }} {{ d.currency }}?">{{ csrf_input(request) }}<button class="primary btn-small" type="submit">Обработать</button></form></div></td>
+    <td data-label="Действие" class="action-column"><div class="actions-row"><button class="secondary btn-small details-button" type="button" data-modal-open="depositDetail{{ d.id }}">Подробнее</button>{% if dd.get('can_process') %}<form method="post" action="{{ cabinet_base }}/deposits/{{ d.id }}/confirm" data-confirm="Принять пополнение {{ d.amount }} {{ d.currency }}?">{{ csrf_input(request) }}<button class="primary btn-small" type="submit">Обработать</button></form>{% endif %}</div></td>
   </tr>
   {% else %}<tr><td colspan="6" class="table-empty">Активных заявок нет</td></tr>{% endfor %}
   </tbody></table></div>
   {% else %}
-  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Дата</th><th>Сумма</th><th>Банк и метод</th><th>Результат</th><th>Причина</th><th class="action-column">Подробнее</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="history" data-refresh-url="{{ cabinet_base }}/partials/deposits" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
+  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Дата</th><th>Сумма</th><th>Банк и метод</th><th>Результат</th><th>Причина</th><th class="action-column">Подробнее</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="history" data-refresh-url="{{ deposit_refresh_url }}" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
   {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
   <tr>
     <td data-label="Дата"><span class="text-date" title="{{ d.updated_at|dt_full }}">{{ d.updated_at|dt_compact }}</span></td>
@@ -1363,7 +1364,7 @@ html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:
   </div>
   {% endif %}
   {% if s == 'Баланс' %}
-  <div class="grid"><div class="metric"><b>Доступно</b><p>{% if role in ['operator','trader'] %}{{ user.trader_balance }}{% else %}{{ balance.available if balance else '0.00' }}{% endif %} RUB</p></div><div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ user.trader_hold }}{% else %}{{ balance.frozen if balance else '0.00' }}{% endif %} RUB</p></div></div>
+  <div class="grid"><div class="metric"><b>Доступно</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_balance }}{% else %}{{ balance.available if balance else '0.00' }}{% endif %} RUB</p></div><div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_hold }}{% else %}{{ balance.frozen if balance else '0.00' }}{% endif %} RUB</p></div></div>
   {% endif %}
   {% endif %}
   {% elif s == 'Интеграция с AI-офисом' %}

@@ -209,22 +209,34 @@ def test_trader_polling_is_bound_to_server_rendered_context():
     assert 'data-partial-kind="trader-deposits"' in CABINET
     assert 'data-view="active"' in CABINET
     assert 'data-view="history"' in CABINET
-    assert 'data-refresh-url="{{ cabinet_base }}/partials/deposits"' in CABINET
-    assert "{% set deposit_auto_poll = role == user.role %}" in CABINET
+    assert 'data-refresh-url="{{ deposit_refresh_url }}"' in CABINET
+    assert "{% set deposit_auto_poll = role == user.role or trader_preview_active %}" in CABINET
     assert "target.dataset.autoPoll!=='true'" in CABINET
     assert "new URL(target.dataset.refreshUrl,window.location.origin)" in CABINET
     assert "preview_role" not in CABINET
     assert "client_role" not in CABINET
 
 
-def test_role_preview_uses_exact_read_only_refresh_instead_of_unsafe_polling():
-    assert "{% if not deposit_auto_poll %}" in CABINET
-    assert 'href="{{ deposit_page_url }}{% if request.url.query %}?{{ request.url.query }}{% endif %}#{{ section_id }}">Обновить</a>' in CABINET
-    assert "cabinet_base ~ '/' ~ role" in CABINET
+def test_role_preview_uses_server_confirmed_subject_for_polling():
+    assert 'data-preview-trader="{{ t.id }}"' in CABINET
+    assert "trader_preview_urls.get(t.id|string)" in CABINET
+    assert "preview_context=" in ROUTES
+    assert "verify_preview_context_token(" in ROUTES
+    assert "PREVIEW_SUBJECT_SESSION_KEY" in ROUTES
+    assert "subject_trader_id=trader_subject.id" in ROUTES
+    assert "request.query_params.get('subject_trader_id'" not in ROUTES
     assert "request.url.include_query_params(view='active', status='').query" in CABINET
     assert "request.url.include_query_params(view='history', status='').query" in CABINET
     assert 'action="{{ deposit_page_url }}"' in CABINET
     assert 'href="{{ deposit_page_url }}?view={{ deposit_view }}"' in CABINET
+
+
+def test_trader_rows_gate_process_action_by_scoped_server_decision():
+    assert "dd.get('can_process')" in CABINET
+    assert "dd.get('can_process')" in DEPOSIT_ROWS
+    assert "deposit.status not in DEPOSIT_ACTIVE_STATUSES" in ROUTES
+    assert "str(requisite.trader_id) != str(subject.id)" in ROUTES
+    assert "'can_process': _can_render_trader_deposit_process(" in ROUTES
 
 
 def test_poll_response_context_and_stale_sequence_are_checked_before_dom_update():

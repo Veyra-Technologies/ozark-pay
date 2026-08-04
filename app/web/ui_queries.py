@@ -153,6 +153,7 @@ async def trader_deposit_aggregates(
     if not ids:
         return {
             "active_count": 0,
+            "history_count": 0,
             "urgent_count": 0,
             "paid_today_count": 0,
             "paid_today_amount": Decimal("0.00"),
@@ -161,6 +162,7 @@ async def trader_deposit_aggregates(
     day_start = current.replace(hour=0, minute=0, second=0, microsecond=0)
     next_day = day_start + timedelta(days=1)
     active_condition = Deposit.status.in_(list(DEPOSIT_ACTIVE_STATUSES))
+    terminal_condition = Deposit.status.in_(list(DEPOSIT_TERMINAL_STATUSES))
     paid_today = (
         (Deposit.status == DepositStatus.paid.value)
         & (Deposit.updated_at >= day_start)
@@ -172,6 +174,7 @@ async def trader_deposit_aggregates(
     )
     statement = select(
         func.count(Deposit.id).filter(active_condition),
+        func.count(Deposit.id).filter(terminal_condition),
         func.count(Deposit.id).filter(
             active_condition,
             Deposit.expires_at > current,
@@ -186,7 +189,8 @@ async def trader_deposit_aggregates(
     row = (await db.execute(statement)).one()
     return {
         "active_count": int(row[0] or 0),
-        "urgent_count": int(row[1] or 0),
-        "paid_today_count": int(row[2] or 0),
-        "paid_today_amount": Decimal(row[3] or 0),
+        "history_count": int(row[1] or 0),
+        "urgent_count": int(row[2] or 0),
+        "paid_today_count": int(row[3] or 0),
+        "paid_today_amount": Decimal(row[4] or 0),
     }

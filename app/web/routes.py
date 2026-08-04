@@ -26,15 +26,19 @@ from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisi
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
+    PREVIEW_ROLE_SESSION_KEY,
+    PREVIEW_SUBJECT_SESSION_KEY,
     SESSION_GENERATION_KEY,
     SESSION_REALM_KEY,
     activate_realm_session,
+    issue_preview_context_token,
     realm_cabinet_path,
     realm_for_role,
     realm_login_path,
     request_auth_realm,
     session_view_fingerprint,
     session_view_matches,
+    verify_preview_context_token,
 )
 from app.core.auth_hardening import is_auth_temporarily_locked, record_auth_failure, record_auth_success
 from app.core.enums import AppealStatus, DepositStatus, PaymentMethod, Role, TrafficStatus
@@ -442,6 +446,84 @@ def _session_changed_page(request: Request):
     )
     response.headers['Cache-Control'] = 'no-store, max-age=0'
     return response
+
+
+def _clear_preview_context(request: Request) -> None:
+    request.session.pop(PREVIEW_ROLE_SESSION_KEY, None)
+    request.session.pop(PREVIEW_SUBJECT_SESSION_KEY, None)
+
+
+async def _trusted_trader_preview_subject(
+    request: Request,
+    viewer: User,
+    db: AsyncSession,
+    *,
+    requested_role: str | None,
+    accept_entry_token: bool,
+) -> User | None:
+    if viewer.role in TRADER_ROLES:
+        return viewer if requested_role in {None, viewer.role, Role.trader.value} else None
+    if viewer.role != Role.superadmin.value:
+        return None
+    preview_role = requested_role or str(
+        request.session.get(PREVIEW_ROLE_SESSION_KEY) or ""
+    )
+    if preview_role != Role.trader.value:
+        return None
+
+    subject_id = None
+    entry_token = request.query_params.get("preview_context", "").strip()
+    if accept_entry_token and entry_token:
+        subject_id = verify_preview_context_token(
+            request.session,
+            entry_token,
+            preview_role=Role.trader.value,
+            max_age=settings.SESSION_COOKIE_MAX_AGE_SECONDS,
+        )
+        if not subject_id:
+            _clear_preview_context(request)
+            return None
+    elif (
+        request.session.get(PREVIEW_ROLE_SESSION_KEY) == Role.trader.value
+        and request.session.get(PREVIEW_SUBJECT_SESSION_KEY)
+    ):
+        subject_id = str(request.session[PREVIEW_SUBJECT_SESSION_KEY])
+    if not subject_id:
+        return None
+    try:
+        subject_uuid = UUID(subject_id)
+    except ValueError:
+        _clear_preview_context(request)
+        return None
+    subject = (await db.execute(
+        select(User).where(
+            User.id == subject_uuid,
+            User.role.in_(list(TRADER_ROLES)),
+            User.is_archived.is_(False),
+        )
+    )).scalar_one_or_none()
+    if not subject:
+        _clear_preview_context(request)
+        return None
+    request.session[PREVIEW_ROLE_SESSION_KEY] = Role.trader.value
+    request.session[PREVIEW_SUBJECT_SESSION_KEY] = str(subject.id)
+    return subject
+
+
+def _preview_forbidden_page(request: Request, viewer: User, requested_role: str):
+    realm = request_auth_realm(request) or realm_for_role(viewer.role)
+    return templates.TemplateResponse(
+        request=request,
+        name='forbidden.html',
+        context={
+            'request': request,
+            'user': viewer,
+            'requested_role': requested_role,
+            'cabinet_base': realm_cabinet_path(realm) if realm else '/cabinet',
+            **branding_context(),
+        },
+        status_code=403,
+    )
 
 
 async def revoke_refresh_tokens(db: AsyncSession, user_id) -> None:
@@ -3597,6 +3679,7 @@ async def cabinet(request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_current_web_user(request, db)
     if not user:
         return RedirectResponse('/login', status_code=303)
+    _clear_preview_context(request)
     return await role_cabinet(request, user.role, db)
 
 
@@ -3608,20 +3691,21 @@ async def cabinet_by_role(request: Request, role: str, db: AsyncSession = Depend
     if not user:
         return RedirectResponse('/login', status_code=303)
     if user.role != role and user.role != Role.superadmin.value:
-        realm = request_auth_realm(request) or realm_for_role(user.role)
-        return templates.TemplateResponse(
-            request=request,
-            name='forbidden.html',
-            context={
-                'request': request,
-                'user': user,
-                'requested_role': role,
-                'cabinet_base': realm_cabinet_path(realm) if realm else '/cabinet',
-                **branding_context(),
-            },
-            status_code=403,
+        return _preview_forbidden_page(request, user, role)
+    trader_subject = None
+    if role in TRADER_ROLES:
+        trader_subject = await _trusted_trader_preview_subject(
+            request,
+            user,
+            db,
+            requested_role=role,
+            accept_entry_token=True,
         )
-    return await role_cabinet(request, role, db)
+        if not trader_subject:
+            return _preview_forbidden_page(request, user, role)
+    elif role != user.role:
+        _clear_preview_context(request)
+    return await role_cabinet(request, role, db, trader_subject=trader_subject)
 
 
 def _fee_datetime(value: str | None, *, default_now: bool = False) -> datetime | None:
@@ -4039,6 +4123,111 @@ async def cabinet_deactivate_fee_rule(rule_id: UUID, request: Request, db: Async
     raise HTTPException(410, 'unscoped fee-rule deactivation is disabled; use an entity-scoped tariff route')
 
 
+def _trader_requisite_search_text(req: Requisite) -> str:
+    return ' '.join([
+        display_requisite_value(req),
+        req.bank_code or '',
+        req.bank_name or '',
+        req.operator_code or '',
+        req.full_name or '',
+        req.owner_name or '',
+    ]).lower()
+
+
+async def _load_trader_deposit_view(
+    db: AsyncSession,
+    *,
+    subject_trader_id: UUID,
+    filters: dict[str, str],
+    page_size: int = 500,
+) -> dict[str, object]:
+    """Load one Trader subject's SQL-scoped deposit view before the page limit."""
+    requisites = (await db.execute(
+        select(Requisite)
+        .where(
+            Requisite.trader_id == subject_trader_id,
+            Requisite.is_archived.is_(False),
+        )
+        .order_by(Requisite.created_at.desc())
+    )).scalars().all()
+    requisite_ids = [row.id for row in requisites]
+    query_text = filters.get('query', '').lower()
+    requisite_text = filters.get('requisite', '').lower()
+    matching_requisite_ids = [
+        req.id for req in requisites
+        if query_text and query_text in _trader_requisite_search_text(req)
+    ]
+    requisite_filter_ids = [
+        req.id for req in requisites
+        if requisite_text and requisite_text in _trader_requisite_search_text(req)
+    ]
+    bank_requisite_ids = [
+        req.id for req in requisites
+        if filters.get('bank_code') and req.bank_code == filters['bank_code']
+    ]
+    statement = apply_trader_deposit_filters(
+        trader_deposit_scope(requisite_ids),
+        filters,
+        matching_requisite_ids=matching_requisite_ids,
+        requisite_filter_ids=requisite_filter_ids,
+        bank_requisite_ids=bank_requisite_ids,
+    ).limit(max(1, min(int(page_size), 500)))
+    deposits = (await db.execute(statement)).scalars().all() if requisite_ids else []
+    aggregates = await trader_deposit_aggregates(db, requisite_ids=requisite_ids)
+    return {
+        'requisites': requisites,
+        'deposits': deposits,
+        'aggregates': aggregates,
+    }
+
+
+def _can_render_trader_deposit_process(
+    viewer: User,
+    subject: User,
+    deposit: Deposit,
+    requisite: Requisite | None,
+) -> bool:
+    if deposit.status not in DEPOSIT_ACTIVE_STATUSES:
+        return False
+    if not requisite or str(requisite.trader_id) != str(subject.id):
+        return False
+    if viewer.role in {Role.superadmin.value, Role.admin.value}:
+        return True
+    return viewer.role in TRADER_ROLES and str(viewer.id) == str(subject.id)
+
+
+def _trader_deposit_details(
+    viewer: User,
+    subject: User,
+    deposits: list[Deposit],
+    requisites: list[Requisite],
+) -> dict[str, dict[str, object]]:
+    req_by_id = {row.id: row for row in requisites}
+    now = datetime.now(timezone.utc)
+    details = {}
+    for deposit in deposits:
+        req = req_by_id.get(deposit.requisites_id)
+        deadline = _deposit_deadline(deposit)
+        details[str(deposit.id)] = {
+            'requisite': display_requisite_value(req) if req and _can_view_requisite_value(viewer, req) else '',
+            'bank': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+            'provider_label': requisite_provider_label(req.method) if req else 'Банк',
+            'provider_name': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+            'receiver_name': (req.full_name or req.owner_name) if req else '',
+            'deadline_iso': deadline.isoformat(),
+            'remaining_seconds': max(0, int((deadline - now).total_seconds())),
+            'is_active': deposit.status in DEPOSIT_ACTIVE_FOR_TRADER,
+            'failure_reason': (deposit.metadata_json or {}).get('failure_reason', ''),
+            'can_process': _can_render_trader_deposit_process(
+                viewer,
+                subject,
+                deposit,
+                req,
+            ),
+        }
+    return details
+
+
 async def _deposit_partial_context(request: Request, user: User, db: AsyncSession) -> dict:
     role = user.role
     auth_realm = request_auth_realm(request) or realm_for_role(role)
@@ -4048,56 +4237,46 @@ async def _deposit_partial_context(request: Request, user: User, db: AsyncSessio
         merchant = (await db.execute(
             select(Merchant).where(Merchant.owner_id == user.id, Merchant.is_archived.is_(False))
         )).scalar_one_or_none()
-    staff_roles = {
-        Role.superadmin.value, Role.admin.value, Role.support.value,
-        Role.operator.value, Role.trader.value,
-    }
-    if role in {Role.operator.value, Role.trader.value}:
-        requisites = (await db.execute(
-            select(Requisite).where(
-                Requisite.trader_id == user.id,
-                Requisite.is_archived.is_(False),
-            )
-        )).scalars().all()
-        requisite_ids = [row.id for row in requisites]
+    trader_subject = await _trusted_trader_preview_subject(
+        request,
+        user,
+        db,
+        requested_role=Role.trader.value,
+        accept_entry_token=False,
+    )
+    preview_requested = request.query_params.get('preview', '').strip() == 'trader'
+    if preview_requested and not trader_subject:
+        raise HTTPException(403, 'trusted Trader preview context required')
+    if trader_subject:
         filters = normalized_deposit_filters(
             request.query_params,
             valid_bank_codes=(bank.code for bank in get_enabled_banks()),
         )
-        query_text = filters.get('query', '').lower()
-        requisite_text = filters.get('requisite', '').lower()
-
-        def _partial_requisite_text(req: Requisite) -> str:
-            return ' '.join([
-                display_requisite_value(req),
-                req.bank_code or '',
-                req.bank_name or '',
-                req.operator_code or '',
-                req.full_name or '',
-                req.owner_name or '',
-            ]).lower()
-
-        matching_requisite_ids = [
-            req.id for req in requisites
-            if query_text and query_text in _partial_requisite_text(req)
-        ]
-        requisite_filter_ids = [
-            req.id for req in requisites
-            if requisite_text and requisite_text in _partial_requisite_text(req)
-        ]
-        bank_requisite_ids = [
-            req.id for req in requisites
-            if filters.get('bank_code') and req.bank_code == filters['bank_code']
-        ]
-        statement = apply_trader_deposit_filters(
-            trader_deposit_scope(requisite_ids),
-            filters,
-            matching_requisite_ids=matching_requisite_ids,
-            requisite_filter_ids=requisite_filter_ids,
-            bank_requisite_ids=bank_requisite_ids,
-        ).limit(500)
-        deposits = (await db.execute(statement)).scalars().all() if requisite_ids else []
-    elif role in staff_roles:
+        view_data = await _load_trader_deposit_view(
+            db,
+            subject_trader_id=trader_subject.id,
+            filters=filters,
+        )
+        requisites = view_data['requisites']
+        deposits = view_data['deposits']
+        return {
+            'request': request,
+            'role': user.role if user.role in TRADER_ROLES else Role.trader.value,
+            'deposits': deposits,
+            'deposit_details': _trader_deposit_details(
+                user,
+                trader_subject,
+                deposits,
+                requisites,
+            ),
+            'deposit_filters': filters,
+            'cabinet_base': cabinet_base,
+            **branding_context(),
+        }
+    staff_roles = {
+        Role.superadmin.value, Role.admin.value, Role.support.value,
+    }
+    if role in staff_roles:
         deposits = (await db.execute(
             select(Deposit).order_by(Deposit.created_at.desc()).limit(500)
         )).scalars().all()
@@ -4430,8 +4609,19 @@ async def _teamlead_own_cabinet(
     )
 
 
-async def role_cabinet(request: Request, role: str, db: AsyncSession):
+async def role_cabinet(
+    request: Request,
+    role: str,
+    db: AsyncSession,
+    *,
+    trader_subject: User | None = None,
+):
     user = await get_current_web_user(request, db)
+    if role in TRADER_ROLES and trader_subject is None and user.role in TRADER_ROLES:
+        trader_subject = user
+    trader_preview_active = bool(
+        trader_subject and user.role == Role.superadmin.value and role in TRADER_ROLES
+    )
     if (
         role == Role.teamlead.value
         and user.role == Role.teamlead.value
@@ -4446,7 +4636,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         role = user.role
         sections = ['Безопасность']
         ui_message = ui_message or resolve_ui_message({'ui_error': 'twofa_required'})
-    else:
+    elif not trader_preview_active:
         expired_events = await approve_expired_appeals(db)
         if expired_events:
             await db.commit()
@@ -4696,6 +4886,20 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     users = (await db.execute(select(User).where(User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value] else []
     merchant_users = [u for u in users if u.role == Role.merchant.value]
     trader_users = (await db.execute(select(User).where(User.role.in_([Role.operator.value, Role.trader.value]), User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else []
+    trader_preview_urls = {}
+    if user.role == Role.superadmin.value:
+        for preview_trader in trader_users:
+            preview_token = issue_preview_context_token(
+                request.session,
+                preview_role=Role.trader.value,
+                subject_id=str(preview_trader.id),
+            )
+            if preview_token:
+                trader_preview_urls[str(preview_trader.id)] = (
+                    f'{cabinet_base}/{Role.trader.value}'
+                    f'?preview_context={quote_plus(preview_token)}'
+                    '&section=deposits&view=active'
+                )
     merchants = (await db.execute(select(Merchant).where(Merchant.is_archived.is_(False)).order_by(Merchant.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else ([merchant] if merchant else [])
     if user.role in {Role.superadmin.value, Role.admin.value}:
         teamlead_users = [row for row in users if row.role == Role.teamlead.value]
@@ -5093,12 +5297,14 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 and str(rule.entity_id) == selected_fee_entity['id']
             ]
     can_view_operations = user.role in [Role.superadmin.value, Role.admin.value, Role.support.value, Role.operator.value, Role.trader.value]
-    if user.role in [Role.operator.value, Role.trader.value]:
-        requisites = (await db.execute(
-            select(Requisite)
-            .where(Requisite.trader_id == user.id, Requisite.is_archived.is_(False))
-            .order_by(Requisite.created_at.desc())
-        )).scalars().all()
+    trader_deposit_view = None
+    if trader_subject:
+        trader_deposit_view = await _load_trader_deposit_view(
+            db,
+            subject_trader_id=trader_subject.id,
+            filters=deposit_filters,
+        )
+        requisites = trader_deposit_view['requisites']
     elif can_view_operations:
         requisites = (await db.execute(select(Requisite).where(Requisite.is_archived.is_(False)).order_by(Requisite.created_at.desc()).limit(300))).scalars().all()
     else:
@@ -5115,52 +5321,9 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         if _can_view_requisite_value(user, r)
     }
     trader_deposit_ids_for_appeals = set()
-    if user.role in [Role.operator.value, Role.trader.value]:
-        if req_by_id:
-            query_text = deposit_filters.get('query', '').lower()
-            requisite_text = deposit_filters.get('requisite', '').lower()
-
-            def _requisite_search_text(req: Requisite) -> str:
-                return ' '.join([
-                    display_requisite_value(req),
-                    req.bank_code or '',
-                    req.bank_name or '',
-                    req.operator_code or '',
-                    req.full_name or '',
-                    req.owner_name or '',
-                ]).lower()
-
-            matching_requisite_ids = [
-                req.id for req in requisites
-                if query_text and query_text in _requisite_search_text(req)
-            ]
-            requisite_filter_ids = [
-                req.id for req in requisites
-                if requisite_text and requisite_text in _requisite_search_text(req)
-            ]
-            bank_requisite_ids = [
-                req.id for req in requisites
-                if deposit_filters.get('bank_code')
-                and req.bank_code == deposit_filters['bank_code']
-            ]
-            deposit_statement = apply_trader_deposit_filters(
-                trader_deposit_scope(req_by_id.keys()),
-                deposit_filters,
-                matching_requisite_ids=matching_requisite_ids,
-                requisite_filter_ids=requisite_filter_ids,
-                bank_requisite_ids=bank_requisite_ids,
-            ).limit(500)
-            deposits = (await db.execute(deposit_statement)).scalars().all()
-            deposit_aggregates = await trader_deposit_aggregates(
-                db,
-                requisite_ids=req_by_id.keys(),
-            )
-        else:
-            deposits = []
-            deposit_aggregates = await trader_deposit_aggregates(
-                db,
-                requisite_ids=[],
-            )
+    if trader_subject:
+        deposits = trader_deposit_view['deposits']
+        deposit_aggregates = trader_deposit_view['aggregates']
     elif can_view_operations:
         deposits = (await db.execute(select(Deposit).order_by(Deposit.created_at.desc()).limit(500))).scalars().all()
     elif role == Role.merchant.value and merchant:
@@ -5195,38 +5358,50 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 if dep.requisites_id and req_by_id.get(dep.requisites_id) and str(req_by_id[dep.requisites_id].trader_id) == merchant_filter_trader_id
             ]
         deposits = filtered_merchant_deposits
-    if any(deposit_filters.values()) and user.role not in [Role.operator.value, Role.trader.value]:
+    if (
+        any(deposit_filters.values())
+        and not trader_subject
+        and user.role not in [Role.operator.value, Role.trader.value]
+    ):
         deposits = [
             dep for dep in deposits
             if deposit_matches_filters(dep, req_by_id.get(dep.requisites_id), deposit_filters)
         ]
-    now = datetime.now(timezone.utc)
-    deposit_details = {}
-    for dep in deposits:
-        req = req_by_id.get(dep.requisites_id)
-        deadline = _deposit_deadline(dep)
-        remaining_seconds = max(0, int((deadline - now).total_seconds()))
-        merchant_related = bool(role == Role.merchant.value and merchant and dep.merchant_id == merchant.id)
-        deposit_details[str(dep.id)] = {
-            'requisite': display_requisite_value(req) if req and _can_view_requisite_value(user, req, merchant_related=merchant_related) else '',
-            'bank': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
-            'provider_label': requisite_provider_label(req.method) if req else 'Банк',
-            'provider_name': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
-            'receiver_name': (req.full_name or req.owner_name) if req else '',
-            'deadline_iso': deadline.isoformat(),
-            'remaining_seconds': remaining_seconds,
-            'is_active': dep.status in DEPOSIT_ACTIVE_FOR_TRADER,
-            'merchant_fee': (dep.metadata_json or {}).get('merchant_fee_amount', ''),
-            'merchant_payable': (
-                (dep.metadata_json or {}).get('merchant_payable_amount')
-                or (dep.metadata_json or {}).get(
-                    'merchant_' 'net_amount',
-                    '',
-                )
-            ),
-            'platform_income': (dep.metadata_json or {}).get('platform_income_amount', ''),
-            'failure_reason': (dep.metadata_json or {}).get('failure_reason', ''),
-        }
+    if trader_subject:
+        deposit_details = _trader_deposit_details(
+            user,
+            trader_subject,
+            deposits,
+            requisites,
+        )
+    else:
+        now = datetime.now(timezone.utc)
+        deposit_details = {}
+        for dep in deposits:
+            req = req_by_id.get(dep.requisites_id)
+            deadline = _deposit_deadline(dep)
+            remaining_seconds = max(0, int((deadline - now).total_seconds()))
+            merchant_related = bool(role == Role.merchant.value and merchant and dep.merchant_id == merchant.id)
+            deposit_details[str(dep.id)] = {
+                'requisite': display_requisite_value(req) if req and _can_view_requisite_value(user, req, merchant_related=merchant_related) else '',
+                'bank': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+                'provider_label': requisite_provider_label(req.method) if req else 'Банк',
+                'provider_name': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+                'receiver_name': (req.full_name or req.owner_name) if req else '',
+                'deadline_iso': deadline.isoformat(),
+                'remaining_seconds': remaining_seconds,
+                'is_active': dep.status in DEPOSIT_ACTIVE_FOR_TRADER,
+                'merchant_fee': (dep.metadata_json or {}).get('merchant_fee_amount', ''),
+                'merchant_payable': (
+                    (dep.metadata_json or {}).get('merchant_payable_amount')
+                    or (dep.metadata_json or {}).get(
+                        'merchant_' 'net_amount',
+                        '',
+                    )
+                ),
+                'platform_income': (dep.metadata_json or {}).get('platform_income_amount', ''),
+                'failure_reason': (dep.metadata_json or {}).get('failure_reason', ''),
+            }
     if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
         payouts = (await db.execute(select(Payout).order_by(Payout.created_at.desc()).limit(200))).scalars().all()
     elif user.role in [Role.operator.value, Role.trader.value]:
@@ -5527,7 +5702,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             'requisites': trader_requisites.get(str(t.id), []),
         }
 
-    current_trader_stats = build_trader_stats(user) if user.role in [Role.operator.value, Role.trader.value] else {}
+    current_trader_stats = build_trader_stats(trader_subject) if trader_subject else {}
     if user.role == Role.superadmin.value:
         antiscam = await antiscam_dashboard_rows(db)
         filtered_risk_requisites = list(antiscam.get('requisites', []))
@@ -5631,6 +5806,11 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant_deal_id': merchant_deal_id,
         'deposit_filters': deposit_filters,
         'deposit_aggregates': deposit_aggregates,
+        'deposit_refresh_url': (
+            f'{cabinet_base}/partials/deposits?preview=trader'
+            if trader_preview_active
+            else f'{cabinet_base}/partials/deposits'
+        ),
         'deposit_active_statuses': sorted(DEPOSIT_ACTIVE_STATUSES),
         'deposit_terminal_statuses': sorted(DEPOSIT_TERMINAL_STATUSES),
         'appeal_filters': appeal_filters,
@@ -5649,6 +5829,10 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'income_aggregator_options': income_aggregator_options,
         'income_dashboard': income_dashboard,
         'trader_users': trader_users,
+        'trader_preview_active': trader_preview_active,
+        'trader_preview_subject': trader_subject,
+        'trader_display_user': trader_subject or user,
+        'trader_preview_urls': trader_preview_urls,
         'merchants': merchants,
         'trader_requisites': trader_requisites,
         'trader_email_map': trader_email_map,

@@ -5,7 +5,6 @@ import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import pyotp
@@ -18,6 +17,7 @@ from app.core.security import encrypt_secret, hash_password
 from app.db.session import engine as application_engine
 from app.main import app
 from app.models import Deposit, Merchant, Requisite, User, WebhookDeliveryAttempt, WebhookEvent
+from app.web.routes import _load_trader_deposit_view
 
 
 def _database_url() -> str:
@@ -214,7 +214,19 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
                     twofa_enabled=True,
                     twofa_secret=encrypt_secret(otp_secret),
                 )
-                db.add_all([trader, other_trader, merchant_owner, superadmin])
+                admin = User(
+                    email=f"queue-admin-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.admin.value,
+                )
+                support = User(
+                    email=f"queue-support-{suffix}@example.test",
+                    password_hash=hash_password(password),
+                    role=Role.support.value,
+                )
+                db.add_all([
+                    trader, other_trader, merchant_owner, superadmin, admin, support,
+                ])
                 await db.flush()
                 merchant = Merchant(owner_id=merchant_owner.id, name=f"Queue merchant {suffix}")
                 db.add(merchant)
@@ -248,6 +260,7 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
                 markers = {
                     "urgent": f"ACTIVE-URGENT-{suffix}",
                     "later": f"ACTIVE-LATER-{suffix}",
+                    "no_deadline": f"ACTIVE-NO-DEADLINE-{suffix}",
                     "paid": f"HISTORY-PAID-{suffix}",
                     "failed": f"HISTORY-FAILED-{suffix}",
                     "other": f"FORBIDDEN-OTHER-{suffix}",
@@ -270,12 +283,38 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
                 rows = [
                     deposit(markers["later"], DepositStatus.pending.value, requisite, now + timedelta(minutes=12)),
                     deposit(markers["urgent"], DepositStatus.pending.value, requisite, now + timedelta(minutes=3)),
+                    deposit(markers["no_deadline"], DepositStatus.pending.value, requisite, None),
                     deposit(markers["paid"], DepositStatus.paid.value, requisite, now + timedelta(minutes=15), "2500.00"),
                     deposit(markers["failed"], DepositStatus.failed.value, requisite, now + timedelta(minutes=15)),
                     deposit(markers["other"], DepositStatus.pending.value, other_requisite, now + timedelta(minutes=2)),
                 ]
                 db.add_all(rows)
                 await db.commit()
+                base_filters = {
+                    "view": "active", "query": "", "amount": "", "requisite": "",
+                    "date": "", "bank_code": "", "payment_method": "", "status": "",
+                }
+                active_first_page = await _load_trader_deposit_view(
+                    db,
+                    subject_trader_id=trader.id,
+                    filters=base_filters,
+                    page_size=1,
+                )
+                history_first_page = await _load_trader_deposit_view(
+                    db,
+                    subject_trader_id=trader.id,
+                    filters={**base_filters, "view": "history"},
+                    page_size=1,
+                )
+                assert len(active_first_page["deposits"]) == 1
+                assert active_first_page["deposits"][0].external_id == markers["urgent"]
+                assert active_first_page["aggregates"]["active_count"] == 3
+                assert active_first_page["aggregates"]["history_count"] == 2
+                assert len(history_first_page["deposits"]) == 1
+                assert history_first_page["deposits"][0].status in {
+                    DepositStatus.paid.value,
+                    DepositStatus.failed.value,
+                }
                 trader_id = trader.id
                 row_ids = [row.id for row in rows]
 
@@ -331,12 +370,99 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
                     },
                 )
                 assert login.status_code == 303
-                preview_active = await staff_client.get(
-                    "/staff/cabinet/trader?section=deposits&view=active"
+                staff_cabinet = await staff_client.get("/staff/cabinet")
+                preview_link_match = re.search(
+                    rf'data-preview-trader="{trader.id}" href="([^"]*preview_context=[^"]+)"',
+                    staff_cabinet.text,
                 )
+                assert preview_link_match
+                preview_entry_url = html.unescape(preview_link_match.group(1))
+                preview_active = await staff_client.get(preview_entry_url)
+                session_view_match = re.search(
+                    r'const SESSION_VIEW_TOKEN="([0-9a-f]+)"',
+                    preview_active.text,
+                )
+                assert session_view_match
+                preview_headers = {"x-session-view": session_view_match.group(1)}
                 preview_history = await staff_client.get(
                     "/staff/cabinet/trader?section=deposits&view=history"
                 )
+                preview_active_polls = [
+                    await staff_client.get(
+                        "/staff/cabinet/partials/deposits?view=active",
+                        headers=preview_headers,
+                    )
+                    for _ in range(2)
+                ]
+                preview_history_polls = [
+                    await staff_client.get(
+                        "/staff/cabinet/partials/deposits?view=history",
+                        headers=preview_headers,
+                    )
+                    for _ in range(2)
+                ]
+                tampered_preview = await staff_client.get(
+                    f"/staff/cabinet/trader?section=deposits&view=active"
+                    f"&subject_trader_id={other_trader.id}"
+                )
+                clear_preview = await staff_client.get("/staff/cabinet")
+                missing_preview = await staff_client.get(
+                    "/staff/cabinet/trader?section=deposits&view=active"
+                )
+                preview_token_match = re.search(
+                    r"preview_context=([^&]+)", preview_entry_url
+                )
+                assert preview_token_match
+                preview_token = preview_token_match.group(1)
+                token_parts = preview_token.split(".")
+                assert token_parts[-1]
+                token_parts[-1] = (
+                    ("a" if token_parts[-1][0] != "a" else "b")
+                    + token_parts[-1][1:]
+                )
+                invalid_token = ".".join(token_parts)
+                invalid_preview = await staff_client.get(
+                    preview_entry_url.replace(preview_token, invalid_token, 1)
+                )
+
+            unauthorized_previews = []
+            for staff_user in (admin, support):
+                async with httpx.AsyncClient(
+                    transport=transport,
+                    base_url="https://localhost",
+                    follow_redirects=False,
+                ) as unauthorized_client:
+                    login_page = await unauthorized_client.get("/staff/login")
+                    login = await unauthorized_client.post(
+                        "/staff/login",
+                        data={
+                            "csrf_token": _csrf(login_page),
+                            "email": staff_user.email,
+                            "password": password,
+                        },
+                    )
+                    assert login.status_code == 303
+                    unauthorized_previews.append(await unauthorized_client.get(
+                        "/staff/cabinet/trader?section=deposits&view=active"
+                    ))
+            async with httpx.AsyncClient(
+                transport=transport,
+                base_url="https://localhost",
+                follow_redirects=False,
+            ) as merchant_client:
+                login_page = await merchant_client.get("/merchant/login")
+                login = await merchant_client.post(
+                    "/merchant/login",
+                    data={
+                        "csrf_token": _csrf(login_page),
+                        "email": merchant_owner.email,
+                        "password": password,
+                    },
+                )
+                assert login.status_code == 303
+                unauthorized_previews.append(await merchant_client.get(
+                    "/merchant/cabinet/trader?section=deposits&view=active"
+                ))
 
             assert active.status_code == history.status_code == filtered.status_code == 200
             assert 'data-auto-poll="true"' in active.text
@@ -344,14 +470,16 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
             assert all(response.status_code == 200 for response in active_polls + history_polls)
             assert filtered_poll.status_code == 200
             assert forbidden_preview.status_code == 403
-            assert markers["urgent"] in active.text and markers["later"] in active.text
+            assert all(markers[key] in active.text for key in ("urgent", "later", "no_deadline"))
             assert active.text.index(markers["urgent"]) < active.text.index(markers["later"])
+            assert active.text.index(markers["later"]) < active.text.index(markers["no_deadline"])
             assert markers["paid"] not in active.text and markers["failed"] not in active.text
             assert markers["other"] not in active.text
             assert markers["paid"] in history.text and markers["failed"] in history.text
             assert markers["urgent"] not in history.text and markers["later"] not in history.text
+            assert markers["no_deadline"] not in history.text
             assert markers["paid"] in filtered.text and markers["failed"] not in filtered.text
-            assert "Активные</b><strong>2</strong>" in filtered.text
+            assert "Активные</b><strong>3</strong>" in filtered.text
             assert "Истекают до 5 минут</b><strong class=\"danger\">1</strong>" in filtered.text
             assert "Оплачено сегодня, UTC</b><strong>1</strong>" in filtered.text
             assert "2 500 ₽" in filtered.text
@@ -360,7 +488,7 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
             assert "name=\"status\"" in filtered.text
             for response in active_polls:
                 assert "ozark-partial:trader-deposits:active" in response.text
-                assert markers["urgent"] in response.text and markers["later"] in response.text
+                assert all(markers[key] in response.text for key in ("urgent", "later", "no_deadline"))
                 assert markers["paid"] not in response.text and markers["other"] not in response.text
                 assert "Обработать" in response.text
             for response in history_polls:
@@ -371,18 +499,44 @@ def test_trader_deposit_views_filters_scope_and_aggregates_are_read_only():
             assert markers["paid"] in filtered_poll.text
             assert markers["failed"] not in filtered_poll.text
             assert preview_active.status_code == preview_history.status_code == 200
-            assert 'data-auto-poll="false"' in preview_active.text
-            assert 'data-auto-poll="false"' in preview_history.text
-            assert ">Обновить</a>" in preview_active.text
-            refresh_match = re.search(r'href="([^"]+)">Обновить</a>', preview_active.text)
-            assert refresh_match
-            refresh_url = urlsplit(html.unescape(refresh_match.group(1)))
-            assert refresh_url.path == "/staff/cabinet/trader"
-            assert parse_qs(refresh_url.query) == {
-                "section": ["deposits"],
-                "view": ["active"],
-            }
-            assert refresh_url.fragment.startswith("sec")
+            assert 'data-auto-poll="true"' in preview_active.text
+            assert 'data-auto-poll="true"' in preview_history.text
+            assert all(markers[key] in preview_active.text for key in ("urgent", "later", "no_deadline"))
+            assert markers["paid"] not in preview_active.text
+            assert markers["failed"] not in preview_active.text
+            assert markers["other"] not in preview_active.text
+            assert markers["paid"] in preview_history.text
+            assert markers["failed"] in preview_history.text
+            assert markers["urgent"] not in preview_history.text
+            assert markers["no_deadline"] not in preview_history.text
+            assert markers["other"] not in preview_history.text
+            assert "Активные 3" in preview_active.text
+            assert "История 2" in preview_history.text
+            assert "Обработать" in preview_active.text
+            assert "Обработать" not in preview_history.text
+            assert "Подробнее" in preview_history.text
+            assert all(response.status_code == 200 for response in preview_active_polls)
+            assert all(response.status_code == 200 for response in preview_history_polls)
+            for response in preview_active_polls:
+                assert "ozark-partial:trader-deposits:active" in response.text
+                assert all(markers[key] in response.text for key in ("urgent", "later", "no_deadline"))
+                assert markers["paid"] not in response.text and markers["other"] not in response.text
+                assert "Обработать" in response.text
+            for response in preview_history_polls:
+                assert "ozark-partial:trader-deposits:history" in response.text
+                assert markers["paid"] in response.text and markers["failed"] in response.text
+                assert markers["urgent"] not in response.text and markers["other"] not in response.text
+                assert markers["no_deadline"] not in response.text
+                assert "Подробнее" in response.text
+                assert "Обработать" not in response.text
+            assert tampered_preview.status_code == 200
+            assert markers["urgent"] in tampered_preview.text
+            assert markers["other"] not in tampered_preview.text
+            assert clear_preview.status_code == 200
+            assert missing_preview.status_code == 403
+            assert invalid_preview.status_code == 403
+            assert all(response.status_code == 403 for response in unauthorized_previews)
+            assert all(markers["urgent"] not in response.text for response in unauthorized_previews)
             assert 'action="/staff/cabinet/trader"' in preview_history.text
             assert 'href="/staff/cabinet/trader?view=history"' in preview_history.text
 
