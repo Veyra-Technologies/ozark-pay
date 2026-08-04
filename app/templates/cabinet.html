@@ -1,4 +1,13 @@
 {% from "_commission_tiers.html" import commission_tier_form with context %}
+{% macro render_ui_message(scopes) -%}
+  {% if ui_message and ui_message.section in scopes %}
+  <div class="ui-message ui-message-{{ ui_message.kind }}" role="alert"
+       data-ui-message data-ui-kind="{{ ui_message.kind }}"
+       data-ui-form="{{ ui_message.form_or_modal }}"
+       data-ui-field="{{ ui_message.field or '' }}"
+       data-ui-code="{{ ui_message.code }}">{{ ui_message.message }}</div>
+  {% endif %}
+{%- endmacro %}
 <!doctype html>
 <html lang="ru">
 <head>
@@ -11,7 +20,7 @@
 body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 body::before{content:"";position:fixed;inset:0;z-index:-2;background:url('{{ brand.login_background }}') center/cover no-repeat;filter:saturate(1.08) contrast(1.02) brightness(.58);transform:scale(1.02)}
 body::after{content:"";position:fixed;inset:0;z-index:-1;background:radial-gradient(circle at 18% 12%,rgba(117,219,255,.30),transparent 30%),radial-gradient(circle at 86% 36%,rgba(75,215,241,.16),transparent 25%),linear-gradient(120deg,rgba(4,17,29,.78),rgba(7,39,58,.64) 48%,rgba(3,18,30,.82))}
-a{color:#83eaff;text-decoration:none}a:hover{text-decoration:underline}.top{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:18px 28px;background:rgba(5,22,36,.82);border-bottom:1px solid var(--line);backdrop-filter:blur(18px);box-shadow:0 14px 44px rgba(0,12,22,.28)}.top h2{margin:0 0 6px;font-size:26px;letter-spacing:.2px}.top a{color:#dffbff}.wrap{display:grid;grid-template-columns:280px minmax(0,1fr);gap:22px;padding:24px;max-width:1680px;margin:0 auto}.nav,.card{background:linear-gradient(180deg,rgba(12,39,60,.78),rgba(8,30,48,.70));border:1px solid var(--line);border-radius:20px;box-shadow:0 24px 70px rgba(0,12,24,.28),inset 0 1px 0 rgba(255,255,255,.08);backdrop-filter:blur(16px);padding:18px}.nav{align-self:start;position:sticky;top:94px;max-height:calc(100vh - 116px);overflow:auto}.status{padding:15px;border:1px solid rgba(182,238,255,.22);border-radius:16px;background:rgba(9,33,52,.62);margin-bottom:15px}.nav>b{display:block;margin:6px 0 10px;color:#eafdff;letter-spacing:.2px}.nav button{display:block;width:100%;text-align:left;border:1px solid transparent;border-radius:12px;background:transparent;color:var(--nav);padding:12px 13px;margin:4px 0;font-size:15px;font-weight:800;cursor:pointer;transition:background .16s,border-color .16s,color .16s,transform .16s}.nav button:hover{background:rgba(89,222,244,.10);border-color:rgba(133,239,255,.18)}.nav button.active{background:linear-gradient(180deg,rgba(90,221,244,.25),rgba(51,134,168,.20));border-color:rgba(133,239,255,.34);color:#fff;box-shadow:inset 3px 0 0 var(--cyan)}.section{display:none}.section.active{display:block}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:14px}.section-head h1{margin:0 0 3px;font-size:30px;letter-spacing:-.2px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.metric,.panel{border:1px solid rgba(182,238,255,.19);border-radius:16px;background:rgba(7,29,46,.62);padding:16px;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}.metric h3,.panel h3{margin-top:0}.metric b,.panel b{color:#f4fdff}.metric p{margin-bottom:0}.muted{color:var(--muted)}.badge{display:inline-flex;align-items:center;min-height:24px;padding:0 9px;border-radius:999px;background:rgba(82,220,244,.14);border:1px solid rgba(128,238,255,.25);color:#c7f8ff;font-size:13px;font-weight:800}.ok{color:#84efb4;font-weight:800}.warn{color:#ffd37a;font-weight:800}.danger{color:#ff9a93;font-weight:800}.msg{background:rgba(23,109,74,.50);border:1px solid rgba(137,239,184,.40);color:#eafff4;border-radius:14px;padding:14px;margin-bottom:14px}.note{background:rgba(128,81,28,.34);border:1px solid rgba(255,201,126,.32);color:#fff1d7;border-radius:14px;padding:12px;margin:12px 0}.table-wrap{width:100%;overflow-x:auto;border:1px solid rgba(182,238,255,.18);border-radius:16px;background:rgba(5,23,38,.56);margin-top:14px}table{width:100%;border-collapse:collapse;min-width:820px}th,td{text-align:left;vertical-align:top;padding:10px 11px;border-bottom:1px solid rgba(188,232,248,.11);line-height:1.35}th{font-size:11px;color:#9ecfe0;text-transform:uppercase;background:rgba(12,44,64,.58);letter-spacing:.04em}td{color:#e8f8ff}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(77,211,237,.055)}label{display:block;margin-top:12px;font-weight:800;color:#dff9ff}input,select,textarea{width:100%;min-height:41px;padding:9px 11px;border:1px solid rgba(184,230,246,.25);border-radius:11px;margin-top:6px;background:rgba(5,26,43,.68);color:#f2fcff;font:inherit;outline:none}input::placeholder,textarea::placeholder{color:#87aebd}input:focus,select:focus,textarea:focus{border-color:rgba(106,231,250,.75);box-shadow:0 0 0 3px rgba(85,223,242,.16)}select option{background:#0a2438;color:#eefcff}textarea{resize:vertical}.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.actions{display:flex;gap:7px;flex-wrap:wrap}.actions form{margin:0}.deposit-actions{align-items:center;flex-wrap:nowrap;gap:6px;min-width:174px}.deposit-actions .primary,.deposit-actions .dangerbtn{min-height:32px;padding:0 10px;border-radius:10px;font-size:13px;white-space:nowrap;box-shadow:none}.primary,.secondary,.dangerbtn{border:0;border-radius:11px;min-height:36px;padding:0 13px;font-weight:800;cursor:pointer}.primary{background:linear-gradient(180deg,var(--cyan2),var(--cyan));color:#073244;box-shadow:0 10px 24px rgba(49,209,234,.18)}.secondary{background:rgba(120,221,245,.14);color:#e8fbff;border:1px solid rgba(152,237,255,.24)}.dangerbtn{background:linear-gradient(180deg,#ef665f,#c93831);color:#fff}.primary:hover,.secondary:hover,.dangerbtn:hover{filter:brightness(1.05)}.small{font-size:12px}.nowrap{white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.modal{display:none;position:fixed;inset:0;z-index:30;background:rgba(0,10,18,.72);align-items:center;justify-content:center;padding:20px}.modal.active{display:flex}.modalbox{width:min(980px,100%);max-height:88vh;overflow:auto;background:linear-gradient(180deg,rgba(15,50,72,.96),rgba(8,31,50,.96));border:1px solid rgba(184,237,255,.24);border-radius:20px;padding:22px;box-shadow:0 28px 100px rgba(0,0,0,.62)}.modalbox h2{margin-top:0}.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:14px}.timer{display:inline-flex;align-items:center;justify-content:center;min-width:70px;border-radius:9px;background:rgba(143,87,20,.42);border:1px solid rgba(255,204,128,.35);color:#ffd58a;font-weight:900;padding:5px 8px}.qr{max-width:180px;border:1px solid rgba(184,237,255,.24);border-radius:12px;padding:8px;background:#fff}.status-pill{display:inline-flex;align-items:center;min-height:26px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:900;white-space:nowrap}.status-ok{background:rgba(20,117,78,.42);color:#a9f6c7;border:1px solid rgba(134,235,178,.36)}.status-wait{background:rgba(133,84,23,.42);color:#ffd88d;border:1px solid rgba(255,209,137,.36)}.status-bad{background:rgba(137,38,45,.44);color:#ffb7b3;border:1px solid rgba(255,151,157,.36)}.status-neutral{background:rgba(63,91,153,.34);color:#cddcff;border:1px solid rgba(164,191,255,.28)}.compact-note{font-size:12px;color:#9fc1cf;margin-top:3px}.trader-table table{min-width:760px}.requisites-table table{min-width:820px}.inline-form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.inline-form input{width:180px;min-height:34px;margin-top:0}.inline-form button{min-height:34px}.logout-form{display:inline}.check-inline{width:auto;min-height:auto;margin:0 6px 0 0}.filter-actions{margin-top:12px}.reset-link{display:inline-flex;align-items:center;text-decoration:none}.settle-panel{margin-top:14px}.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:14px 0}.detail-card{border:1px solid rgba(182,238,255,.18);border-radius:14px;background:rgba(5,23,38,.46);padding:13px}.detail-card b{display:block;color:#9ecfe0;font-size:12px;text-transform:uppercase;margin-bottom:6px}.modal-section{margin-top:18px}.modal-section h3{margin:0 0 10px}.pill-muted{display:inline-flex;padding:4px 9px;border-radius:999px;border:1px solid rgba(152,237,255,.20);color:#b9ddea;background:rgba(120,221,245,.10);font-size:12px;font-weight:800}.table-pager{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:10px 0 6px}.table-pager button,.table-pager span{min-width:34px;height:34px;border-radius:10px;border:1px solid rgba(152,237,255,.22);display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:13px}.table-pager button{background:rgba(120,221,245,.11);color:#e8fbff;cursor:pointer}.table-pager button:hover{background:rgba(120,221,245,.20);border-color:rgba(152,237,255,.38)}.table-pager button.active{background:linear-gradient(180deg,var(--cyan2),var(--cyan));color:#073244;border-color:transparent}.table-pager span{color:#9fc1cf;background:rgba(5,23,38,.34)}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(126,226,247,.28);border-radius:999px}::-webkit-scrollbar-track{background:rgba(4,20,34,.35)}@media(max-width:850px){.wrap{grid-template-columns:1fr;padding:16px}.top,.section-head{display:block}.nav{position:static;max-height:none}.row{grid-template-columns:1fr}table{min-width:740px}}
+a{color:#83eaff;text-decoration:none}a:hover{text-decoration:underline}.top{position:sticky;top:0;z-index:20;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:18px 28px;background:rgba(5,22,36,.82);border-bottom:1px solid var(--line);backdrop-filter:blur(18px);box-shadow:0 14px 44px rgba(0,12,22,.28)}.top h2{margin:0 0 6px;font-size:26px;letter-spacing:.2px}.top a{color:#dffbff}.wrap{display:grid;grid-template-columns:280px minmax(0,1fr);gap:22px;padding:24px;max-width:1680px;margin:0 auto}.nav,.card{background:linear-gradient(180deg,rgba(12,39,60,.78),rgba(8,30,48,.70));border:1px solid var(--line);border-radius:20px;box-shadow:0 24px 70px rgba(0,12,24,.28),inset 0 1px 0 rgba(255,255,255,.08);backdrop-filter:blur(16px);padding:18px}.nav{align-self:start;position:sticky;top:94px;max-height:calc(100vh - 116px);overflow:auto}.status{padding:15px;border:1px solid rgba(182,238,255,.22);border-radius:16px;background:rgba(9,33,52,.62);margin-bottom:15px}.nav>b{display:block;margin:6px 0 10px;color:#eafdff;letter-spacing:.2px}.nav button{display:block;width:100%;text-align:left;border:1px solid transparent;border-radius:12px;background:transparent;color:var(--nav);padding:12px 13px;margin:4px 0;font-size:15px;font-weight:800;cursor:pointer;transition:background .16s,border-color .16s,color .16s,transform .16s}.nav button:hover{background:rgba(89,222,244,.10);border-color:rgba(133,239,255,.18)}.nav button.active{background:linear-gradient(180deg,rgba(90,221,244,.25),rgba(51,134,168,.20));border-color:rgba(133,239,255,.34);color:#fff;box-shadow:inset 3px 0 0 var(--cyan)}.section{display:none}.section.active{display:block}.section-head{display:flex;justify-content:space-between;gap:16px;align-items:center;margin-bottom:14px}.section-head h1{margin:0 0 3px;font-size:30px;letter-spacing:-.2px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}.metric,.panel{border:1px solid rgba(182,238,255,.19);border-radius:16px;background:rgba(7,29,46,.62);padding:16px;box-shadow:inset 0 1px 0 rgba(255,255,255,.06)}.metric h3,.panel h3{margin-top:0}.metric b,.panel b{color:#f4fdff}.metric p{margin-bottom:0}.muted{color:var(--muted)}.badge{display:inline-flex;align-items:center;min-height:24px;padding:0 9px;border-radius:999px;background:rgba(82,220,244,.14);border:1px solid rgba(128,238,255,.25);color:#c7f8ff;font-size:13px;font-weight:800}.ok{color:#84efb4;font-weight:800}.warn{color:#ffd37a;font-weight:800}.danger{color:#ff9a93;font-weight:800}.note{background:rgba(128,81,28,.34);border:1px solid rgba(255,201,126,.32);color:#fff1d7;border-radius:14px;padding:12px;margin:12px 0}.table-wrap{width:100%;overflow-x:auto;border:1px solid rgba(182,238,255,.18);border-radius:16px;background:rgba(5,23,38,.56);margin-top:14px}table{width:100%;border-collapse:collapse;min-width:820px}th,td{text-align:left;vertical-align:top;padding:10px 11px;border-bottom:1px solid rgba(188,232,248,.11);line-height:1.35}th{font-size:11px;color:#9ecfe0;text-transform:uppercase;background:rgba(12,44,64,.58);letter-spacing:.04em}td{color:#e8f8ff}tr:last-child td{border-bottom:0}tr:hover td{background:rgba(77,211,237,.055)}label{display:block;margin-top:12px;font-weight:800;color:#dff9ff}input,select,textarea{width:100%;min-height:41px;padding:9px 11px;border:1px solid rgba(184,230,246,.25);border-radius:11px;margin-top:6px;background:rgba(5,26,43,.68);color:#f2fcff;font:inherit;outline:none}input::placeholder,textarea::placeholder{color:#87aebd}input:focus,select:focus,textarea:focus{border-color:rgba(106,231,250,.75);box-shadow:0 0 0 3px rgba(85,223,242,.16)}select option{background:#0a2438;color:#eefcff}textarea{resize:vertical}.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.actions{display:flex;gap:7px;flex-wrap:wrap}.actions form{margin:0}.deposit-actions{align-items:center;flex-wrap:nowrap;gap:6px;min-width:174px}.deposit-actions .primary,.deposit-actions .dangerbtn{min-height:32px;padding:0 10px;border-radius:10px;font-size:13px;white-space:nowrap;box-shadow:none}.primary,.secondary,.dangerbtn{border:0;border-radius:11px;min-height:36px;padding:0 13px;font-weight:800;cursor:pointer}.primary{background:linear-gradient(180deg,var(--cyan2),var(--cyan));color:#073244;box-shadow:0 10px 24px rgba(49,209,234,.18)}.secondary{background:rgba(120,221,245,.14);color:#e8fbff;border:1px solid rgba(152,237,255,.24)}.dangerbtn{background:linear-gradient(180deg,#ef665f,#c93831);color:#fff}.primary:hover,.secondary:hover,.dangerbtn:hover{filter:brightness(1.05)}.small{font-size:12px}.nowrap{white-space:nowrap}.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}.modal{display:none;position:fixed;inset:0;z-index:30;background:rgba(0,10,18,.72);align-items:center;justify-content:center;padding:20px}.modal.active{display:flex}.modalbox{width:min(980px,100%);max-height:88vh;overflow:auto;background:linear-gradient(180deg,rgba(15,50,72,.96),rgba(8,31,50,.96));border:1px solid rgba(184,237,255,.24);border-radius:20px;padding:22px;box-shadow:0 28px 100px rgba(0,0,0,.62)}.modalbox h2{margin-top:0}.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:14px}.timer{display:inline-flex;align-items:center;justify-content:center;min-width:70px;border-radius:9px;background:rgba(143,87,20,.42);border:1px solid rgba(255,204,128,.35);color:#ffd58a;font-weight:900;padding:5px 8px}.qr{max-width:180px;border:1px solid rgba(184,237,255,.24);border-radius:12px;padding:8px;background:#fff}.status-pill{display:inline-flex;align-items:center;min-height:26px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:900;white-space:nowrap}.status-ok{background:rgba(20,117,78,.42);color:#a9f6c7;border:1px solid rgba(134,235,178,.36)}.status-wait{background:rgba(133,84,23,.42);color:#ffd88d;border:1px solid rgba(255,209,137,.36)}.status-bad{background:rgba(137,38,45,.44);color:#ffb7b3;border:1px solid rgba(255,151,157,.36)}.status-neutral{background:rgba(63,91,153,.34);color:#cddcff;border:1px solid rgba(164,191,255,.28)}.compact-note{font-size:12px;color:#9fc1cf;margin-top:3px}.trader-table table{min-width:760px}.requisites-table table{min-width:820px}.inline-form{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.inline-form input{width:180px;min-height:34px;margin-top:0}.inline-form button{min-height:34px}.logout-form{display:inline}.check-inline{width:auto;min-height:auto;margin:0 6px 0 0}.filter-actions{margin-top:12px}.reset-link{display:inline-flex;align-items:center;text-decoration:none}.settle-panel{margin-top:14px}.detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:14px 0}.detail-card{border:1px solid rgba(182,238,255,.18);border-radius:14px;background:rgba(5,23,38,.46);padding:13px}.detail-card b{display:block;color:#9ecfe0;font-size:12px;text-transform:uppercase;margin-bottom:6px}.modal-section{margin-top:18px}.modal-section h3{margin:0 0 10px}.pill-muted{display:inline-flex;padding:4px 9px;border-radius:999px;border:1px solid rgba(152,237,255,.20);color:#b9ddea;background:rgba(120,221,245,.10);font-size:12px;font-weight:800}.table-pager{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:10px 0 6px}.table-pager button,.table-pager span{min-width:34px;height:34px;border-radius:10px;border:1px solid rgba(152,237,255,.22);display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:13px}.table-pager button{background:rgba(120,221,245,.11);color:#e8fbff;cursor:pointer}.table-pager button:hover{background:rgba(120,221,245,.20);border-color:rgba(152,237,255,.38)}.table-pager button.active{background:linear-gradient(180deg,var(--cyan2),var(--cyan));color:#073244;border-color:transparent}.table-pager span{color:#9fc1cf;background:rgba(5,23,38,.34)}::-webkit-scrollbar{width:10px;height:10px}::-webkit-scrollbar-thumb{background:rgba(126,226,247,.28);border-radius:999px}::-webkit-scrollbar-track{background:rgba(4,20,34,.35)}@media(max-width:850px){.wrap{grid-template-columns:1fr;padding:16px}.top,.section-head{display:block}.nav{position:static;max-height:none}.row{grid-template-columns:1fr}table{min-width:740px}}
 .appeals-table table{min-width:1040px}.appeal-row{cursor:pointer}.appeal-row td{transition:background .16s}.appeal-row:hover td{background:rgba(93,224,244,.09)}.appeal-open{min-height:32px;padding:0 12px;border-radius:10px}.appeal-modalbox{width:min(1040px,100%);padding:0;overflow:hidden}.appeal-modal-scroll{max-height:88vh;overflow:auto;padding:22px}.modal-title-row{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:16px}.modal-title-row h2{margin:0}.modal-title-row .secondary{min-height:34px}.appeal-hero{display:grid;grid-template-columns:1.4fr .8fr;gap:14px;margin-bottom:14px}.appeal-main-card,.appeal-side-card{border:1px solid rgba(182,238,255,.20);border-radius:16px;background:rgba(5,23,38,.50);padding:16px}.appeal-main-card h3{margin:0 0 8px;font-size:22px}.appeal-amount{font-size:28px;font-weight:900;line-height:1.1}.appeal-info-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:14px 0}.appeal-info{border:1px solid rgba(182,238,255,.15);border-radius:13px;background:rgba(8,31,50,.42);padding:11px;min-height:72px}.appeal-info b{display:block;color:#9ecfe0;font-size:11px;text-transform:uppercase;margin-bottom:7px}.appeal-files,.appeal-actions-panel,.appeal-history{border:1px solid rgba(182,238,255,.17);border-radius:16px;background:rgba(5,23,38,.42);padding:15px;margin-top:14px}.appeal-files h3,.appeal-actions-panel h3,.appeal-history h3{margin:0 0 10px}.appeal-file-list{display:flex;gap:8px;flex-wrap:wrap}.appeal-file-link{display:inline-flex;align-items:center;min-height:34px;padding:0 11px;border-radius:10px;background:rgba(120,221,245,.12);border:1px solid rgba(152,237,255,.22);font-weight:800}.appeal-action-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px}.appeal-action-card{border:1px solid rgba(182,238,255,.15);border-radius:14px;background:rgba(8,31,50,.44);padding:12px}.appeal-action-card button{width:100%;margin-top:8px}.appeal-action-card input{margin-top:8px}.appeal-message{border-top:1px solid rgba(188,232,248,.11);padding:10px 0}.appeal-message:first-of-type{border-top:0;padding-top:0}.appeal-message-head{display:flex;justify-content:space-between;gap:12px;color:#9ecfe0;font-size:12px;margin-bottom:5px}@media(max-width:950px){.appeal-hero,.appeal-info-grid{grid-template-columns:1fr}}
 /* Global cabinet UI normalization layer. Backend and data flow stay untouched. */
 :root{
@@ -234,6 +243,10 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 .rolling-card-actions .secondary{min-height:34px}
 .release-footer{max-width:1680px;margin:0 auto;padding:0 24px 24px;color:var(--muted);font-size:12px;text-align:right}
 @media(max-width:700px){.platform-wallet-card{grid-template-columns:1fr}.platform-wallet-qr{width:190px}}
+html,body{max-width:100%;overflow-x:hidden}.card{min-width:0}.ui-message{margin:0 0 14px;padding:11px 12px;border-radius:11px;border:1px solid rgba(255,184,126,.36);background:rgba(118,65,26,.42);color:#fff3df;font-size:13px}.ui-message-security,.ui-message-blocking{border-color:rgba(255,143,150,.42);background:rgba(122,37,44,.43);color:#ffd7d5}.ui-message-validation{border-color:rgba(255,205,120,.42);background:rgba(128,81,28,.38)}.operational-toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}.operational-tabs{display:flex;gap:8px;flex-wrap:wrap}.operational-tabs a{display:inline-flex;align-items:center;min-height:38px;padding:0 13px;border:1px solid var(--border);border-radius:10px;background:rgba(120,221,245,.09);color:#dff9ff;font-weight:800}.operational-tabs a.active{background:linear-gradient(180deg,var(--cyan2),var(--cyan));border-color:transparent;color:#073244}.summary-strip{display:grid;grid-template-columns:repeat(4,minmax(130px,1fr));gap:10px;margin:12px 0}.summary-item{min-width:0;padding:11px 12px;border:1px solid var(--border);border-radius:12px;background:var(--panel-muted)}.summary-item b{display:block;color:#9ecfe0;font-size:11px;text-transform:uppercase;margin-bottom:5px}.summary-item strong{font-size:17px}.compact-filter{display:flex;gap:8px;align-items:end;flex-wrap:wrap;padding:12px}.compact-filter .search-field{flex:1 1 320px}.compact-filter .search-field label{margin-top:0}.filter-disclosure{width:100%;border-top:1px solid var(--border);padding-top:10px}.filter-disclosure summary{cursor:pointer;color:#dff9ff;font-weight:800}.filter-grid{display:grid;grid-template-columns:repeat(3,minmax(150px,1fr));gap:10px;align-items:end}.filter-grid label{margin-top:8px}.operational-table{table-layout:fixed!important}.operational-table td,.operational-table th{overflow:hidden}.operational-table .action-column{width:126px}.copy-line{display:flex;align-items:center;gap:7px;min-width:0}.copy-line .cell-ellipsis{flex:1 1 auto}.icon-copy{min-height:28px!important;padding:0 8px!important;font-size:12px!important}.timer.timer-urgent{background:rgba(137,38,45,.44);border-color:rgba(255,151,157,.42);color:#ffb7b3}.timer.timer-warning{background:rgba(133,84,23,.42);border-color:rgba(255,209,137,.36);color:#ffd88d}.technical-json{max-height:330px;overflow:auto;margin:0;padding:12px;border:1px solid var(--border);border-radius:12px;background:#041522;color:#dff6ff;white-space:pre-wrap;overflow-wrap:anywhere}.attempt-list{display:grid;gap:9px}.attempt-card{border:1px solid var(--border);border-radius:12px;padding:11px;background:rgba(4,21,35,.68)}.attempt-head{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:7px}.requisite-main{display:flex;align-items:center;gap:8px;min-width:0}.limit-lines{display:grid;gap:3px;font-size:12px}.risk-progress-meter{display:block;width:100%;height:7px;margin-top:6px;border:0;border-radius:999px;overflow:hidden;background:rgba(152,237,255,.13);accent-color:var(--cyan)}.risk-progress-meter::-webkit-progress-bar{background:rgba(152,237,255,.13)}.risk-progress-meter::-webkit-progress-value{background:var(--cyan);border-radius:999px}.risk-progress-meter::-moz-progress-bar{background:var(--cyan);border-radius:999px}.details-button{white-space:nowrap}.table-empty{padding:24px!important;text-align:center;color:var(--muted)}
+.ui-message-inline{margin-top:7px}.modalbox-wide{width:min(1120px,100%)}.action-menu>summary{list-style:none;cursor:pointer;display:inline-flex;align-items:center;justify-content:center}.action-menu>summary::-webkit-details-marker{display:none}.action-menu .actions-stack{margin-top:9px;padding:10px;border:1px solid var(--border);border-radius:12px;background:rgba(4,21,35,.88)}.action-menu .actions-stack button{width:100%}.risk-requisites-table{min-width:1040px}.webhook-table{min-width:980px}.audit-table{min-width:860px}
+@media(max-width:1100px){.summary-strip{grid-template-columns:repeat(2,minmax(130px,1fr))}.filter-grid{grid-template-columns:repeat(2,minmax(150px,1fr))}}
+@media(max-width:600px){.summary-strip,.filter-grid{grid-template-columns:1fr}.operational-table{min-width:0!important}.operational-table thead{display:none}.operational-table tbody,.operational-table tr,.operational-table td{display:block;width:100%}.operational-table tr{margin:10px;border:1px solid var(--border);border-radius:13px;background:rgba(5,23,38,.62);overflow:hidden}.operational-table td{display:grid;grid-template-columns:105px minmax(0,1fr);gap:10px;align-items:start;padding:9px 11px;border-bottom:1px solid rgba(188,232,248,.10)}.operational-table td:last-child{border-bottom:0}.operational-table td::before{content:attr(data-label);color:#9ecfe0;font-size:11px;font-weight:850;text-transform:uppercase}.operational-table .action-column{width:auto}.operational-table .actions-row{justify-content:flex-start}.table-wrap:has(.operational-table){overflow-x:hidden}.modal{padding:8px}.modalbox{max-height:94vh;padding:16px}}
 </style>
 </head>
 {% set environment_label = (environment_name or '') %}
@@ -262,18 +275,34 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 <main class="card">
 <datalist id="rfBanks">{% for bank in bank_options %}<option value="{{ bank.display_name }}" label="{{ bank.aliases|join(', ') }}" data-code="{{ bank.code }}">{% endfor %}</datalist>
 <datalist id="mobileOperators">{% for operator in mobile_operator_options %}<option value="{{ operator.display_name }}" label="{{ operator.aliases|join(', ') }}" data-code="{{ operator.code }}">{% endfor %}</datalist>
-{% if msg %}<div class="msg">{{ msg }}</div>{% endif %}
 {% for s in sections %}
 {% set section_id = 'wallet' if s == 'Кошелёк' else 'sec' ~ loop.index %}
+{% set ui_scope = '' %}
+{% if s in ['Мои реквизиты','Реквизиты'] %}{% set ui_scope = 'requisites' %}
+{% elif 'Пополн' in s %}{% set ui_scope = 'deposits' %}
+{% elif s == 'Webhook' %}{% set ui_scope = 'webhook' %}
+{% elif s == 'Audit log' %}{% set ui_scope = 'audit' %}
+{% elif 'Risk' in s or 'Контроль рисков' in s %}{% set ui_scope = 'antiscam' %}
+{% elif 'Безопас' in s %}{% set ui_scope = 'security' %}
+{% elif s == 'Rolling' %}{% set ui_scope = 'rolling' %}
+{% elif 'Выплат' in s %}{% set ui_scope = 'payouts' %}
+{% elif 'Мерчант' in s or s == 'Интеграция казино' %}{% set ui_scope = 'merchants' %}
+{% elif s == 'Пользователи' %}{% set ui_scope = 'users' %}
+{% elif 'Создать кабинет' in s %}{% set ui_scope = 'create' %}
+{% elif s == 'TeamLead' %}{% set ui_scope = 'teamlead' %}
+{% elif s in ['Кошелёк','Баланс'] %}{% set ui_scope = 'wallet' %}
+{% elif 'AI-офис' in s %}{% set ui_scope = 'ai-office' %}
+{% endif %}
 <section id="{{ section_id }}" class="section {% if loop.first %}active{% endif %}">
-  <div class="section-head"><h1>{{ s if s != 'Обзор' else title }}</h1></div>
+  <div class="section-head"><h1>{{ 'Контроль рисков' if 'Risk' in s else (s if s != 'Обзор' else title) }}</h1></div>
+  {{ render_ui_message([ui_scope, s]) }}
 
   {% if s == 'Обзор' %}
   <p class="muted">{{ description }}</p>
   <div class="grid">
     <div class="metric"><b>Кабинет</b><p><span class="badge">{{ 'trader' if role in ['operator','trader'] else role }}</span></p></div>
-    <div class="metric"><b>Баланс</b><p>{% if role in ['operator','trader'] %}{{ user.trader_balance }} RUB{% elif balance %}{{ balance.available }} RUB{% else %}0.00 RUB{% endif %}</p></div>
-    <div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ user.trader_hold }} RUB{% elif balance %}{{ balance.frozen }} RUB{% else %}0.00 RUB{% endif %}</p></div>
+    <div class="metric"><b>Баланс</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_balance }} RUB{% elif balance %}{{ balance.available }} RUB{% else %}0.00 RUB{% endif %}</p></div>
+    <div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_hold }} RUB{% elif balance %}{{ balance.frozen }} RUB{% else %}0.00 RUB{% endif %}</p></div>
   </div>
 
   {% elif s == 'Создать кабинет' %}
@@ -652,6 +681,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </table></div>
   {% for t in trader_users %}{% set detail = trader_details.get(t.id|string, {}) %}{% set st = detail.get('stats', trader_stats.get(t.id|string, {})) %}
   <div id="traderModal{{ t.id }}" class="modal" data-commission-modal="trader:{{ t.id }}"><div class="modalbox"><h2>{{ t.email }} <span class="badge">trader</span></h2>
+    {% if trader_preview_urls.get(t.id|string) %}<a class="secondary btn-small" data-preview-trader="{{ t.id }}" href="{{ trader_preview_urls.get(t.id|string) }}">Открыть кабинет Trader</a>{% endif %}
     <div class="detail-grid">
       <div class="detail-card"><b>Баланс</b>{{ t.trader_balance }} RUB</div>
       <div class="detail-card"><b>Доступно</b>{{ st.get('available','0.00') }} RUB</div>
@@ -713,11 +743,17 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% endfor %}
   {% elif s == 'Мои реквизиты' %}
   <div class="section-head"><span></span><button class="primary" type="button" data-modal-open="addRequisiteModal">Добавить реквизит</button></div>
-  <div class="table-wrap requisites-table"><table><tr><th>Метод</th><th>Реквизит</th><th>Банк/Оператор</th><th>ФИО</th><th>Лимиты</th><th>Статус</th><th>Управление</th></tr>
+  <div class="table-wrap requisites-table"><table class="operational-table"><thead><tr><th>Реквизит</th><th>Банк и владелец</th><th>Лимиты</th><th>Статус</th><th class="action-column">Действия</th></tr></thead><tbody>
   {% for r in trader_requisites.get(user.id|string, []) if r.status != 'deleted' %}{% set rid = r.id|string %}
-  <tr><td><span class="badge">{{ r.method|payment_method_label }}</span></td><td><span class="cell-mono cell-ellipsis" title="{{ requisite_values.get(rid, '') }}">{{ requisite_values.get(rid, '') }}</span></td><td><div class="cell-stack"><span class="cell-label">{{ provider_label(r.method) }}</span><span class="cell-value cell-ellipsis" title="{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}">{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}</span></div></td><td>{{ r.full_name or r.owner_name }}</td><td><span class="text-amount">{{ r.daily_limit }} RUB</span><div class="compact-note">чек {{ r.min_check }}-{{ r.max_check }} · {{ r.request_count }}/{{ r.timeframe }} · одновременно {{ r.simultaneous_limit }}</div></td><td>{% if r.enabled and r.status == 'active' %}<span class="status-pill status-ok">Включен</span>{% elif r.status == 'review' %}<span class="status-pill status-wait">Проверка</span>{% else %}<span class="status-pill status-bad">Выключен</span>{% endif %}</td><td><div class="actions-row"><button class="secondary btn-small" type="button" data-modal-open="editReq{{ r.id }}">Редактировать</button><form method="post" action="{{ cabinet_base }}/requisites/{{ r.id }}/toggle" data-confirm="{{ 'Выключить реквизит?' if r.enabled else 'Включить реквизит?' }}">{{ csrf_input(request) }}<button class="secondary btn-small" type="submit">{{ 'Выключить' if r.enabled else 'Включить' }}</button></form><form method="post" action="{{ cabinet_base }}/requisites/{{ r.id }}/delete" data-confirm="Удалить реквизит?">{{ csrf_input(request) }}<button class="dangerbtn btn-small" type="submit">Удалить</button></form></div></td></tr>
-  {% else %}<tr><td colspan="7">Реквизитов пока нет</td></tr>{% endfor %}
-  </table></div>
+  <tr>
+    <td data-label="Реквизит"><div class="requisite-main"><span class="badge">{{ r.method|payment_method_label }}</span><span class="cell-mono cell-ellipsis" title="{{ requisite_values.get(rid, '') }}">{{ requisite_values.get(rid, '') }}</span><button class="secondary icon-copy" type="button" data-copy-value="{{ requisite_values.get(rid, '') }}">Copy</button></div></td>
+    <td data-label="Банк и владелец"><div class="cell-stack"><span class="cell-value cell-ellipsis" title="{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}">{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}</span><span class="cell-muted cell-ellipsis" title="{{ r.full_name or r.owner_name }}">{{ r.full_name or r.owner_name }}</span></div></td>
+    <td data-label="Лимиты"><div class="limit-lines"><span>На операцию: {{ r.min_check|money_rub }}–{{ r.max_check|money_rub }}</span><span>В сутки: {{ r.daily_limit|money_rub }} · {{ r.operation_limit }} операций</span><span>Одновременно: {{ r.simultaneous_limit }} заявка{% if r.simultaneous_limit != 1 %}и{% endif %}</span></div></td>
+    <td data-label="Статус">{% if r.enabled and r.status == 'active' %}<span class="status-pill status-ok">Включён</span>{% elif r.status == 'review' %}<span class="status-pill status-wait">На проверке</span>{% else %}<span class="status-pill status-neutral">Выключен</span>{% endif %}</td>
+    <td data-label="Действия" class="action-column"><details class="action-menu"><summary class="secondary btn-small">•••</summary><div class="actions-stack"><button class="secondary btn-small" type="button" data-modal-open="editReq{{ r.id }}">Редактировать</button><form method="post" action="{{ cabinet_base }}/requisites/{{ r.id }}/toggle" data-confirm="{{ 'Выключить реквизит?' if r.enabled else 'Включить реквизит?' }}">{{ csrf_input(request) }}<button class="secondary btn-small" type="submit">{{ 'Выключить' if r.enabled else 'Включить' }}</button></form><form method="post" action="{{ cabinet_base }}/requisites/{{ r.id }}/delete" data-confirm="Реквизит перестанет участвовать в новых заявках. Запись сохранится в истории.">{{ csrf_input(request) }}<button class="dangerbtn btn-small" type="submit">Удалить</button></form></div></details></td>
+  </tr>
+  {% else %}<tr><td colspan="5" class="table-empty">Активных реквизитов пока нет</td></tr>{% endfor %}
+  </tbody></table></div>
   {% for r in trader_requisites.get(user.id|string, []) if r.status != 'deleted' %}{% set rid = r.id|string %}
   <div id="editReq{{ r.id }}" class="modal"><div class="modalbox"><h2>Редактировать реквизит</h2>{% include "requisite_form.html" ignore missing %}<form method="post" action="{{ cabinet_base }}/requisites/{{ r.id }}/edit" data-confirm="Сохранить изменения реквизита?">{{ csrf_input(request) }}
     <div class="row"><div><label>Метод</label><select name="method" data-payment-method-select>{% for method in payment_method_options %}<option value="{{ method.value }}" {% if r.method == method.value or (r.method == 'mobile' and method.value == 'mobile_commerce') %}selected{% endif %}>{{ method.label }}</option>{% endfor %}</select></div><div data-bank-provider-field><label>Банк</label><input name="bank_code" value="{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) if r.method not in ['mobile','mobile_commerce'] else '' }}" list="rfBanks" autocomplete="off" placeholder="Начните вводить название банка" data-bank-autocomplete data-bank-legacy-value="{{ r.bank_name if r.method not in ['mobile','mobile_commerce'] else '' }}"></div><div data-operator-provider-field hidden><label>Оператор связи</label><input name="operator_code" value="{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) if r.method in ['mobile','mobile_commerce'] else '' }}" list="mobileOperators" autocomplete="off" placeholder="Выберите оператора связи" data-operator-autocomplete data-operator-legacy-value="{{ r.bank_name if r.method in ['mobile','mobile_commerce'] else '' }}"></div></div>
@@ -748,6 +784,73 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </form></div></div>
 
   {% elif 'Пополн' in s %}
+  {% if role in ['operator','trader'] %}
+  {% set deposit_view = deposit_filters.get('view','active') %}
+  {% set deposit_auto_poll = role == user.role or trader_preview_active %}
+  {% set deposit_page_url = cabinet_base if role == user.role else cabinet_base ~ '/' ~ role %}
+  <div class="operational-toolbar">
+    <div class="operational-tabs" aria-label="Раздел заявок">
+      <a class="{{ 'active' if deposit_view == 'active' else '' }}" href="{{ deposit_page_url }}?{{ request.url.include_query_params(view='active', status='').query }}">Активные {{ deposit_aggregates.get('active_count',0) }}</a>
+      <a class="{{ 'active' if deposit_view == 'history' else '' }}" href="{{ deposit_page_url }}?{{ request.url.include_query_params(view='history', status='').query }}">История {{ deposit_aggregates.get('history_count',0) }}</a>
+    </div>
+    {% if not deposit_auto_poll %}<a class="secondary btn-small" href="{{ deposit_page_url }}{% if request.url.query %}?{{ request.url.query }}{% endif %}#{{ section_id }}">Обновить</a>{% endif %}
+  </div>
+  <div class="summary-strip">
+    <div class="summary-item"><b>Активные</b><strong>{{ deposit_aggregates.get('active_count',0) }}</strong></div>
+    <div class="summary-item"><b>Истекают до 5 минут</b><strong class="{{ 'danger' if deposit_aggregates.get('urgent_count',0) else '' }}">{{ deposit_aggregates.get('urgent_count',0) }}</strong></div>
+    <div class="summary-item"><b>Оплачено сегодня, UTC</b><strong>{{ deposit_aggregates.get('paid_today_count',0) }}</strong></div>
+    <div class="summary-item"><b>Сумма сегодня, UTC</b><strong>{{ deposit_aggregates.get('paid_today_amount',0)|money_rub }}</strong></div>
+  </div>
+  <form class="panel compact-filter" method="get" action="{{ deposit_page_url }}">
+    <input type="hidden" name="view" value="{{ deposit_view }}">
+    <div class="search-field"><label>Поиск</label><input name="deposit_query" value="{{ deposit_filters.get('query','') }}" placeholder="ID, external ID или реквизит"></div>
+    <button class="primary" type="submit">Найти</button>
+    <a class="secondary reset-link" href="{{ deposit_page_url }}?view={{ deposit_view }}">Сбросить</a>
+    <details class="filter-disclosure" {% if deposit_filters.get('amount') or deposit_filters.get('date') or deposit_filters.get('bank_code') or deposit_filters.get('payment_method') or deposit_filters.get('status') or deposit_filters.get('requisite') %}open{% endif %}>
+      <summary>Фильтры</summary>
+      <div class="filter-grid">
+        <label>Сумма<input name="deposit_amount" type="number" min="0.01" step="0.01" value="{{ deposit_filters.get('amount','') }}"></label>
+        <label>Дата, UTC<input name="deposit_date" type="date" value="{{ deposit_filters.get('date','') }}"></label>
+        <label>Банк<select name="bank_code"><option value="">Все банки</option>{% for bank in bank_options %}<option value="{{ bank.code }}" {% if deposit_filters.get('bank_code') == bank.code %}selected{% endif %}>{{ bank.display_name }}</option>{% endfor %}</select></label>
+        <label>Метод<select name="payment_method"><option value="">Все методы</option>{% for method in payment_method_options %}<option value="{{ method.value }}" {% if deposit_filters.get('payment_method') == method.value %}selected{% endif %}>{{ method.label }}</option>{% endfor %}</select></label>
+        <label>Статус<select name="status"><option value="">Все статусы</option>{% for status in (deposit_active_statuses if deposit_view == 'active' else deposit_terminal_statuses) %}<option value="{{ status }}" {% if deposit_filters.get('status') == status %}selected{% endif %}>{{ status|deposit_status_label }}</option>{% endfor %}</select></label>
+        <label>Реквизит<input name="deposit_requisite" value="{{ deposit_filters.get('requisite','') }}" placeholder="Телефон, карта, банк или ФИО"></label>
+      </div>
+    </details>
+  </form>
+  {% if deposit_view == 'active' %}
+  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Осталось</th><th>Сумма</th><th>Банк и метод</th><th>Реквизит / получатель</th><th>Статус</th><th class="action-column">Действие</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="active" data-refresh-url="{{ deposit_refresh_url }}" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
+  {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
+  <tr>
+    <td data-label="Осталось"><span class="timer {{ 'timer-urgent' if dd.get('remaining_seconds',0) < 300 else ('timer-warning' if dd.get('remaining_seconds',0) < 600 else '') }}" data-countdown="{{ dd.get('remaining_seconds',0) }}">{{ '%02d:%02d'|format((dd.get('remaining_seconds',0)//60), (dd.get('remaining_seconds',0)%60)) }}</span></td>
+    <td data-label="Сумма"><span class="text-amount">{{ d.amount|money_rub }}</span></td>
+    <td data-label="Банк и метод"><div class="cell-stack"><span class="cell-main">{{ dd.get('provider_name') or dd.get('bank') or '—' }}</span><span class="cell-badge">{{ d.method|payment_method_label }}</span></div></td>
+    <td data-label="Реквизит / получатель"><div class="cell-stack"><div class="copy-line"><span class="cell-mono cell-ellipsis" title="{{ dd.get('requisite') or '—' }}">{{ dd.get('requisite') or '—' }}</span><button class="secondary icon-copy" type="button" data-copy-value="{{ dd.get('requisite') or '' }}">Copy</button></div><span class="cell-muted cell-ellipsis" title="{{ dd.get('receiver_name') or '—' }}">{{ dd.get('receiver_name') or '—' }}</span></div></td>
+    <td data-label="Статус"><span class="status-pill status-wait">{{ d.status|deposit_status_label }}</span></td>
+    <td data-label="Действие" class="action-column"><div class="actions-row"><button class="secondary btn-small details-button" type="button" data-modal-open="depositDetail{{ d.id }}">Подробнее</button>{% if dd.get('can_process') %}<form method="post" action="{{ cabinet_base }}/deposits/{{ d.id }}/confirm" data-confirm="Принять пополнение {{ d.amount }} {{ d.currency }}?">{{ csrf_input(request) }}<button class="primary btn-small" type="submit">Обработать</button></form>{% endif %}</div></td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="table-empty">Активных заявок нет</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}
+  <div class="table-wrap trader-table"><table class="operational-table"><thead><tr><th>Дата</th><th>Сумма</th><th>Банк и метод</th><th>Результат</th><th>Причина</th><th class="action-column">Подробнее</th></tr></thead><tbody id="depositRows" data-partial-kind="trader-deposits" data-view="history" data-refresh-url="{{ deposit_refresh_url }}" data-auto-poll="{{ 'true' if deposit_auto_poll else 'false' }}">
+  {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
+  <tr>
+    <td data-label="Дата"><span class="text-date" title="{{ d.updated_at|dt_full }}">{{ d.updated_at|dt_compact }}</span></td>
+    <td data-label="Сумма"><span class="text-amount">{{ d.amount|money_rub }}</span></td>
+    <td data-label="Банк и метод"><div class="cell-stack"><span class="cell-main">{{ dd.get('provider_name') or dd.get('bank') or '—' }}</span><span class="cell-badge">{{ d.method|payment_method_label }}</span></div></td>
+    <td data-label="Результат"><span class="status-pill {{ 'status-ok' if d.status == 'paid' else ('status-bad' if d.status in ['failed','expired','cancelled'] else 'status-neutral') }}">{{ d.status|deposit_status_label }}</span></td>
+    <td data-label="Причина">{{ dd.get('failure_reason','')|failure_reason_label }}</td>
+    <td data-label="Подробнее" class="action-column"><button class="secondary btn-small details-button" type="button" data-modal-open="depositDetail{{ d.id }}">Подробнее</button></td>
+  </tr>
+  {% else %}<tr><td colspan="6" class="table-empty">История пока пуста</td></tr>{% endfor %}
+  </tbody></table></div>
+  {% endif %}
+  {% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
+  <div id="depositDetail{{ d.id }}" class="modal"><div class="modalbox"><div class="modal-title-row"><h2>Заявка {{ d.external_id|short_identifier }}</h2><button class="secondary" type="button" data-modal-close="depositDetail{{ d.id }}">Закрыть</button></div>
+    <div class="detail-grid"><div class="detail-card"><b>Deposit ID</b><div class="copy-line"><span class="cell-mono cell-ellipsis" title="{{ d.id }}">{{ d.id }}</span><button class="secondary icon-copy" type="button" data-copy-value="{{ d.id }}">Copy</button></div></div><div class="detail-card"><b>External ID</b><div class="copy-line"><span class="cell-mono cell-ellipsis" title="{{ d.external_id }}">{{ d.external_id }}</span><button class="secondary icon-copy" type="button" data-copy-value="{{ d.external_id }}">Copy</button></div></div><div class="detail-card"><b>Создана</b>{{ d.created_at|dt_compact }}</div><div class="detail-card"><b>Истекает</b>{{ d.expires_at|dt_compact }}</div><div class="detail-card"><b>Метод</b>{{ d.method|payment_method_label }}</div><div class="detail-card"><b>Банк</b>{{ dd.get('provider_name') or dd.get('bank') or '—' }}</div><div class="detail-card"><b>Реквизит</b><span class="cell-mono cell-wrap">{{ dd.get('requisite') or '—' }}</span></div><div class="detail-card"><b>Получатель</b>{{ dd.get('receiver_name') or '—' }}</div><div class="detail-card"><b>Статус</b>{{ d.status|deposit_status_label }}</div><div class="detail-card"><b>Raw status / reason</b><span class="cell-mono">{{ d.status }} / {{ dd.get('failure_reason') or '—' }}</span></div><div class="detail-card"><b>Списание трейдера</b>{{ dd.get('trader_settlement','—') }} RUB</div><div class="detail-card"><b>Доход трейдера</b>{{ dd.get('trader_profit','—') }} RUB</div></div>
+  </div></div>
+  {% endfor %}
+  {% else %}
   <form class="panel" method="get" action="{{ cabinet_base }}">
     <div class="row">
       <div><label>ID заявки</label><input name="deposit_query" value="{{ deposit_filters.get('query','') }}" placeholder="ID или external ID"></div>
@@ -767,6 +870,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   <tr><td><span class="cell-mono cell-ellipsis" title="{{ d.id }}">{{ d.id }}</span></td>{% if role not in ['operator','trader'] %}<td><span class="cell-mono cell-ellipsis" title="{{ d.external_id }}">{{ d.external_id }}</span></td>{% endif %}{% if role == 'merchant' %}<td><span class="cell-ellipsis" title="{{ dd.get('trader_email') or '—' }}">{{ dd.get('trader_email') or '—' }}</span></td>{% endif %}<td><span class="text-amount">{{ d.amount }} {{ d.currency }}</span></td><td><span class="badge">{{ d.method|payment_method_label }}</span></td><td><span class="cell-mono cell-ellipsis" title="{{ dd.get('requisite') or '—' }}">{{ dd.get('requisite') or '—' }}</span></td><td><div class="cell-stack"><span class="cell-label">{{ dd.get('provider_label') or 'Банк' }}</span><span class="cell-value cell-ellipsis" title="{{ dd.get('provider_name') or dd.get('bank') or '—' }}">{{ dd.get('provider_name') or dd.get('bank') or '—' }}</span></div></td><td><span class="cell-ellipsis" title="{{ dd.get('receiver_name') or '—' }}">{{ dd.get('receiver_name') or '—' }}</span></td><td>{% if dd.get('is_active') %}<span class="timer" data-countdown="{{ dd.get('remaining_seconds',0) }}">{{ '%02d:%02d'|format((dd.get('remaining_seconds',0)//60), (dd.get('remaining_seconds',0)%60)) }}</span>{% else %}<span class="muted">—</span>{% endif %}</td><td>{% if d.status in ['paid','completed'] %}<span class="status-pill status-ok">{{ d.status }}</span>{% elif d.status in ['created','pending','processing','appeal_opened'] %}<span class="status-pill status-wait">{{ d.status }}</span>{% elif d.status in ['failed','expired','cancelled','canceled'] %}<span class="status-pill status-bad">{{ d.status }}</span>{% else %}<span class="status-pill status-neutral">{{ d.status }}</span>{% endif %}</td><td>{% if role in ['operator','trader','admin','superadmin'] and d.status in ['created','pending','appeal_opened'] %}<div class="actions deposit-actions"><form method="post" action="{{ cabinet_base }}/deposits/{{ d.id }}/confirm" data-confirm="Принять пополнение {{ d.amount }} {{ d.currency }}?">{{ csrf_input(request) }}<button class="primary" type="submit">Принять</button></form>{% if role in ['admin','superadmin'] %}<form method="post" action="{{ cabinet_base }}/deposits/{{ d.id }}/decline" data-confirm="Отклонить пополнение?">{{ csrf_input(request) }}<input name="reason" required maxlength="400" placeholder="Причина отклонения"><button class="dangerbtn" type="submit">Отклонить</button></form>{% endif %}</div>{% elif role in ['operator','trader','admin','superadmin'] %}<span class="muted">обработано</span>{% else %}<span class="muted">просмотр</span>{% endif %}</td></tr>
   {% else %}<tr><td colspan="{{ 9 if role in ['operator','trader'] else (11 if role == 'merchant' else 10) }}">Пока нет заявок</td></tr>{% endfor %}
   </table></div>
+  {% endif %}
   {% elif s == 'Статистика' and role == 'merchant' %}
   <div class="detail-grid">
     <div class="detail-card"><b>Общий оборот</b>{{ merchant_stats.get('total_turnover','0.00') }} RUB</div>
@@ -923,19 +1027,49 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </table></div>
 
   {% elif s == 'Webhook' %}
-  <div class="table-wrap"><table><tr><th>Дата</th><th>Событие</th><th>Статус</th><th>Попытки</th><th>Payload</th><th>Ошибка</th><th>Действие</th></tr>
-  {% for ev in webhook_events %}
+  <div class="table-wrap"><table class="operational-table webhook-table"><tr><th>Дата</th><th>Событие</th><th>Объект</th><th>Статус</th><th>Попытки</th><th>Последняя ошибка</th><th class="action-column">Подробнее</th></tr>
+  {% for ev in webhook_event_views %}
   <tr>
     <td><span class="text-date" title="{{ ev.created_at|dt_full }}">{{ ev.created_at|dt_compact }}</span></td>
-    <td><b>{{ ev.event_type }}</b><div class="cell-mono cell-ellipsis" title="{{ ev.id }}">{{ ev.id }}</div></td>
-    <td>{% if ev.status == 'delivered' %}<span class="status-pill status-ok">delivered</span>{% elif ev.status in ['queued','pending','retry'] %}<span class="status-pill status-wait">{{ ev.status }}</span>{% elif ev.status == 'failed' %}<span class="status-pill status-bad">failed</span>{% else %}<span class="status-pill status-neutral">{{ ev.status }}</span>{% endif %}</td>
-    <td>{{ ev.attempts }}</td>
-    <td class="cell-wrap">{{ ev.payload }}</td>
+    <td><b class="cell-ellipsis" title="{{ ev.event_type }}">{{ ev.event_type }}</b><div class="cell-mono cell-ellipsis" title="{{ ev.id }}">{{ ev.id|short_identifier }}</div></td>
+    <td><div class="cell-stack"><span class="cell-main">{{ ev.object_type }}</span><span class="cell-muted cell-ellipsis" title="{{ ev.external_id or '—' }}">{{ ev.external_id_short or '—' }}</span>{% if ev.amount %}<span class="cell-muted">{{ ev.amount }} {{ ev.currency }}</span>{% endif %}</div></td>
+    <td><span class="status-pill {{ ev.status_class }}">{{ ev.status_label }}</span></td>
+    <td>{{ ev.attempt_count }}</td>
     <td class="cell-wrap">{{ ev.last_error or '—' }}</td>
-    <td>{% if role == 'superadmin' and ev.status != 'delivered' %}<form method="post" action="{{ cabinet_base }}/webhooks/{{ ev.id }}/retry" data-confirm="Запросить ручную повторную доставку этого event_id?">{{ csrf_input(request) }}<button class="secondary btn-small" type="submit">Retry</button></form>{% else %}—{% endif %}</td>
+    <td class="action-column"><button class="secondary btn-small details-button" type="button" data-modal-open="webhookDetail{{ ev.id }}">Подробнее</button></td>
   </tr>
   {% else %}<tr><td colspan="7">Webhook-событий пока нет</td></tr>{% endfor %}
   </table></div>
+  {% for ev in webhook_event_views %}
+  <div id="webhookDetail{{ ev.id }}" class="modal"><div class="modalbox modalbox-wide">
+    <div class="section-head"><h2>Webhook · {{ ev.event_type }}</h2><span class="status-pill {{ ev.status_class }}">{{ ev.status_label }}</span></div>
+    <div class="detail-grid">
+      <div class="detail-card"><b>Event ID</b><span class="cell-mono cell-wrap">{{ ev.id }}</span></div>
+      <div class="detail-card"><b>Correlation ID</b><span class="cell-mono cell-wrap">{{ ev.correlation_id or '—' }}</span></div>
+      <div class="detail-card"><b>Объект</b>{{ ev.object_type }} · {{ ev.external_id or '—' }}</div>
+      <div class="detail-card"><b>Создано</b>{{ ev.created_at|dt_full }}</div>
+      <div class="detail-card"><b>Попытки</b>{{ ev.attempt_count }}</div>
+      <div class="detail-card"><b>Последний HTTP status</b>{{ ev.last_status_code or '—' }}</div>
+    </div>
+    <h3>Payload</h3>
+    <pre class="technical-json">{{ ev.payload_json }}</pre>
+    <h3>История попыток</h3>
+    <div class="attempt-list">
+      {% for attempt in ev.attempts %}
+      <div class="attempt-card">
+        <div class="attempt-head"><b>Попытка {{ attempt.attempt_no }}</b><span class="status-pill {{ attempt.status|webhook_status_class }}">{{ attempt.status|webhook_status_label }}</span></div>
+        <div class="detail-grid"><div class="detail-card"><b>HTTP status</b>{{ attempt.status_code or '—' }}</div><div class="detail-card"><b>Создано</b>{{ attempt.created_at|dt_full if attempt.created_at else '—' }}</div><div class="detail-card"><b>Обновлено</b>{{ attempt.updated_at|dt_full if attempt.updated_at else '—' }}</div></div>
+        {% if attempt.error %}<div class="note"><b>Ошибка</b><div class="cell-wrap">{{ attempt.error }}</div></div>{% endif %}
+        {% if attempt.response_snippet %}<pre class="technical-json">{{ attempt.response_snippet }}</pre>{% endif %}
+      </div>
+      {% else %}<div class="table-empty">Попыток доставки пока нет</div>{% endfor %}
+    </div>
+    <div class="modal-actions">
+      {% if role == 'superadmin' and ev.status != 'delivered' %}<form method="post" action="{{ cabinet_base }}/webhooks/{{ ev.id }}/retry" data-confirm="Запросить ручную повторную доставку этого event_id?">{{ csrf_input(request) }}<button class="secondary" type="submit">Повторить доставку</button></form>{% endif %}
+      <button class="secondary" type="button" data-modal-close="webhookDetail{{ ev.id }}">Закрыть</button>
+    </div>
+  </div></div>
+  {% endfor %}
 
   {% elif s == 'Апелляции' %}
   {% if role == 'merchant' %}
@@ -1230,7 +1364,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </div>
   {% endif %}
   {% if s == 'Баланс' %}
-  <div class="grid"><div class="metric"><b>Доступно</b><p>{% if role in ['operator','trader'] %}{{ user.trader_balance }}{% else %}{{ balance.available if balance else '0.00' }}{% endif %} RUB</p></div><div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ user.trader_hold }}{% else %}{{ balance.frozen if balance else '0.00' }}{% endif %} RUB</p></div></div>
+  <div class="grid"><div class="metric"><b>Доступно</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_balance }}{% else %}{{ balance.available if balance else '0.00' }}{% endif %} RUB</p></div><div class="metric"><b>Холд</b><p>{% if role in ['operator','trader'] %}{{ trader_display_user.trader_hold }}{% else %}{{ balance.frozen if balance else '0.00' }}{% endif %} RUB</p></div></div>
   {% endif %}
   {% endif %}
   {% elif s == 'Интеграция с AI-офисом' %}
@@ -1247,20 +1381,11 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     <div class="detail-card"><b>Last success</b>{{ ai.last_success_at|dt_full if ai.last_success_at else '—' }}</div>
   </div>
   {% if ai.last_error_code %}<div class="note"><b>{{ ai.last_error_code }}</b>: {{ ai.last_error_message_redacted }}</div>{% endif %}
-  <form method="post" action="{{ cabinet_base }}/ai-office/config" class="panel" data-confirm="Сохранить настройки AI Office без запуска интеграции?">
+  <form method="post" action="{{ cabinet_base }}/ai-office/config" class="panel" data-ui-form-id="ai-office" data-confirm="Сохранить настройки AI Office без запуска интеграции?">
     {{ csrf_input(request) }}
     <h3>Настройки подключения</h3>
     <label><input class="check-inline" type="checkbox" name="enabled" {% if ai.enabled %}checked{% endif %}> Enabled</label>
-    {% set ai_activation_error = request.query_params.get('msg', '') %}
-    {% if ai_activation_error == 'ai_office_m2m_auth_required' %}
-    <div class="note" data-ai-office-activation-error>Выберите обязательный M2M Auth type и настройте соответствующий credential перед включением интеграции.</div>
-    {% elif ai_activation_error == 'ai_office_credential_required' %}
-    <div class="note" data-ai-office-activation-error>Добавьте credential для выбранного M2M Auth type перед включением интеграции.</div>
-    {% elif ai_activation_error == 'ai_office_production_activation_not_available' %}
-    <div class="note" data-ai-office-activation-error>Production activation недоступна, пока не выполнены обязательные условия безопасного подключения.</div>
-    {% else %}
     <div data-ai-office-activation-error hidden></div>
-    {% endif %}
     <div class="row">
       <div><label>Environment</label><select name="environment">{% for env_name in ['local','staging','production'] %}<option value="{{ env_name }}" {% if ai.environment == env_name %}selected{% endif %}>{{ env_name }}</option>{% endfor %}</select></div>
       <div><label>Auth type</label><select name="auth_type">{% for auth_name in ['none','bearer','api_key','hmac'] %}<option value="{{ auth_name }}" {% if ai.auth_type == auth_name %}selected{% endif %}>{{ auth_name }}</option>{% endfor %}</select></div>
@@ -1305,12 +1430,12 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   {% set gs = antiscam.get('global_settings') %}
   <div class="risk-tabs">
     <a href="#risk-global">Общие настройки</a>
-    <a href="#risk-traders">Настройки трейдеров</a>
-    <a href="#risk-requisites">Настройки реквизитов</a>
-    <a href="#risk-pauses">Активные автоотключения</a>
-    <a href="#risk-events">Risk events</a>
-    <a href="#risk-decisions">Audit log / решения</a>
-    <a href="#risk-audit">Audit events</a>
+    <a href="#risk-traders">Трейдеры</a>
+    <a href="#risk-requisites">Реквизиты</a>
+    <a href="#risk-pauses">Приостановления</a>
+    <a href="#risk-events">События риска</a>
+    <a href="#risk-decisions">История решений</a>
+    <a href="#risk-audit">Аудит</a>
   </div>
 
   <div id="risk-global" class="panel">
@@ -1410,9 +1535,20 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   </div></div>
   {% endfor %}
 
-  <h3 id="risk-requisites">Настройки реквизитов</h3>
-  <div class="table-wrap"><table>
-    <tr><th>Реквизит</th><th>Трейдер</th><th>Банк/Оператор</th><th>Метод</th><th>Risk</th><th>Конверсия 1ч/24ч</th><th>Failed</th><th>Статус</th><th>Действие</th></tr>
+  <h3 id="risk-requisites">Реквизиты</h3>
+  <form class="panel compact-filter" method="get" action="{{ cabinet_base }}">
+    <input type="hidden" name="section" value="antiscam">
+    <div class="search-field"><label>Поиск по реквизиту</label><input name="risk_query" value="{{ risk_filters.get('query','') }}" placeholder="Значение или ID реквизита"></div>
+    <button class="primary" type="submit">Найти</button><a class="secondary reset-link" href="{{ cabinet_base }}?section=antiscam#risk-requisites">Сбросить</a>
+    <details class="filter-disclosure" {% if risk_filters.get('trader_id') or risk_filters.get('bank_code') or risk_filters.get('payment_method') or risk_filters.get('state') %}open{% endif %}><summary>Фильтры</summary><div class="filter-grid">
+      <label>Трейдер<select name="risk_trader_id"><option value="">Все трейдеры</option>{% for t in antiscam.get('traders', []) %}<option value="{{ t.id }}" {% if risk_filters.get('trader_id') == t.id|string %}selected{% endif %}>{{ t.email }}</option>{% endfor %}</select></label>
+      <label>Банк<select name="risk_bank_code"><option value="">Все банки</option>{% for bank in bank_options %}<option value="{{ bank.code }}" {% if risk_filters.get('bank_code') == bank.code %}selected{% endif %}>{{ bank.display_name }}</option>{% endfor %}</select></label>
+      <label>Метод<select name="risk_payment_method"><option value="">Все методы</option>{% for method in payment_method_options %}<option value="{{ method.value }}" {% if risk_filters.get('payment_method') == method.value %}selected{% endif %}>{{ method.label }}</option>{% endfor %}</select></label>
+      <label>Состояние<select name="risk_state"><option value="">Все состояния</option>{% for state in ['active','under_review','reinstated_limited','auto_paused','manual_paused','reinstated_full','blocked'] %}<option value="{{ state }}" {% if risk_filters.get('state') == state %}selected{% endif %}>{{ state|traffic_status_label }}</option>{% endfor %}</select></label>
+    </div></details>
+  </form>
+  <div class="table-wrap"><table class="operational-table risk-requisites-table">
+    <tr><th>Реквизит</th><th>Трейдер</th><th>Банк / метод</th><th>Использование лимита</th><th>Risk-метрики</th><th>Состояние</th><th class="action-column">Действие</th></tr>
     {% for r in antiscam.get('requisites', []) %}
     {% set st = antiscam.get('requisite_stats', {}).get(r.id|string) %}
     {% set st24 = antiscam.get('requisite_stats_24h', {}).get(r.id|string) %}
@@ -1420,26 +1556,28 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
     {% set score = r.risk_score or 0 %}
     {% set rclass = 'risk-critical' if score >= 86 else ('risk-high' if score >= 71 else ('risk-warning' if score >= 31 else 'risk-normal')) %}
     <tr>
-      <td><span class="cell-mono cell-ellipsis" title="{{ requisite_values.get(r.id|string, '—') }}">{{ requisite_values.get(r.id|string, '—') }}</span><div class="compact-note cell-mono cell-ellipsis" title="{{ r.id }}">{{ r.id }}</div></td>
+      <td><div class="requisite-main"><span class="cell-mono cell-ellipsis" title="{{ requisite_values.get(r.id|string, '—') }}">{{ requisite_values.get(r.id|string, '—') }}</span><button class="secondary icon-copy" type="button" data-copy-value="{{ requisite_values.get(r.id|string, '') }}">Copy</button></div><div class="compact-note cell-mono">{{ r.id|short_identifier }}</div></td>
       <td>{{ trader_email_map.get(r.trader_id|string, r.trader_id or '—') }}</td>
-      <td><div class="cell-stack"><span class="cell-label">{{ provider_label(r.method) }}</span><span class="cell-value cell-ellipsis" title="{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}">{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}</span></div></td>
-      <td><span class="badge">{{ r.method|payment_method_label }}</span></td>
-      <td><span class="risk-badge {{ rclass }}">{{ score }}/100</span></td>
-      <td>{{ st.conversion_percent if st else '0.00' }}% / {{ st24.conversion_percent if st24 else '0.00' }}%</td>
-      <td>{{ r.failed_in_row or 0 }}</td>
-      <td><span class="status-pill {% if r.traffic_status in ['active','reinstated_full'] and r.enabled %}status-ok{% elif r.traffic_status == 'reinstated_limited' %}status-wait{% else %}status-bad{% endif %}">{{ r.traffic_status }}</span></td>
-      <td>
-        <div class="actions-row">
-          <button class="secondary btn-small" type="button" data-modal-open="riskReqSettings{{ r.id }}">Settings</button>
-          <form method="post" action="{{ cabinet_base }}/antiscam/requisites/{{ r.id }}/pause" data-confirm="Поставить реквизит на паузу?">{{ csrf_input(request) }}<button class="secondary" type="submit">Pause</button></form>
-          <button class="primary btn-small" type="button" data-modal-open="riskReqRestore{{ r.id }}">Restore</button>
-        </div>
-      </td>
+      <td><div class="cell-stack"><span class="cell-main cell-ellipsis" title="{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}">{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }}</span><span class="cell-badge">{{ r.method|payment_method_label }}</span></div></td>
+      <td><div class="limit-lines"><span>Активные: {{ st.active_payments if st else 0 }} из {{ r.simultaneous_limit }}</span><span>Лимит операций: {{ r.operation_limit }}</span></div>{% if r.simultaneous_limit %}<progress class="risk-progress-meter" max="100" value="{{ [100, ((st.active_payments if st else 0) * 100 / r.simultaneous_limit)|round(0, 'floor')]|min }}" aria-label="Загрузка реквизита"></progress>{% endif %}</td>
+      <td><div class="limit-lines"><span><b>{{ score }} из 100</b></span><span>Конверсия: {{ st.conversion_percent if st else '0.00' }}% / {{ st24.conversion_percent if st24 else '0.00' }}%</span><span>Ошибок подряд: {{ r.failed_in_row or 0 }}</span></div><progress class="risk-progress-meter {{ rclass }}" max="100" value="{{ score }}" aria-label="Риск реквизита"></progress></td>
+      <td><span class="status-pill {{ r.traffic_status|traffic_status_class }}">{{ r.traffic_status|traffic_status_label }}</span>{% if not r.enabled %}<div class="compact-note">Реквизит выключен</div>{% endif %}</td>
+      <td class="action-column"><button class="secondary btn-small details-button" type="button" data-modal-open="riskReqDetail{{ r.id }}">Подробнее</button></td>
     </tr>
-    {% else %}<tr><td colspan="9">Реквизитов пока нет</td></tr>{% endfor %}
+    {% else %}<tr><td colspan="7">Реквизитов по выбранным условиям нет</td></tr>{% endfor %}
   </table></div>
   {% for r in antiscam.get('requisites', []) %}
   {% set rs = antiscam.get('requisite_settings', {}).get(r.id|string) %}
+  {% set st = antiscam.get('requisite_stats', {}).get(r.id|string) %}
+  {% set st24 = antiscam.get('requisite_stats_24h', {}).get(r.id|string) %}
+  {% set current_event = namespace(reason='—') %}{% for event in antiscam.get('events', []) if event.target_type == 'requisite' and event.target_id|string == r.id|string %}{% if current_event.reason == '—' %}{% set current_event.reason = event.reason or '—' %}{% endif %}{% endfor %}
+  <div id="riskReqDetail{{ r.id }}" class="modal"><div class="modalbox modalbox-wide">
+    <div class="modal-title-row"><h2>Реквизит {{ r.id|short_identifier }}</h2><button class="secondary" type="button" data-modal-close="riskReqDetail{{ r.id }}">Закрыть</button></div>
+    <div class="detail-grid"><div class="detail-card"><b>Реквизит</b><span class="cell-mono cell-wrap">{{ requisite_values.get(r.id|string, '—') }}</span></div><div class="detail-card"><b>Банк и метод</b>{{ provider_display(r.method, r.bank_code, r.operator_code, r.bank_name) or '—' }} · {{ r.method|payment_method_label }}</div><div class="detail-card"><b>Трейдер</b>{{ trader_email_map.get(r.trader_id|string, r.trader_id or '—') }}</div><div class="detail-card"><b>Доступность</b>{{ 'Включён' if r.enabled else 'Выключен' }}</div><div class="detail-card"><b>Лимиты</b>{{ r.min_check|money_rub }}–{{ r.max_check|money_rub }} · {{ r.daily_limit|money_rub }} в сутки · {{ r.simultaneous_limit }} одновременно</div><div class="detail-card"><b>Активные заявки</b>{{ st.active_payments if st else 0 }}</div><div class="detail-card"><b>Risk score</b>{{ r.risk_score or 0 }} из 100</div><div class="detail-card"><b>Конверсия</b>{{ st.conversion_percent if st else '0.00' }}% / {{ st24.conversion_percent if st24 else '0.00' }}%</div><div class="detail-card"><b>Ошибок подряд</b>{{ r.failed_in_row or 0 }}</div><div class="detail-card"><b>Состояние</b><span class="status-pill {{ r.traffic_status|traffic_status_class }}">{{ r.traffic_status|traffic_status_label }}</span></div><div class="detail-card"><b>Текущая причина</b><span class="cell-wrap">{{ current_event.reason }}</span></div></div>
+    <h3>История состояния</h3><div class="table-wrap"><table><tr><th>Время</th><th>Причина</th><th>Score</th><th>Действие</th></tr>{% for event in antiscam.get('events', []) if event.target_type == 'requisite' and event.target_id|string == r.id|string %}<tr><td>{{ event.created_at|dt_compact }}</td><td class="cell-wrap">{{ event.reason or '—' }}</td><td>{{ event.risk_score_after if event.risk_score_after is not none else '—' }}</td><td>{{ event.auto_action_taken or '—' }}</td></tr>{% else %}<tr><td colspan="4">История состояния пуста</td></tr>{% endfor %}</table></div>
+    <h3>Audit trail</h3><div class="table-wrap"><table><tr><th>Время</th><th>Действие</th><th>Детали</th></tr>{% for audit_row in antiscam.get('audits', []) if audit_row.target_id|string == r.id|string %}<tr><td>{{ audit_row.created_at|dt_compact }}</td><td>{{ audit_row.action }}</td><td><button class="secondary btn-small" type="button" data-open-rolling-details="risk-audit-{{ r.id }}-{{ loop.index0 }}" data-open-rolling-details-title="Audit details">Подробнее</button><div id="risk-audit-{{ r.id }}-{{ loop.index0 }}" class="rolling-hidden">{{ audit_row.details }}</div></td></tr>{% else %}<tr><td colspan="3">Audit trail пуст</td></tr>{% endfor %}</table></div>
+    <details class="action-menu"><summary class="secondary">Действия</summary><div class="actions-stack"><button class="secondary" type="button" data-modal-open="riskReqSettings{{ r.id }}">Настройки</button><form method="post" action="{{ cabinet_base }}/antiscam/requisites/{{ r.id }}/pause" data-confirm="Поставить реквизит на паузу?">{{ csrf_input(request) }}<button class="dangerbtn" type="submit">Приостановить</button></form><button class="primary" type="button" data-modal-open="riskReqRestore{{ r.id }}">Восстановить</button></div></details>
+  </div></div>
   <div id="riskReqSettings{{ r.id }}" class="modal"><div class="modalbox"><h2>Requisite risk settings</h2>
     <form method="post" action="{{ cabinet_base }}/antiscam/requisites/{{ r.id }}/settings" data-confirm="Сохранить настройки реквизита?">{{ csrf_input(request) }}
       <div class="modal-note"><b>{{ trader_email_map.get(r.trader_id|string, r.trader_id or '—') }}</b><div class="compact-note mono">{{ requisite_values.get(r.id|string, '—') }}</div></div>
@@ -1502,7 +1640,7 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
   <div class="table-wrap"><table>
     <tr><th>Дата</th><th>Кто</th><th>Действие</th><th>Target</th><th>Детали</th></tr>
     {% for a in antiscam.get('audits', []) %}
-    <tr><td><span class="text-date" title="{{ a.created_at|dt_full }}">{{ a.created_at|dt_compact }}</span></td><td><span class="cell-mono cell-ellipsis" title="{{ a.actor_id or 'system' }}">{{ a.actor_id or 'system' }}</span></td><td class="cell-wrap">{{ a.action }}</td><td><div class="cell-stack"><span class="cell-label">{{ a.target_type }}</span><span class="cell-mono cell-ellipsis" title="{{ a.target_id or '—' }}">{{ a.target_id or '—' }}</span></div></td><td class="cell-wrap">{{ a.details }}</td></tr>
+    <tr><td><span class="text-date" title="{{ a.created_at|dt_full }}">{{ a.created_at|dt_compact }}</span></td><td><span class="cell-mono cell-ellipsis" title="{{ a.actor_id or 'system' }}">{{ (a.actor_id or 'system')|short_identifier }}</span></td><td class="cell-wrap">{{ a.action }}</td><td><div class="cell-stack"><span class="cell-label">{{ a.target_type }}</span><span class="cell-mono cell-ellipsis" title="{{ a.target_id or '—' }}">{{ (a.target_id or '—')|short_identifier }}</span></div></td><td><button class="secondary btn-small" type="button" data-open-rolling-details="risk-audit-global-{{ loop.index0 }}" data-open-rolling-details-title="Audit details">Подробнее</button><div id="risk-audit-global-{{ loop.index0 }}" class="rolling-hidden">{{ a.details }}</div></td></tr>
     {% else %}<tr><td colspan="5">Audit events пока нет</td></tr>{% endfor %}
   </table></div>
 
@@ -1603,11 +1741,28 @@ td.cell-ellipsis,th.cell-ellipsis,td.mono-cell,th.mono-cell{display:table-cell;o
 
   {% elif s == 'Audit log' %}
   {% if user.role == 'superadmin' %}
-  <div class="table-wrap"><table><tr><th>Дата</th><th>Кто</th><th>Действие</th><th>Объект</th><th>IP</th><th>Детали</th></tr>
-  {% for a in audit_logs %}{% set actor_key = a.actor_id|string if a.actor_id else '' %}
-    <tr><td><span class="text-date" title="{{ a.created_at|dt_full }}">{{ a.created_at|dt_compact }}</span></td><td><b class="cell-ellipsis" title="{{ audit_actor_names.get(actor_key, 'Система' if not a.actor_id else actor_key) }}">{{ audit_actor_names.get(actor_key, 'Система' if not a.actor_id else actor_key) }}</b></td><td class="cell-wrap">{{ a.action }}</td><td><div class="cell-stack"><span class="cell-label">{{ a.target_type }}</span><span class="cell-mono cell-ellipsis" title="{{ a.target_id or '' }}">{{ a.target_id or '—' }}</span></div></td><td>{{ a.ip or '—' }}</td><td class="cell-wrap">{{ a.details if a.details else '—' }}</td></tr>
+  <div class="table-wrap"><table class="operational-table audit-table"><tr><th>Время</th><th>Кто</th><th>Событие</th><th>Объект</th><th>IP</th><th class="action-column">Подробнее</th></tr>
+  {% for a in audit_views %}
+    <tr><td><span class="text-date" title="{{ a.created_at|dt_full }}">{{ a.created_at|dt_compact }}</span></td><td><b class="cell-ellipsis" title="{{ a.actor }}">{{ a.actor }}</b></td><td>{{ a.event_label }}</td><td><div class="cell-stack"><span class="cell-label">{{ a.target_type or '—' }}</span><span class="cell-mono cell-ellipsis" title="{{ a.target_id or '' }}">{{ a.target_id_short }}</span></div></td><td>{{ a.ip or '—' }}</td><td class="action-column"><button class="secondary btn-small details-button" type="button" data-modal-open="auditDetail{{ a.id }}">Подробнее</button></td></tr>
   {% else %}<tr><td colspan="6">Логов пока нет</td></tr>{% endfor %}
   </table></div>
+  {% for a in audit_views %}
+  <div id="auditDetail{{ a.id }}" class="modal"><div class="modalbox modalbox-wide">
+    <h2>{{ a.event_label }}</h2>
+    <div class="detail-grid">
+      <div class="detail-card"><b>Raw action</b><span class="cell-mono cell-wrap">{{ a.raw_action }}</span></div>
+      <div class="detail-card"><b>Кто</b><span class="cell-wrap">{{ a.actor }}</span></div>
+      <div class="detail-card"><b>Объект</b>{{ a.target_type or '—' }} · <span class="cell-mono">{{ a.target_id_short }}</span></div>
+      <div class="detail-card"><b>Request ID</b><span class="cell-mono cell-wrap">{{ a.request_id or '—' }}</span></div>
+      <div class="detail-card"><b>Old / new status</b>{{ a.old_status or '—' }} / {{ a.new_status or '—' }}</div>
+      <div class="detail-card"><b>Причина</b><span class="cell-wrap">{{ a.reason or '—' }}</span></div>
+      <div class="detail-card"><b>Время</b>{{ a.created_at|dt_full }}</div>
+      <div class="detail-card"><b>IP</b>{{ a.ip or '—' }}</div>
+    </div>
+    <h3>Details JSON</h3><pre class="technical-json">{{ a.details_json }}</pre>
+    <div class="modal-actions"><button class="secondary" type="button" data-modal-close="auditDetail{{ a.id }}">Закрыть</button></div>
+  </div></div>
+  {% endfor %}
   {% else %}<p class="muted">Нет доступа.</p>{% endif %}
 
   {% elif 'Безопас' in s %}
@@ -1681,8 +1836,38 @@ document.querySelectorAll('form').forEach(f=>f.addEventListener('submit',()=>{
 }));
 function openModal(id){const e=document.getElementById(id); if(e)e.classList.add('active');}
 function closeModal(id){const e=document.getElementById(id); if(e)e.classList.remove('active');}
-document.querySelectorAll('[data-modal-open]').forEach(b=>b.addEventListener('click',()=>openModal(b.dataset.modalOpen)));
-document.querySelectorAll('[data-modal-close]').forEach(b=>b.addEventListener('click',()=>closeModal(b.dataset.modalClose)));
+function bindModalButtons(root=document){
+  root.querySelectorAll('[data-modal-open]').forEach(button=>{
+    if(button.dataset.modalBound==='1'){return;}
+    button.dataset.modalBound='1';
+    button.addEventListener('click',()=>{
+      const modalId=button.dataset.modalOpen;
+      const template=document.getElementById('template-'+modalId);
+      if(template&&template.content){
+        const existing=document.getElementById(modalId);
+        if(existing){existing.remove();}
+        document.body.appendChild(template.content.cloneNode(true));
+        bindModalButtons(document);
+        bindModalDismiss(document);
+      }
+      openModal(modalId);
+    });
+  });
+  root.querySelectorAll('[data-modal-close]').forEach(button=>{
+    if(button.dataset.modalCloseBound==='1'){return;}
+    button.dataset.modalCloseBound='1';
+    button.addEventListener('click',()=>closeModal(button.dataset.modalClose));
+  });
+}
+function bindModalDismiss(root=document){
+  root.querySelectorAll('.modal').forEach(modal=>{
+    if(modal.dataset.dismissBound==='1'){return;}
+    modal.dataset.dismissBound='1';
+    modal.addEventListener('click',event=>{if(event.target===modal){modal.classList.remove('active');}});
+  });
+}
+bindModalButtons();
+bindModalDismiss();
 document.querySelectorAll('form[data-confirm]').forEach(f=>f.addEventListener('submit',e=>{if(!confirm(f.dataset.confirm)){e.preventDefault();}}));
 async function copyValueToClipboard(rawValue, button){
   const value=String(rawValue||'');
@@ -1712,9 +1897,14 @@ async function copyValueToClipboard(rawValue, button){
   }
 }
 document.querySelectorAll('[data-copy-platform-wallet]').forEach(button=>button.addEventListener('click',()=>copyValueToClipboard(button.dataset.copyPlatformWallet, button)));
-document.querySelectorAll('[data-copy-value]').forEach(button=>{
-  button.addEventListener('click',()=>copyValueToClipboard(button.dataset.copyValue, button));
-});
+function bindCopyButtons(root=document){
+  root.querySelectorAll('[data-copy-value]').forEach(button=>{
+    if(button.dataset.copyBound==='1'){return;}
+    button.dataset.copyBound='1';
+    button.addEventListener('click',()=>copyValueToClipboard(button.dataset.copyValue, button));
+  });
+}
+bindCopyButtons();
 document.querySelectorAll('[data-open-rolling-details]').forEach(button=>{
   button.addEventListener('click',()=>{
     const targetId=button.dataset.openRollingDetails||'';
@@ -1723,8 +1913,22 @@ document.querySelectorAll('[data-open-rolling-details]').forEach(button=>{
     openTechnicalDetails(button.getAttribute('data-open-rolling-details-title') || 'Audit details', value);
   });
 });
-document.querySelectorAll('.modal').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)m.classList.remove('active');}));
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){document.querySelectorAll('.modal.active').forEach(m=>m.classList.remove('active'));}});
+document.querySelectorAll('[data-ui-message]').forEach(message=>{
+  const section=message.closest('.section')||document;
+  const fieldName=message.dataset.uiField||'';
+  const formName=message.dataset.uiForm||'';
+  let target=formName ? (document.getElementById(formName)||section.querySelector('[data-ui-form-id="'+formName+'"]')) : null;
+  const field=(target||section).querySelector(fieldName ? '[name="'+fieldName+'"]' : '[data-ui-message-field-never]');
+  if(field){
+    field.insertAdjacentElement('afterend',message);
+    message.classList.add('ui-message-inline');
+  }else if(target){
+    const form=target.matches('form') ? target : target.querySelector('form');
+    (form||target).prepend(message);
+  }
+  if(target&&target.classList.contains('modal')){openModal(target.id);}
+});
 if(SESSION_VIEW_TOKEN){
   const guardedUrl=new URL(window.location.href);
   guardedUrl.searchParams.set('session_view',SESSION_VIEW_TOKEN);
@@ -2205,71 +2409,79 @@ function tablePageItems(current,total){
   items.push(total);
   return items;
 }
+function paginateTable(table,initialPage=1){
+  if(table._tablePager){table._tablePager.remove();table._tablePager=null;}
+  Array.from(table.rows).forEach(row=>{row.hidden=false;});
+  const allRows=Array.from(table.rows);
+  if(allRows.length<=1){delete table.dataset.paginated;delete table.dataset.page;return;}
+  const hasHeader=allRows[0].querySelectorAll('th').length>0;
+  const dataRows=allRows.slice(hasHeader?1:0);
+  const rows=dataRows.filter(row=>!(dataRows.length===1&&row.querySelector('td[colspan]')));
+  if(rows.length<=TABLE_PAGE_SIZE){delete table.dataset.paginated;delete table.dataset.page;return;}
+  table.dataset.paginated='1';
+  let page=initialPage;
+  const pager=document.createElement('div');
+  pager.className='table-pager';
+  table._tablePager=pager;
+  const wrap=table.closest('.table-wrap');
+  wrap.insertAdjacentElement('afterend',pager);
+  function render(){
+    const total=Math.ceil(rows.length/TABLE_PAGE_SIZE);
+    page=Math.min(Math.max(page,1),total);
+    table.dataset.page=String(page);
+    const from=(page-1)*TABLE_PAGE_SIZE;
+    const to=from+TABLE_PAGE_SIZE;
+    rows.forEach((row,index)=>{row.hidden=index<from||index>=to;});
+    pager.innerHTML='';
+    tablePageItems(page,total).forEach(item=>{
+      if(item==='...'){
+        const span=document.createElement('span');
+        span.textContent='...';
+        pager.appendChild(span);
+        return;
+      }
+      const button=document.createElement('button');
+      button.type='button';
+      button.textContent=String(item);
+      button.className=item===page?'active':'';
+      button.addEventListener('click',()=>{page=item;render();});
+      pager.appendChild(button);
+    });
+  }
+  render();
+}
 function initTablePagination(){
   document.querySelectorAll('.table-wrap table').forEach(table=>{
-    if(table.dataset.paginated==='1'){return;}
-    const allRows=Array.from(table.rows);
-    if(allRows.length<=1){return;}
-    const hasHeader=allRows[0].querySelectorAll('th').length>0;
-    const dataRows=allRows.slice(hasHeader?1:0);
-    const rows=dataRows.filter(row=>!(dataRows.length===1&&row.querySelector('td[colspan]')));
-    if(rows.length<=TABLE_PAGE_SIZE){return;}
-    table.dataset.paginated='1';
-    let page=1;
-    const pager=document.createElement('div');
-    pager.className='table-pager';
-    const wrap=table.closest('.table-wrap');
-    wrap.insertAdjacentElement('afterend',pager);
-    function render(){
-      const total=Math.ceil(rows.length/TABLE_PAGE_SIZE);
-      page=Math.min(Math.max(page,1),total);
-      const from=(page-1)*TABLE_PAGE_SIZE;
-      const to=from+TABLE_PAGE_SIZE;
-      rows.forEach((row,index)=>{row.hidden=index<from||index>=to;});
-      pager.innerHTML='';
-      tablePageItems(page,total).forEach(item=>{
-        if(item==='...'){
-          const span=document.createElement('span');
-          span.textContent='...';
-          pager.appendChild(span);
-          return;
-        }
-        const button=document.createElement('button');
-        button.type='button';
-        button.textContent=String(item);
-        button.className=item===page?'active':'';
-        button.addEventListener('click',()=>{page=item;render();});
-        pager.appendChild(button);
-      });
-    }
-    render();
+    if(table.dataset.paginated!=='1'){paginateTable(table);}
   });
+}
+function refreshTablePagination(table){
+  const currentPage=Number(table.dataset.page||'1');
+  paginateTable(table,currentPage);
 }
 initTablePagination();
 function formatTime(sec){const m=Math.floor(sec/60);const s=sec%60;return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');}
 const DEPOSIT_POLL_BASE_MS=Math.max(5000,Number('{{ cabinet_poll_interval_seconds|default(10) }}')*1000);
 let depositPollTimer=null;
 let depositPollFailures=0;
-let depositPollInFlight=false;
+let depositPollController=null;
+let depositPollSequence=0;
 let depositExpiryRefreshRequested=false;
 function depositRowsTarget(){
-  const table=document.querySelector('.trader-table table');
-  if(!table){return null;}
-  const body=table.tBodies&&table.tBodies.length?table.tBodies[0]:null;
-  if(body){body.id='depositRows';}
-  return body;
+  return document.querySelector('.section.active .trader-table tbody[data-partial-kind="trader-deposits"]');
 }
-function depositPartialUrl(){
-  const url=new URL('{{ cabinet_base }}/partials/deposits',window.location.origin);
+function depositPartialUrl(target){
+  const url=new URL(target.dataset.refreshUrl,window.location.origin);
   const current=new URLSearchParams(window.location.search);
-  ['deposit_query','deposit_amount','deposit_requisite','deposit_date','merchant_trader_id','merchant_deal_id'].forEach(key=>{
+  ['view','bank_code','payment_method','status','deposit_query','deposit_amount','deposit_requisite','deposit_date','merchant_trader_id','merchant_deal_id'].forEach(key=>{
     if(current.has(key)){url.searchParams.set(key,current.get(key));}
   });
   return url;
 }
 function scheduleDepositPoll(delay){
   clearTimeout(depositPollTimer);
-  if(sessionPollingStopped||!depositRowsTarget()){return;}
+  const target=depositRowsTarget();
+  if(sessionPollingStopped||!target||target.dataset.autoPoll!=='true'){return;}
   const hiddenMultiplier=document.hidden?6:1;
   depositPollTimer=setTimeout(refreshDepositRows,Math.max(250,delay*hiddenMultiplier));
 }
@@ -2281,16 +2493,24 @@ function bindDepositRowBehaviors(){
     form.dataset.confirmBound='1';
     form.addEventListener('submit',event=>{if(!confirm(form.dataset.confirm)){event.preventDefault();}});
   });
+  bindCopyButtons(body);
+  bindModalButtons(body);
   body.querySelectorAll('button.primary,button.secondary,button.dangerbtn').forEach(el=>el.classList.add('btn'));
 }
 async function refreshDepositRows(){
   const target=depositRowsTarget();
-  if(!target||sessionPollingStopped||depositPollInFlight){return;}
-  depositPollInFlight=true;
+  if(!target||target.dataset.autoPoll!=='true'||sessionPollingStopped){return;}
+  if(depositPollController){depositPollController.abort();}
+  const controller=new AbortController();
+  depositPollController=controller;
+  const requestSequence=++depositPollSequence;
+  const expectedKind=target.dataset.partialKind;
+  const expectedView=target.dataset.view;
   try{
-    const response=await fetch(depositPartialUrl(),{
+    const response=await fetch(depositPartialUrl(target),{
       credentials:'same-origin',redirect:'manual',cache:'no-store',
-      headers:{'accept':'text/html','x-session-view':SESSION_VIEW_TOKEN}
+      headers:{'accept':'text/html','x-session-view':SESSION_VIEW_TOKEN},
+      signal:controller.signal
     });
     if(response.type==='opaqueredirect'||(response.status>=300&&response.status<400)||response.status===401){
       handlePollingAuthExpired();
@@ -2313,18 +2533,27 @@ async function refreshDepositRows(){
     if(/<html[\s>]/i.test(html)||/<form[^>]+(?:\/login|login)/i.test(html)){
       throw new Error('login page returned instead of partial');
     }
+    const marker=html.match(/^\s*<!--\s*ozark-partial:([a-z-]+):(active|history)\s*-->/);
+    if(!marker||marker[1]!==expectedKind||marker[2]!==expectedView){
+      throw new Error('unexpected polling context');
+    }
+    if(requestSequence!==depositPollSequence||depositRowsTarget()!==target||target.dataset.partialKind!==expectedKind||target.dataset.view!==expectedView){
+      return;
+    }
     target.innerHTML=html;
     bindDepositRowBehaviors();
+    refreshTablePagination(target.closest('table'));
     depositPollFailures=0;
     depositExpiryRefreshRequested=false;
     resetPollingBackoff();
     scheduleDepositPoll(DEPOSIT_POLL_BASE_MS);
   }catch(error){
+    if(error&&error.name==='AbortError'){return;}
     depositPollFailures=Math.min(depositPollFailures+1,5);
     showPollingNotice('Фоновое обновление операций временно недоступно. Страница остаётся открытой.',false);
     scheduleDepositPoll(Math.min(60000,DEPOSIT_POLL_BASE_MS*(2**depositPollFailures)));
   }finally{
-    depositPollInFlight=false;
+    if(requestSequence===depositPollSequence){depositPollController=null;}
   }
 }
 bindDepositRowBehaviors();
@@ -2332,6 +2561,7 @@ scheduleDepositPoll(DEPOSIT_POLL_BASE_MS);
 document.addEventListener('visibilitychange',()=>{
   scheduleDepositPoll(document.hidden?DEPOSIT_POLL_BASE_MS:250);
 });
+window.addEventListener('beforeunload',()=>{if(depositPollController){depositPollController.abort();}});
 setInterval(()=>{
   document.querySelectorAll('[data-countdown]').forEach(el=>{
     let left=parseInt(el.dataset.countdown||'0',10);

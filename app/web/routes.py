@@ -22,19 +22,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from redis.asyncio import Redis
 
 from app.db.session import get_db
-from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, MerchantWebhookSigningKey, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, MerchantRollingTransfer, MerchantRollingTransferConsumption, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadMerchantAccrual, TeamLeadMerchantAssignment, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
+from app.models import User, Merchant, Balance, ApiKey, Deposit, Payout, Requisite, Appeal, AppealMessage, RefreshToken, AuditLog, MerchantSettlement, WebhookEvent, WebhookDeliveryAttempt, MerchantWebhookSigningKey, AggregatorAccount, AggregatorPayment, AggregatorCallbackLog, FeeRule, MerchantRollingAccount, MerchantRollingAllocation, MerchantRollingLedgerEntry, MerchantRollingTransfer, MerchantRollingTransferConsumption, TeamLeadAccrual, TeamLeadBalance, TeamLeadLedgerEntry, TeamLeadMerchantAccrual, TeamLeadMerchantAssignment, TeamLeadSettlement, TeamLeadTraderAssignment, AIIntegrationConfig
 from app.core.rate_limit import hit_rate_limit
 from app.core.security import auth_state_marker, decrypt_secret, verify_password, hash_password, encrypt_secret, reveal_text
 from app.core.session import (
+    PREVIEW_ROLE_SESSION_KEY,
+    PREVIEW_SUBJECT_SESSION_KEY,
     SESSION_GENERATION_KEY,
     SESSION_REALM_KEY,
     activate_realm_session,
+    issue_preview_context_token,
     realm_cabinet_path,
     realm_for_role,
     realm_login_path,
     request_auth_realm,
     session_view_fingerprint,
     session_view_matches,
+    verify_preview_context_token,
 )
 from app.core.auth_hardening import is_auth_temporarily_locked, record_auth_failure, record_auth_success
 from app.core.enums import AppealStatus, DepositStatus, PaymentMethod, Role, TrafficStatus
@@ -153,6 +157,28 @@ from app.services.webhook_signing_keys import (
     issue_webhook_signing_key,
     rotate_webhook_signing_key,
     webhook_key_fingerprint,
+)
+from app.web.ui_messages import cabinet_redirect_url, resolve_ui_message
+from app.web.ui_queries import (
+    DEPOSIT_ACTIVE_STATUSES,
+    DEPOSIT_TERMINAL_STATUSES,
+    apply_trader_deposit_filters,
+    normalized_deposit_filters,
+    trader_deposit_aggregates,
+    trader_deposit_scope,
+)
+from app.web.view_models import (
+    build_attempts_by_event_id,
+    build_audit_view,
+    build_webhook_event_view,
+    deposit_status_label,
+    failure_reason_label,
+    money_rub,
+    short_identifier,
+    traffic_status_class,
+    traffic_status_label,
+    webhook_status_class,
+    webhook_status_label,
 )
 
 router = APIRouter(tags=['web'])
@@ -285,6 +311,14 @@ templates.env.filters['bank_display'] = get_bank_display_name
 templates.env.filters['provider_label'] = requisite_provider_label
 templates.env.filters['dt_compact'] = dt_compact
 templates.env.filters['dt_full'] = dt_full
+templates.env.filters['money_rub'] = money_rub
+templates.env.filters['short_identifier'] = short_identifier
+templates.env.filters['deposit_status_label'] = deposit_status_label
+templates.env.filters['failure_reason_label'] = failure_reason_label
+templates.env.filters['traffic_status_label'] = traffic_status_label
+templates.env.filters['traffic_status_class'] = traffic_status_class
+templates.env.filters['webhook_status_label'] = webhook_status_label
+templates.env.filters['webhook_status_class'] = webhook_status_class
 templates.env.globals['provider_obj_type'] = get_requisite_provider_type
 templates.env.globals['provider_obj_label'] = get_requisite_provider_label
 templates.env.globals['provider_obj_display'] = get_requisite_provider_display
@@ -414,6 +448,84 @@ def _session_changed_page(request: Request):
     return response
 
 
+def _clear_preview_context(request: Request) -> None:
+    request.session.pop(PREVIEW_ROLE_SESSION_KEY, None)
+    request.session.pop(PREVIEW_SUBJECT_SESSION_KEY, None)
+
+
+async def _trusted_trader_preview_subject(
+    request: Request,
+    viewer: User,
+    db: AsyncSession,
+    *,
+    requested_role: str | None,
+    accept_entry_token: bool,
+) -> User | None:
+    if viewer.role in TRADER_ROLES:
+        return viewer if requested_role in {None, viewer.role, Role.trader.value} else None
+    if viewer.role != Role.superadmin.value:
+        return None
+    preview_role = requested_role or str(
+        request.session.get(PREVIEW_ROLE_SESSION_KEY) or ""
+    )
+    if preview_role != Role.trader.value:
+        return None
+
+    subject_id = None
+    entry_token = request.query_params.get("preview_context", "").strip()
+    if accept_entry_token and entry_token:
+        subject_id = verify_preview_context_token(
+            request.session,
+            entry_token,
+            preview_role=Role.trader.value,
+            max_age=settings.SESSION_COOKIE_MAX_AGE_SECONDS,
+        )
+        if not subject_id:
+            _clear_preview_context(request)
+            return None
+    elif (
+        request.session.get(PREVIEW_ROLE_SESSION_KEY) == Role.trader.value
+        and request.session.get(PREVIEW_SUBJECT_SESSION_KEY)
+    ):
+        subject_id = str(request.session[PREVIEW_SUBJECT_SESSION_KEY])
+    if not subject_id:
+        return None
+    try:
+        subject_uuid = UUID(subject_id)
+    except ValueError:
+        _clear_preview_context(request)
+        return None
+    subject = (await db.execute(
+        select(User).where(
+            User.id == subject_uuid,
+            User.role.in_(list(TRADER_ROLES)),
+            User.is_archived.is_(False),
+        )
+    )).scalar_one_or_none()
+    if not subject:
+        _clear_preview_context(request)
+        return None
+    request.session[PREVIEW_ROLE_SESSION_KEY] = Role.trader.value
+    request.session[PREVIEW_SUBJECT_SESSION_KEY] = str(subject.id)
+    return subject
+
+
+def _preview_forbidden_page(request: Request, viewer: User, requested_role: str):
+    realm = request_auth_realm(request) or realm_for_role(viewer.role)
+    return templates.TemplateResponse(
+        request=request,
+        name='forbidden.html',
+        context={
+            'request': request,
+            'user': viewer,
+            'requested_role': requested_role,
+            'cabinet_base': realm_cabinet_path(realm) if realm else '/cabinet',
+            **branding_context(),
+        },
+        status_code=403,
+    )
+
+
 async def revoke_refresh_tokens(db: AsyncSession, user_id) -> None:
     rows = (await db.execute(select(RefreshToken).where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None)))).scalars().all()
     now = datetime.now(timezone.utc)
@@ -422,7 +534,7 @@ async def revoke_refresh_tokens(db: AsyncSession, user_id) -> None:
 
 
 def _twofa_redirect() -> RedirectResponse:
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Сначала включите 2FA в разделе Безопасность'), status_code=303)
+    return _redirect('twofa_required', 'security')
 
 
 MANAGED_USER_ROLES = {Role.admin.value, Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value}
@@ -543,8 +655,29 @@ APPEAL_MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
 
 def _redirect(message: str, section: str = '') -> RedirectResponse:
-    section_param = f'&section={quote_plus(section)}' if section else ''
-    return RedirectResponse('/cabinet?msg=' + quote_plus(message) + section_param, status_code=303)
+    return RedirectResponse(
+        cabinet_redirect_url('/cabinet', message=message, section=section),
+        status_code=303,
+    )
+
+
+def _success_redirect(
+    section: str = '',
+    *,
+    base_path: str = '/cabinet',
+    extra: dict[str, str] | None = None,
+    fragment: str = '',
+) -> RedirectResponse:
+    return RedirectResponse(
+        cabinet_redirect_url(
+            base_path,
+            section=section,
+            success=True,
+            extra=extra,
+            fragment=fragment,
+        ),
+        status_code=303,
+    )
 
 
 def _appeal_file_info_url(file_info: dict | None, cabinet_base: str = '/cabinet') -> str:
@@ -944,7 +1077,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
             name='login.html',
             context=login_context(
                 request,
-                'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.',
+                'Слишком много попыток входа. Повторите позже.',
             ),
             status_code=429,
         )
@@ -971,7 +1104,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
                 name='login.html',
                 context=login_context(
                     request,
-                    'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.',
+                    'Слишком много попыток входа. Повторите позже.',
                 ),
                 status_code=429,
             )
@@ -1098,11 +1231,11 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
     elif actor.role == Role.admin.value:
         allowed = [Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value]
     if role not in allowed:
-        return RedirectResponse('/cabinet?msg=Недостаточно+прав+для+создания+этой+роли', status_code=303)
+        return _redirect('permission_denied', 'create')
     email = email.strip().lower()
     exists = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if exists:
-        return RedirectResponse('/cabinet?msg=Email+уже+существует', status_code=303)
+        return _redirect('email_exists', 'create')
     user = User(email=email, password_hash=hash_password(password), role=role, twofa_enabled=False, twofa_secret=None)
     db.add(user)
     await db.flush()
@@ -1130,8 +1263,7 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
             login_password=password,
             title='New merchant credentials',
         )
-    msg = f'Created {role} account for {email}. Password and secrets are not shown in URL or logs.'
-    return RedirectResponse('/cabinet?msg=' + quote_plus(msg), status_code=303)
+    return _success_redirect('create')
 
 
 @router.post('/cabinet/users/{user_id}/password')
@@ -1142,16 +1274,16 @@ async def reset_user_password_from_cabinet(request: Request, user_id: str, new_p
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Недостаточно прав'), status_code=303)
+        return _redirect('permission_denied', 'users')
     if len(new_password) < 10:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Новый пароль минимум 10 символов'), status_code=303)
+        return _redirect('password_too_short', 'users')
     try:
         target_uuid = uuid.UUID(user_id)
     except ValueError:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Пользователь не найден'), status_code=303)
+        return _redirect('user_not_found', 'users')
     target = (await db.execute(select(User).where(User.id == target_uuid))).scalar_one_or_none()
     if not target or not _user_can_be_managed_by_superadmin(target, actor):
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Этого пользователя нельзя изменить'), status_code=303)
+        return _redirect('user_protected', 'users')
     target.password_hash = hash_password(new_password)
     target.failed_login_count = 0
     await revoke_refresh_tokens(db, target.id)
@@ -1165,7 +1297,7 @@ async def reset_user_password_from_cabinet(request: Request, user_id: str, new_p
         details={'target_email': target.email, 'target_role': target.role},
     )
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus(f'Пароль для {target.email} изменён'), status_code=303)
+    return _success_redirect('users')
 
 
 @router.post('/cabinet/users/{user_id}/lock')
@@ -1176,14 +1308,14 @@ async def lock_user_from_cabinet(request: Request, user_id: str, locked: str = F
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Недостаточно прав'), status_code=303)
+        return _redirect('permission_denied', 'users')
     try:
         target_uuid = uuid.UUID(user_id)
     except ValueError:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Пользователь не найден'), status_code=303)
+        return _redirect('user_not_found', 'users')
     target = (await db.execute(select(User).where(User.id == target_uuid))).scalar_one_or_none()
     if not target or not _user_can_be_managed_by_superadmin(target, actor):
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Этого пользователя нельзя заблокировать'), status_code=303)
+        return _redirect('user_protected', 'users')
     should_lock = locked == 'true'
     target.is_locked = should_lock
     target.failed_login_count = 0 if not should_lock else target.failed_login_count
@@ -1199,7 +1331,7 @@ async def lock_user_from_cabinet(request: Request, user_id: str, locked: str = F
         details={'target_email': target.email, 'target_role': target.role},
     )
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus(('Пользователь заблокирован: ' if should_lock else 'Пользователь разблокирован: ') + target.email), status_code=303)
+    return _success_redirect('users')
 
 @router.post('/cabinet/merchants/{merchant_id}/integration')
 async def update_merchant_integration(
@@ -1217,28 +1349,31 @@ async def update_merchant_integration(
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role not in [Role.superadmin.value, Role.admin.value, Role.merchant.value]:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Недостаточно прав'), status_code=303)
+        return _redirect('permission_denied', 'merchants')
     try:
         merchant_uuid = uuid.UUID(merchant_id)
     except ValueError:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Мерчант не найден'), status_code=303)
+        return _redirect('merchant_not_found', 'merchants')
     merchant = (await db.execute(select(Merchant).where(Merchant.id == merchant_uuid))).scalar_one_or_none()
     if not merchant:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Мерчант не найден'), status_code=303)
+        return _redirect('merchant_not_found', 'merchants')
     if actor.role == Role.merchant.value and actor.id != merchant.owner_id:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Недостаточно прав'), status_code=303)
+        return _redirect('permission_denied', 'merchants')
     try:
         merchant.webhook_url = validate_public_webhook_url(webhook_url.strip() or None)
+    except ValueError:
+        return _redirect('webhook_url_invalid', 'merchants')
+    try:
         merchant.ip_whitelist = validate_ip_whitelist([item.strip() for item in ip_whitelist.split(',') if item.strip()])
-    except ValueError as exc:
-        return RedirectResponse('/cabinet?msg=' + quote_plus(str(exc)), status_code=303)
+    except ValueError:
+        return _redirect('ip_whitelist_invalid', 'merchants')
     if actor.role in [Role.superadmin.value, Role.admin.value]:
         merchant.sandbox_mode = sandbox_mode == 'on'
     if actor.role == Role.superadmin.value and merchant_commission_percent.strip():
         merchant.merchant_commission_percent = _clamp_percent(merchant_commission_percent, '15')
     await audit(db, 'merchant_integration_updated', 'merchant', actor.id, merchant.id, client_ip(request), {'webhook_configured': bool(merchant.webhook_url), 'ip_count': len(merchant.ip_whitelist), 'sandbox_mode': merchant.sandbox_mode})
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Настройки интеграции сохранены'), status_code=303)
+    return _success_redirect('merchants')
 
 @router.post('/cabinet/merchants/{merchant_id}/commission')
 async def update_merchant_commission(request: Request, merchant_id: str, merchant_commission_percent: str = Form(...), db: AsyncSession = Depends(get_db)):
@@ -1248,22 +1383,32 @@ async def update_merchant_commission(request: Request, merchant_id: str, merchan
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Недостаточно прав'), status_code=303)
+        return _redirect('permission_denied', 'merchants')
     try:
         merchant_uuid = uuid.UUID(merchant_id)
     except ValueError:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Площадка не найдена'), status_code=303)
+        return _redirect('platform_not_found', 'merchants')
     merchant = (await db.execute(select(Merchant).where(Merchant.id == merchant_uuid).with_for_update())).scalar_one_or_none()
     if not merchant:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Площадка не найдена'), status_code=303)
+        return _redirect('platform_not_found', 'merchants')
     merchant.merchant_commission_percent = _clamp_percent(merchant_commission_percent, '15')
     await audit(db, 'merchant_commission_updated', 'merchant', actor.id, merchant.id, client_ip(request), {'merchant_commission_percent': str(merchant.merchant_commission_percent)})
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Процент мерчанта сохранён'), status_code=303)
-def _merchant_key_redirect(request: Request, message: str) -> RedirectResponse:
+    return _success_redirect('merchants')
+def _merchant_key_redirect(
+    request: Request,
+    message: str,
+    *,
+    success: bool = False,
+) -> RedirectResponse:
     realm = request_auth_realm(request) or 'staff'
     return RedirectResponse(
-        realm_cabinet_path(realm) + '?section=merchants&msg=' + quote_plus(message),
+        cabinet_redirect_url(
+            realm_cabinet_path(realm),
+            message=message,
+            section='merchants',
+            success=success,
+        ),
         status_code=303,
     )
 
@@ -1430,11 +1575,23 @@ async def revoke_merchant_api_key_from_cabinet(
         details={'merchant_id': str(merchant.id), 'mode': normalize_api_key_mode(key.mode), 'key_fingerprint': api_key_fingerprint(key.api_key)},
     )
     await db.commit()
-    return _merchant_key_redirect(request, f'{api_key_mode_label(key.mode)} API key отозван')
+    return _merchant_key_redirect(
+        request,
+        f'{api_key_mode_label(key.mode)} API key отозван',
+        success=True,
+    )
 
 
-def _aggregator_redirect(message: str) -> RedirectResponse:
-    return RedirectResponse('/cabinet?section=aggregators&msg=' + quote_plus(message), status_code=303)
+def _aggregator_redirect(message: str, *, success: bool = False) -> RedirectResponse:
+    return RedirectResponse(
+        cabinet_redirect_url(
+            '/cabinet',
+            message=message,
+            section='aggregators',
+            success=success,
+        ),
+        status_code=303,
+    )
 
 
 def _optional_url(value: str) -> str | None:
@@ -1505,7 +1662,7 @@ async def cabinet_create_aggregator(
     )
     await db.commit()
     message = 'Aggregator created. Secret key is shown once below.' if secret_flash_available else AGGREGATOR_SECRET_FLASH_UNAVAILABLE_MESSAGE
-    return _aggregator_redirect(message)
+    return _aggregator_redirect(message, success=secret_flash_available)
 
 
 @router.post('/cabinet/aggregators/{aggregator_id}/update')
@@ -1551,7 +1708,7 @@ async def cabinet_update_aggregator(
         return _aggregator_redirect(str(exc))
     await audit(db, 'cabinet_aggregator_updated', 'aggregator', actor.id, account.id, client_ip(request), {'name': account.name})
     await db.commit()
-    return _aggregator_redirect('Aggregator settings saved')
+    return _aggregator_redirect('Aggregator settings saved', success=True)
 
 
 @router.post('/cabinet/aggregators/{aggregator_id}/status')
@@ -1577,7 +1734,7 @@ async def cabinet_update_aggregator_status(
     account.status = status
     await audit(db, 'cabinet_aggregator_status_changed', 'aggregator', actor.id, account.id, client_ip(request), {'status': account.status})
     await db.commit()
-    return _aggregator_redirect('Aggregator status changed')
+    return _aggregator_redirect('Aggregator status changed', success=True)
 
 
 @router.post('/cabinet/aggregators/{aggregator_id}/secret')
@@ -1609,7 +1766,7 @@ async def cabinet_regenerate_aggregator_secret(request: Request, aggregator_id: 
     )
     await db.commit()
     message = 'Aggregator secret regenerated. Secret key is shown once below.' if secret_flash_available else AGGREGATOR_SECRET_FLASH_UNAVAILABLE_MESSAGE
-    return _aggregator_redirect(message)
+    return _aggregator_redirect(message, success=secret_flash_available)
 
 
 @router.post('/cabinet/requisites/create')
@@ -1620,22 +1777,22 @@ async def create_requisite(request: Request, method: str = Form(...), value: str
     if staff_2fa_setup_required(user):
         return _twofa_redirect()
     if user.role not in [Role.operator.value, Role.trader.value, Role.superadmin.value, Role.admin.value]:
-        return RedirectResponse('/cabinet?msg=Недостаточно+прав', status_code=303)
+        return _redirect('permission_denied', 'requisites')
     target_trader_id = user.id if user.role in [Role.operator.value, Role.trader.value] else None
     if user.role in [Role.superadmin.value, Role.admin.value] and trader_id:
         target = (await db.execute(select(User).where(User.id == uuid.UUID(trader_id), User.role.in_([Role.operator.value, Role.trader.value])))).scalar_one_or_none()
         if not target:
-            return RedirectResponse('/cabinet?msg=Оператор+не+найден', status_code=303)
+            return _redirect('trader_not_found', 'requisites')
         target_trader_id = target.id
     if not target_trader_id:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Выберите трейдера для реквизита'), status_code=303)
+        return _redirect('trader_required', 'requisites')
     normalized_method = normalize_payment_method(method, canonical_mobile=True)
     if normalized_method not in {PaymentMethod.sbp.value, PaymentMethod.c2c.value, PaymentMethod.mobile_commerce.value}:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Unsupported payment method'), status_code=303)
+        return _redirect('payment_method_invalid', 'requisites')
     provider = resolve_requisite_provider(normalized_method, bank_code=bank_code, operator_code=operator_code, bank_name=bank_name)
     if not provider:
-        msg = 'Choose a mobile operator from the directory' if normalized_method == PaymentMethod.mobile_commerce.value else 'Choose a bank from the directory'
-        return RedirectResponse('/cabinet?msg=' + quote_plus(msg), status_code=303)
+        code = 'mobile_operator_required' if normalized_method == PaymentMethod.mobile_commerce.value else 'bank_required'
+        return _redirect(code, 'requisites')
     req = Requisite(
         trader_id=target_trader_id,
         owner_name=full_name or user.email,
@@ -1661,7 +1818,7 @@ async def create_requisite(request: Request, method: str = Form(...), value: str
     db.add(req)
     await audit(db, 'requisite_created', 'requisite', actor_id=user.id, ip=client_ip(request), details={"method": normalized_method, "provider_type": provider.provider_type, "provider_name": provider.display_name, "timeframe": timeframe, "success_delay_minutes": success_delay_minutes, "simultaneous_limit": simultaneous_limit})
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Реквизит создан'), status_code=303)
+    return _success_redirect('requisites')
 
 
 @router.post('/cabinet/requisites/{requisite_id}/toggle')
@@ -1672,19 +1829,19 @@ async def toggle_requisite(request: Request, requisite_id: str, db: AsyncSession
     if staff_2fa_setup_required(user):
         return _twofa_redirect()
     if user.role not in [Role.superadmin.value, Role.admin.value, Role.operator.value, Role.trader.value]:
-        return RedirectResponse('/cabinet?msg=Недостаточно+прав', status_code=303)
+        return _redirect('permission_denied', 'requisites')
     req = (await db.execute(select(Requisite).where(Requisite.id == uuid.UUID(requisite_id)))).scalar_one_or_none()
     if not req:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Реквизит не найден'), status_code=303)
+        return _redirect('requisite_not_found', 'requisites')
     if user.role in [Role.operator.value, Role.trader.value] and str(req.trader_id) != str(user.id):
-        return RedirectResponse('/cabinet?msg=Можно+управлять+только+своими+реквизитами', status_code=303)
+        return _redirect('requisite_scope_denied', 'requisites')
     if req.status == 'deleted':
-        return RedirectResponse('/cabinet?msg=Удалённый+реквизит+нельзя+включить', status_code=303)
+        return _redirect('requisite_deleted', 'requisites')
     req.enabled = not req.enabled
     req.status = 'active' if req.enabled else 'disabled'
     await audit(db, 'requisite_toggled', 'requisite', actor_id=user.id, target_id=str(req.id), ip=client_ip(request), details={'enabled': req.enabled})
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Статус реквизита изменен'), status_code=303)
+    return _success_redirect('requisites')
 
 
 @router.post('/cabinet/requisites/{requisite_id}/edit')
@@ -1717,12 +1874,12 @@ async def edit_requisite(
         return _twofa_redirect()
     req = (await db.execute(select(Requisite).where(Requisite.id == uuid.UUID(requisite_id)))).scalar_one_or_none()
     if not req:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Реквизит не найден'), status_code=303)
+        return _redirect('requisite_not_found', 'requisites')
     if not _can_manage_requisite(user, req):
-        return RedirectResponse('/cabinet?msg=Можно+редактировать+только+свои+реквизиты', status_code=303)
+        return _redirect('requisite_scope_denied', 'requisites')
     normalized_method = normalize_payment_method(method, canonical_mobile=True)
     if normalized_method not in {PaymentMethod.sbp.value, PaymentMethod.c2c.value, PaymentMethod.mobile_commerce.value}:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Unsupported payment method'), status_code=303)
+        return _redirect('payment_method_invalid', 'requisites')
     legacy_candidate = (bank_name or bank_code or operator_code or '').strip()
     provider = resolve_requisite_provider(
         normalized_method,
@@ -1732,8 +1889,8 @@ async def edit_requisite(
         allow_legacy=bool(legacy_candidate and legacy_candidate == (req.bank_name or '').strip()),
     )
     if not provider:
-        msg = 'Choose a mobile operator from the directory' if normalized_method == PaymentMethod.mobile_commerce.value else 'Choose a bank from the directory'
-        return RedirectResponse('/cabinet?msg=' + quote_plus(msg), status_code=303)
+        code = 'mobile_operator_required' if normalized_method == PaymentMethod.mobile_commerce.value else 'bank_required'
+        return _redirect(code, 'requisites')
     req.method = normalized_method
     req.value_encrypted = encrypt_secret(value.strip())
     req.owner_name = full_name.strip() or user.email
@@ -1755,7 +1912,7 @@ async def edit_requisite(
     req.enabled = req.status == 'active'
     await audit(db, 'requisite_updated', 'requisite', actor_id=user.id, target_id=str(req.id), ip=client_ip(request))
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Реквизит обновлен'), status_code=303)
+    return _success_redirect('requisites')
 
 
 @router.post('/cabinet/requisites/{requisite_id}/delete')
@@ -1764,15 +1921,15 @@ async def delete_requisite(request: Request, requisite_id: str, db: AsyncSession
     if not user:
         return RedirectResponse('/login', status_code=303)
     if user.role not in [Role.operator.value, Role.trader.value]:
-        return RedirectResponse('/cabinet?msg=Удалять+реквизиты+может+только+оператор', status_code=303)
+        return _redirect('requisite_delete_denied', 'requisites')
     req = (await db.execute(select(Requisite).where(Requisite.id == uuid.UUID(requisite_id), Requisite.trader_id == user.id))).scalar_one_or_none()
     if not req:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Реквизит не найден'), status_code=303)
+        return _redirect('requisite_not_found', 'requisites')
     req.enabled = False
     req.status = 'deleted'
     await audit(db, 'requisite_deleted_by_trader', 'requisite', actor_id=user.id, target_id=str(req.id), ip=client_ip(request))
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Реквизит удален, но остается в истории для аудита'), status_code=303)
+    return _success_redirect('requisites')
 
 
 @router.post('/cabinet/traders/{trader_id}/block')
@@ -1783,14 +1940,14 @@ async def block_trader(request: Request, trader_id: str, db: AsyncSession = Depe
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=Недостаточно+прав', status_code=303)
+        return _redirect('permission_denied', 'traders')
     trader = (await db.execute(select(User).where(User.id == uuid.UUID(trader_id), User.role.in_([Role.operator.value, Role.trader.value])))).scalar_one_or_none()
     if not trader:
-        return RedirectResponse('/cabinet?msg=Трейдер+не+найден', status_code=303)
+        return _redirect('trader_not_found', 'traders')
     trader.is_locked = True
     await audit(db, 'trader_blocked', 'user', actor.id, trader.id, client_ip(request))
     await db.commit()
-    return RedirectResponse('/cabinet?msg=Трейдер+заблокирован', status_code=303)
+    return _success_redirect('traders')
 
 
 @router.post('/cabinet/traders/{trader_id}/unblock')
@@ -1801,15 +1958,15 @@ async def unblock_trader(request: Request, trader_id: str, db: AsyncSession = De
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=Недостаточно+прав', status_code=303)
+        return _redirect('permission_denied', 'traders')
     trader = (await db.execute(select(User).where(User.id == uuid.UUID(trader_id), User.role.in_([Role.operator.value, Role.trader.value])))).scalar_one_or_none()
     if not trader:
-        return RedirectResponse('/cabinet?msg=Трейдер+не+найден', status_code=303)
+        return _redirect('trader_not_found', 'traders')
     trader.is_locked = False
     trader.failed_login_count = 0
     await audit(db, 'trader_unblocked', 'user', actor.id, trader.id, client_ip(request))
     await db.commit()
-    return RedirectResponse('/cabinet?msg=Трейдер+разблокирован', status_code=303)
+    return _success_redirect('traders')
 
 
 @router.post('/cabinet/traders/{trader_id}/finance')
@@ -1820,10 +1977,10 @@ async def update_trader_finance(request: Request, trader_id: str, trader_balance
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=Недостаточно+прав', status_code=303)
+        return _redirect('permission_denied', 'traders')
     trader = (await db.execute(select(User).where(User.id == uuid.UUID(trader_id), User.role.in_([Role.operator.value, Role.trader.value])))).scalar_one_or_none()
     if not trader:
-        return RedirectResponse('/cabinet?msg=Трейдер+не+найден', status_code=303)
+        return _redirect('trader_not_found', 'traders')
     target_balance = max(Decimal('0.00'), safe_decimal(trader_balance, '0'))
     target_hold = min(target_balance, max(Decimal('0.00'), safe_decimal(trader_hold, '0')))
     trader.trader_traffic_priority = max(0, min(100, trader_traffic_priority))
@@ -1842,10 +1999,10 @@ async def update_trader_finance(request: Request, trader_id: str, trader_balance
         )
     except LedgerError as exc:
         await db.rollback()
-        return RedirectResponse('/cabinet?msg=' + quote_plus(str(exc)), status_code=303)
+        return _redirect('financial_invariant_error', 'traders')
     await audit(db, 'trader_finance_updated', 'user', actor.id, trader.id, client_ip(request), {'balance': str(trader.trader_balance), 'hold': str(trader.trader_hold), 'priority': trader.trader_traffic_priority, 'commission_percent': str(trader.trader_commission_percent), 'merchants': assigned_merchants})
     await db.commit()
-    return RedirectResponse('/cabinet?msg=Настройки+трейдера+сохранены', status_code=303)
+    return _success_redirect('traders')
 
 
 @router.post('/cabinet/security/password')
@@ -1854,9 +2011,9 @@ async def change_password(request: Request, current_password: str = Form(...), n
     if not user:
         return RedirectResponse('/login', status_code=303)
     if not verify_password(current_password, user.password_hash):
-        return RedirectResponse('/cabinet?msg=Текущий+пароль+неверный', status_code=303)
+        return _redirect('current_password_incorrect', 'security')
     if len(new_password) < 10:
-        return RedirectResponse('/cabinet?msg=Новый+пароль+минимум+10+символов', status_code=303)
+        return _redirect('password_too_short', 'security')
     user.password_hash = hash_password(new_password)
     await revoke_refresh_tokens(db, user.id)
     await audit(db, 'password_changed', 'user', actor_id=user.id, target_id=str(user.id), ip=client_ip(request))
@@ -1874,7 +2031,7 @@ async def prepare_2fa(request: Request, db: AsyncSession = Depends(get_db)):
     if not user.twofa_secret:
         user.twofa_secret = encrypt_secret(pyotp.random_base32())
         await db.commit()
-    return RedirectResponse('/cabinet?msg=QR+код+для+2FA+создан', status_code=303)
+    return _success_redirect('security')
 
 
 @router.post('/cabinet/security/2fa/enable')
@@ -1883,15 +2040,15 @@ async def enable_2fa(request: Request, otp: str = Form(...), db: AsyncSession = 
     if not user:
         return RedirectResponse('/login', status_code=303)
     if not user.twofa_secret:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Сначала создайте QR для 2FA'), status_code=303)
+        return _redirect('twofa_prepare_required', 'security')
     if not pyotp.TOTP(decrypt_secret(user.twofa_secret)).verify(otp, valid_window=1):
-        return RedirectResponse('/cabinet?msg=Неверный+2FA+код', status_code=303)
+        return _redirect('twofa_invalid', 'security')
     user.twofa_enabled = True
     request.session['auth'] = _session_marker(user)
     request.session['twofa_verified'] = True
     await audit(db, '2fa_enabled', 'user', actor_id=user.id, target_id=str(user.id), ip=client_ip(request))
     await db.commit()
-    return RedirectResponse('/cabinet?msg=2FA+подключена', status_code=303)
+    return _success_redirect('security')
 
 
 @router.post('/cabinet/security/2fa/disable')
@@ -1900,15 +2057,15 @@ async def disable_2fa(request: Request, otp: str = Form(''), db: AsyncSession = 
     if not user:
         return RedirectResponse('/login', status_code=303)
     if user.role in STAFF_2FA_ROLES:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Для этой роли 2FA обязательна'), status_code=303)
+        return _redirect('twofa_disable_forbidden', 'security')
     if user.twofa_enabled and user.twofa_secret and not pyotp.TOTP(decrypt_secret(user.twofa_secret)).verify(otp, valid_window=1):
-        return RedirectResponse('/cabinet?msg=Неверный+2FA+код', status_code=303)
+        return _redirect('twofa_invalid', 'security')
     user.twofa_enabled = False
     user.twofa_secret = None
     request.session.pop('twofa_verified', None)
     await audit(db, '2fa_disabled', 'user', actor_id=user.id, target_id=str(user.id), ip=client_ip(request))
     await db.commit()
-    return RedirectResponse('/cabinet?msg=2FA+отключена', status_code=303)
+    return _success_redirect('security')
 
 
 async def can_confirm_deposit(db: AsyncSession, user: User, deposit: Deposit) -> bool:
@@ -1946,17 +2103,18 @@ async def cabinet_confirm_deposit(deposit_id: str, request: Request, db: AsyncSe
             description='cabinet deposit confirmation',
         )
     except DepositConfirmationSystemError as exc:
-        return _redirect(exc.public_message, 'deposits')
+        return _redirect('deposit_action_failed', 'deposits')
     except DepositConfirmationError as exc:
-        return _redirect(exc.public_message, 'deposits')
+        return _redirect('deposit_action_failed', 'deposits')
     delivery = enqueue_deposit_confirmation_deliveries(result)
     if not result.confirmed:
         return _redirect(
             'Срок заявки истёк: выполнена финализация trader_timeout',
             'deposits',
         )
-    message = 'Deposit confirmed, webhook queued' if delivery['webhook_enqueued'] else 'Deposit confirmed, webhook queue unavailable'
-    return _redirect(message, 'deposits')
+    if not delivery['webhook_enqueued']:
+        return _redirect('webhook_queue_unavailable', 'deposits')
+    return _success_redirect('deposits')
 
 
 @router.post('/cabinet/deposits/{deposit_id}/decline')
@@ -1985,7 +2143,7 @@ async def cabinet_decline_deposit(
         select(Deposit).where(Deposit.id == deposit_uuid).with_for_update()
     )).scalar_one_or_none()
     if not dep:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Заявка не найдена'), status_code=303)
+        return _redirect('deposit_not_found', 'deposits')
     result = await finalize_unsuccessful_deposit(
         db,
         dep,
@@ -2005,14 +2163,10 @@ async def cabinet_decline_deposit(
     for callback_id in result.aggregator_callback_log_ids:
         enqueue_aggregator_callback_delivery(callback_id)
     if not result.changed:
-        return RedirectResponse(
-            '/cabinet?msg=' + quote_plus(
-                f'Deposit already finalized with status {result.status}'
-            ),
-            status_code=303,
-        )
-    message = 'Deposit declined, webhook queued' if webhook_enqueued else 'Deposit declined, webhook queue unavailable'
-    return RedirectResponse('/cabinet?msg=' + quote_plus(message), status_code=303)
+        return _redirect('deposit_action_failed', 'deposits')
+    if not webhook_enqueued:
+        return _redirect('webhook_queue_unavailable', 'deposits')
+    return _success_redirect('deposits')
 
 
 
@@ -2326,10 +2480,10 @@ async def request_merchant_settlement(
     if not user:
         return RedirectResponse('/login', status_code=303)
     if user.role != Role.merchant.value:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Settle может запросить только merchant'), status_code=303)
+        return _redirect('permission_denied', 'payouts')
     merchant = (await db.execute(select(Merchant).where(Merchant.owner_id == user.id))).scalar_one_or_none()
     if not merchant:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Merchant не найден'), status_code=303)
+        return _redirect('merchant_not_found', 'payouts')
     try:
         await create_merchant_settlement(
             db,
@@ -2348,9 +2502,9 @@ async def request_merchant_settlement(
         )
     except MerchantSettlementError as exc:
         await db.rollback()
-        return RedirectResponse('/cabinet?msg=' + quote_plus(str(exc)), status_code=303)
+        return _redirect(exc.code, 'payouts')
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle отправлен superadmin'), status_code=303)
+    return _success_redirect('payouts')
 
 
 @router.post('/cabinet/settlements/{settlement_id}/approve')
@@ -2366,11 +2520,11 @@ async def approve_merchant_settlement(
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Подтвердить settle может только superadmin'), status_code=303)
+        return _redirect('permission_denied', 'payouts')
     try:
         settlement_uuid = uuid.UUID(settlement_id)
     except ValueError:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle не найден'), status_code=303)
+        return _redirect('action_failed', 'payouts')
     try:
         await complete_merchant_settlement(
             db,
@@ -2381,12 +2535,9 @@ async def approve_merchant_settlement(
         )
     except MerchantSettlementError as exc:
         await db.rollback()
-        return RedirectResponse(
-            '/cabinet?msg=' + quote_plus(exc.code),
-            status_code=303,
-        )
+        return _redirect(exc.code, 'payouts')
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Settle подтверждён, баланс мерчанта уменьшен'), status_code=303)
+    return _success_redirect('payouts')
 
 
 @router.post('/cabinet/settlements/{settlement_id}/reject')
@@ -2397,11 +2548,11 @@ async def reject_merchant_settlement(request: Request, settlement_id: str, rejec
     if staff_2fa_setup_required(actor):
         return _twofa_redirect()
     if actor.role != Role.superadmin.value:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Отклонить settle может только superadmin'), status_code=303)
+        return _redirect('permission_denied', 'payouts')
     try:
         settlement_uuid = uuid.UUID(settlement_id)
     except ValueError:
-        return RedirectResponse('/cabinet?msg=' + quote_plus('Запрос settle не найден'), status_code=303)
+        return _redirect('action_failed', 'payouts')
     try:
         await reject_merchant_settlement(
             db,
@@ -2412,12 +2563,9 @@ async def reject_merchant_settlement(request: Request, settlement_id: str, rejec
         )
     except MerchantSettlementError as exc:
         await db.rollback()
-        return RedirectResponse(
-            '/cabinet?msg=' + quote_plus(exc.code),
-            status_code=303,
-        )
+        return _redirect(exc.code, 'payouts')
     await db.commit()
-    return RedirectResponse('/cabinet?msg=' + quote_plus('Settle отклонён'), status_code=303)
+    return _success_redirect('payouts')
 def _form_bool(value) -> bool:
     return str(value).lower() in {'1', 'true', 'on', 'yes', 'да'}
 
@@ -2434,7 +2582,7 @@ async def _require_superadmin_web(request: Request, db: AsyncSession) -> User | 
         request.scope.get('session', {}).clear()
         return RedirectResponse(
             '/login?error='
-            + quote_plus('РўСЂРµР±СѓРµС‚СЃСЏ РЅРѕРІС‹Р№ РІС…РѕРґ СЃ 2FA'),
+            + quote_plus('Требуется новый вход с 2FA'),
             status_code=303,
         )
     return actor
@@ -2541,14 +2689,7 @@ async def cabinet_platform_wallet_update(
     except IntegrityError:
         await db.rollback()
         return _redirect('platform_wallet_concurrent_update', 'wallet')
-    return _redirect(
-        (
-            'Кошелёк USDT TRC20 обновлён с сохранением истории'
-            if change.changed
-            else 'Кошелёк уже содержит эти данные'
-        ),
-        'wallet',
-    )
+    return _success_redirect('wallet')
 
 
 @router.post('/cabinet/ai-office/config')
@@ -2623,7 +2764,7 @@ async def cabinet_ai_office_save_config(
     except (AIIntegrationError, ValueError) as exc:
         await db.rollback()
         return _redirect(str(exc), 'ai-office')
-    return _redirect('Настройки AI Office сохранены', 'ai-office')
+    return _success_redirect('ai-office')
 
 
 @router.post('/cabinet/ai-office/config/secrets/{secret_kind}/clear')
@@ -2665,7 +2806,7 @@ async def cabinet_ai_office_clear_secret(
     except AIIntegrationError as exc:
         await db.rollback()
         return _redirect(str(exc), 'ai-office')
-    return _redirect('Credential удалён отдельным действием', 'ai-office')
+    return _success_redirect('ai-office')
 
 
 @router.post('/cabinet/ai-office/test-connection')
@@ -2719,14 +2860,9 @@ async def cabinet_ai_office_test_connection(
         },
     )
     await db.commit()
-    return _redirect(
-        (
-            f'AI Office connection OK ({result.latency_ms} ms)'
-            if result.success
-            else f'AI Office connection failed: {result.error_code}'
-        ),
-        'ai-office',
-    )
+    if result.success:
+        return _success_redirect('ai-office')
+    return _redirect('ai_office_connection_failed', 'ai-office')
 
 
 @router.post('/cabinet/antiscam/settings')
@@ -3020,13 +3156,7 @@ async def cabinet_rolling_register_transfer(
         await db.rollback()
         return _redirect(str(exc), 'rolling')
     await db.commit()
-    return _redirect(
-        (
-            f'Rolling transfer #{transfer.sequence_no} зарегистрирован: '
-            f'{transfer.amount_usdt} USDT; ожидается подтверждение мерчанта'
-        ),
-        'rolling',
-    )
+    return _success_redirect('rolling')
 
 
 async def _merchant_for_rolling_action(
@@ -3077,10 +3207,7 @@ async def cabinet_rolling_confirm_transfer(
         await db.rollback()
         return _redirect(str(exc), 'Пополнения')
     await db.commit()
-    return _redirect(
-        f'Получение Rolling transfer #{transfer.sequence_no} подтверждено',
-        'Пополнения',
-    )
+    return _success_redirect('Пополнения')
 
 
 @router.post('/cabinet/rolling/transfers/{transfer_id}/dispute')
@@ -3107,10 +3234,7 @@ async def cabinet_rolling_dispute_transfer(
         await db.rollback()
         return _redirect(str(exc), 'Пополнения')
     await db.commit()
-    return _redirect(
-        f'Проблема по Rolling transfer #{transfer.sequence_no} зарегистрирована',
-        'Пополнения',
-    )
+    return _success_redirect('Пополнения')
 
 
 @router.post('/cabinet/rolling/transfers/{transfer_id}/cancel')
@@ -3135,10 +3259,7 @@ async def cabinet_rolling_cancel_transfer(
         await db.rollback()
         return _redirect(str(exc), 'rolling')
     await db.commit()
-    return _redirect(
-        f'Rolling transfer #{transfer.sequence_no} отменён',
-        'rolling',
-    )
+    return _success_redirect('rolling')
 
 
 @router.post('/cabinet/rolling/merchants/{merchant_id}/suspension')
@@ -3174,12 +3295,12 @@ async def cabinet_rolling_suspension(
         {'status': account.status, 'reason': reason[:500]},
     )
     await db.commit()
-    return _redirect(f'Rolling status: {account.status}', 'rolling')
+    return _success_redirect('rolling')
 
 
 def _teamlead_redirect(message: str) -> RedirectResponse:
     return RedirectResponse(
-        '/cabinet?msg=' + quote_plus(message),
+        cabinet_redirect_url('/cabinet', message=message, section='teamlead'),
         status_code=303,
     )
 
@@ -3558,6 +3679,7 @@ async def cabinet(request: Request, db: AsyncSession = Depends(get_db)):
     user = await get_current_web_user(request, db)
     if not user:
         return RedirectResponse('/login', status_code=303)
+    _clear_preview_context(request)
     return await role_cabinet(request, user.role, db)
 
 
@@ -3569,20 +3691,21 @@ async def cabinet_by_role(request: Request, role: str, db: AsyncSession = Depend
     if not user:
         return RedirectResponse('/login', status_code=303)
     if user.role != role and user.role != Role.superadmin.value:
-        realm = request_auth_realm(request) or realm_for_role(user.role)
-        return templates.TemplateResponse(
-            request=request,
-            name='forbidden.html',
-            context={
-                'request': request,
-                'user': user,
-                'requested_role': role,
-                'cabinet_base': realm_cabinet_path(realm) if realm else '/cabinet',
-                **branding_context(),
-            },
-            status_code=403,
+        return _preview_forbidden_page(request, user, role)
+    trader_subject = None
+    if role in TRADER_ROLES:
+        trader_subject = await _trusted_trader_preview_subject(
+            request,
+            user,
+            db,
+            requested_role=role,
+            accept_entry_token=True,
         )
-    return await role_cabinet(request, role, db)
+        if not trader_subject:
+            return _preview_forbidden_page(request, user, role)
+    elif role != user.role:
+        _clear_preview_context(request)
+    return await role_cabinet(request, role, db, trader_subject=trader_subject)
 
 
 def _fee_datetime(value: str | None, *, default_now: bool = False) -> datetime | None:
@@ -3651,10 +3774,15 @@ COMMISSION_ENTITY_SECTIONS = {
 
 
 def _commission_tier_redirect(entity_type: str, entity_id: UUID, message: str) -> RedirectResponse:
-    section = quote_plus(COMMISSION_ENTITY_SECTIONS[entity_type])
-    selected = quote_plus(f'{entity_type}:{entity_id}')
+    section = COMMISSION_ENTITY_SECTIONS[entity_type]
+    selected = f'{entity_type}:{entity_id}'
     return RedirectResponse(
-        f'/cabinet?section={section}&commission_entity={selected}&msg={quote_plus(message)}',
+        cabinet_redirect_url(
+            '/cabinet',
+            message=message,
+            section=section,
+            extra={'commission_entity': selected},
+        ),
         status_code=303,
     )
 
@@ -3743,9 +3871,14 @@ def _fee_rule_form_values(form, *, entity_type: str, entity_id: UUID) -> dict:
 
 
 def _fee_entity_redirect(entity_type: str, entity_id: UUID, message: str) -> RedirectResponse:
-    selected = quote_plus(f'{entity_type}:{entity_id}')
+    selected = f'{entity_type}:{entity_id}'
     return RedirectResponse(
-        f'/cabinet?tariff_entity={selected}&msg={quote_plus(message)}#fee-tariffs',
+        cabinet_redirect_url(
+            '/cabinet',
+            message=message,
+            extra={'tariff_entity': selected},
+            fragment='fee-tariffs',
+        ),
         status_code=303,
     )
 
@@ -3990,6 +4123,111 @@ async def cabinet_deactivate_fee_rule(rule_id: UUID, request: Request, db: Async
     raise HTTPException(410, 'unscoped fee-rule deactivation is disabled; use an entity-scoped tariff route')
 
 
+def _trader_requisite_search_text(req: Requisite) -> str:
+    return ' '.join([
+        display_requisite_value(req),
+        req.bank_code or '',
+        req.bank_name or '',
+        req.operator_code or '',
+        req.full_name or '',
+        req.owner_name or '',
+    ]).lower()
+
+
+async def _load_trader_deposit_view(
+    db: AsyncSession,
+    *,
+    subject_trader_id: UUID,
+    filters: dict[str, str],
+    page_size: int = 500,
+) -> dict[str, object]:
+    """Load one Trader subject's SQL-scoped deposit view before the page limit."""
+    requisites = (await db.execute(
+        select(Requisite)
+        .where(
+            Requisite.trader_id == subject_trader_id,
+            Requisite.is_archived.is_(False),
+        )
+        .order_by(Requisite.created_at.desc())
+    )).scalars().all()
+    requisite_ids = [row.id for row in requisites]
+    query_text = filters.get('query', '').lower()
+    requisite_text = filters.get('requisite', '').lower()
+    matching_requisite_ids = [
+        req.id for req in requisites
+        if query_text and query_text in _trader_requisite_search_text(req)
+    ]
+    requisite_filter_ids = [
+        req.id for req in requisites
+        if requisite_text and requisite_text in _trader_requisite_search_text(req)
+    ]
+    bank_requisite_ids = [
+        req.id for req in requisites
+        if filters.get('bank_code') and req.bank_code == filters['bank_code']
+    ]
+    statement = apply_trader_deposit_filters(
+        trader_deposit_scope(requisite_ids),
+        filters,
+        matching_requisite_ids=matching_requisite_ids,
+        requisite_filter_ids=requisite_filter_ids,
+        bank_requisite_ids=bank_requisite_ids,
+    ).limit(max(1, min(int(page_size), 500)))
+    deposits = (await db.execute(statement)).scalars().all() if requisite_ids else []
+    aggregates = await trader_deposit_aggregates(db, requisite_ids=requisite_ids)
+    return {
+        'requisites': requisites,
+        'deposits': deposits,
+        'aggregates': aggregates,
+    }
+
+
+def _can_render_trader_deposit_process(
+    viewer: User,
+    subject: User,
+    deposit: Deposit,
+    requisite: Requisite | None,
+) -> bool:
+    if deposit.status not in DEPOSIT_ACTIVE_STATUSES:
+        return False
+    if not requisite or str(requisite.trader_id) != str(subject.id):
+        return False
+    if viewer.role in {Role.superadmin.value, Role.admin.value}:
+        return True
+    return viewer.role in TRADER_ROLES and str(viewer.id) == str(subject.id)
+
+
+def _trader_deposit_details(
+    viewer: User,
+    subject: User,
+    deposits: list[Deposit],
+    requisites: list[Requisite],
+) -> dict[str, dict[str, object]]:
+    req_by_id = {row.id: row for row in requisites}
+    now = datetime.now(timezone.utc)
+    details = {}
+    for deposit in deposits:
+        req = req_by_id.get(deposit.requisites_id)
+        deadline = _deposit_deadline(deposit)
+        details[str(deposit.id)] = {
+            'requisite': display_requisite_value(req) if req and _can_view_requisite_value(viewer, req) else '',
+            'bank': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+            'provider_label': requisite_provider_label(req.method) if req else 'Банк',
+            'provider_name': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+            'receiver_name': (req.full_name or req.owner_name) if req else '',
+            'deadline_iso': deadline.isoformat(),
+            'remaining_seconds': max(0, int((deadline - now).total_seconds())),
+            'is_active': deposit.status in DEPOSIT_ACTIVE_FOR_TRADER,
+            'failure_reason': (deposit.metadata_json or {}).get('failure_reason', ''),
+            'can_process': _can_render_trader_deposit_process(
+                viewer,
+                subject,
+                deposit,
+                req,
+            ),
+        }
+    return details
+
+
 async def _deposit_partial_context(request: Request, user: User, db: AsyncSession) -> dict:
     role = user.role
     auth_realm = request_auth_realm(request) or realm_for_role(role)
@@ -3999,20 +4237,46 @@ async def _deposit_partial_context(request: Request, user: User, db: AsyncSessio
         merchant = (await db.execute(
             select(Merchant).where(Merchant.owner_id == user.id, Merchant.is_archived.is_(False))
         )).scalar_one_or_none()
+    trader_subject = await _trusted_trader_preview_subject(
+        request,
+        user,
+        db,
+        requested_role=Role.trader.value,
+        accept_entry_token=False,
+    )
+    preview_requested = request.query_params.get('preview', '').strip() == 'trader'
+    if preview_requested and not trader_subject:
+        raise HTTPException(403, 'trusted Trader preview context required')
+    if trader_subject:
+        filters = normalized_deposit_filters(
+            request.query_params,
+            valid_bank_codes=(bank.code for bank in get_enabled_banks()),
+        )
+        view_data = await _load_trader_deposit_view(
+            db,
+            subject_trader_id=trader_subject.id,
+            filters=filters,
+        )
+        requisites = view_data['requisites']
+        deposits = view_data['deposits']
+        return {
+            'request': request,
+            'role': user.role if user.role in TRADER_ROLES else Role.trader.value,
+            'deposits': deposits,
+            'deposit_details': _trader_deposit_details(
+                user,
+                trader_subject,
+                deposits,
+                requisites,
+            ),
+            'deposit_filters': filters,
+            'cabinet_base': cabinet_base,
+            **branding_context(),
+        }
     staff_roles = {
         Role.superadmin.value, Role.admin.value, Role.support.value,
-        Role.operator.value, Role.trader.value,
     }
-    if role in {Role.operator.value, Role.trader.value}:
-        requisites = (await db.execute(
-            select(Requisite).where(Requisite.trader_id == user.id)
-        )).scalars().all()
-        requisite_ids = [row.id for row in requisites]
-        deposits = (await db.execute(
-            select(Deposit).where(Deposit.requisites_id.in_(requisite_ids))
-            .order_by(Deposit.created_at.desc()).limit(500)
-        )).scalars().all() if requisite_ids else []
-    elif role in staff_roles:
+    if role in staff_roles:
         deposits = (await db.execute(
             select(Deposit).order_by(Deposit.created_at.desc()).limit(500)
         )).scalars().all()
@@ -4035,13 +4299,14 @@ async def _deposit_partial_context(request: Request, user: User, db: AsyncSessio
     if missing_ids:
         rows = (await db.execute(select(Requisite).where(Requisite.id.in_(missing_ids)))).scalars().all()
         req_by_id.update({row.id: row for row in rows})
-    filters = {
-        'query': request.query_params.get('deposit_query', '').strip()
-        or request.query_params.get('merchant_deal_id', '').strip(),
-        'amount': request.query_params.get('deposit_amount', '').strip(),
-        'requisite': request.query_params.get('deposit_requisite', '').strip(),
-        'date': request.query_params.get('deposit_date', '').strip(),
-    }
+    if role not in {Role.operator.value, Role.trader.value}:
+        filters = {
+            'query': request.query_params.get('deposit_query', '').strip()
+            or request.query_params.get('merchant_deal_id', '').strip(),
+            'amount': request.query_params.get('deposit_amount', '').strip(),
+            'requisite': request.query_params.get('deposit_requisite', '').strip(),
+            'date': request.query_params.get('deposit_date', '').strip(),
+        }
     merchant_trader_id = request.query_params.get('merchant_trader_id', '').strip()
     if merchant_trader_id and role == Role.merchant.value:
         deposits = [
@@ -4049,20 +4314,11 @@ async def _deposit_partial_context(request: Request, user: User, db: AsyncSessio
             if row.requisites_id and req_by_id.get(row.requisites_id)
             and str(req_by_id[row.requisites_id].trader_id) == merchant_trader_id
         ]
-    if any(filters.values()):
+    if any(filters.values()) and role not in {Role.operator.value, Role.trader.value}:
         deposits = [
             row for row in deposits
             if deposit_matches_filters(row, req_by_id.get(row.requisites_id), filters)
         ]
-    if role in {Role.operator.value, Role.trader.value} and deposits:
-        active_appeals = set((await db.execute(
-            select(Appeal.operation_id).where(
-                Appeal.operation_type == 'deposit',
-                Appeal.operation_id.in_([row.id for row in deposits]),
-                Appeal.status.in_([AppealStatus.opened.value, AppealStatus.in_review.value]),
-            )
-        )).scalars().all())
-        deposits = [row for row in deposits if row.id not in active_appeals]
     trader_ids = {req.trader_id for req in req_by_id.values() if req.trader_id}
     traders = (await db.execute(select(User).where(User.id.in_(trader_ids)))).scalars().all() if trader_ids else []
     trader_by_id = {row.id: row for row in traders}
@@ -4086,10 +4342,12 @@ async def _deposit_partial_context(request: Request, user: User, db: AsyncSessio
             'trader_email': trader.email if trader else '',
             'trader_profit': str(deposit_trader_profit_amount(deposit, trader)),
             'trader_settlement': str(deposit_trader_settlement_amount(deposit, trader)),
+            'failure_reason': (deposit.metadata_json or {}).get('failure_reason', ''),
         }
     return {
         'request': request, 'role': role, 'deposits': deposits,
-        'deposit_details': details, 'cabinet_base': cabinet_base,
+        'deposit_details': details, 'deposit_filters': filters,
+        'cabinet_base': cabinet_base,
         **branding_context(),
     }
 
@@ -4299,7 +4557,7 @@ async def _teamlead_own_cabinet(
             'auth_realm': auth_realm,
             'cabinet_base': cabinet_base,
             'logout_path': f'/{auth_realm}/logout' if auth_realm else '/logout',
-            'msg': request.query_params.get('msg'),
+            'ui_message': resolve_ui_message(request.query_params),
             'balance': balance,
             'trader_rows': trader_rows,
             'merchant_rows': merchant_rows,
@@ -4351,8 +4609,19 @@ async def _teamlead_own_cabinet(
     )
 
 
-async def role_cabinet(request: Request, role: str, db: AsyncSession):
+async def role_cabinet(
+    request: Request,
+    role: str,
+    db: AsyncSession,
+    *,
+    trader_subject: User | None = None,
+):
     user = await get_current_web_user(request, db)
+    if role in TRADER_ROLES and trader_subject is None and user.role in TRADER_ROLES:
+        trader_subject = user
+    trader_preview_active = bool(
+        trader_subject and user.role == Role.superadmin.value and role in TRADER_ROLES
+    )
     if (
         role == Role.teamlead.value
         and user.role == Role.teamlead.value
@@ -4362,12 +4631,12 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     auth_realm = request_auth_realm(request) or realm_for_role(user.role)
     cabinet_base = realm_cabinet_path(auth_realm) if auth_realm else '/cabinet'
     sections = [section for section in ROLE_SECTIONS.get(role, []) if section not in HIDDEN_CABINET_SECTIONS]
-    message = request.query_params.get('msg')
+    ui_message = resolve_ui_message(request.query_params)
     if staff_2fa_setup_required(user):
         role = user.role
         sections = ['Безопасность']
-        message = message or 'Для этой роли 2FA обязательна. Подключите 2FA, чтобы открыть остальные разделы.'
-    else:
+        ui_message = ui_message or resolve_ui_message({'ui_error': 'twofa_required'})
+    elif not trader_preview_active:
         expired_events = await approve_expired_appeals(db)
         if expired_events:
             await db.commit()
@@ -4383,21 +4652,50 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     merchant_settlement_idempotency_key = ''
     merchant_settlements = []
     webhook_events = []
+    attempts_by_event_id = {}
+    webhook_event_views = []
     aggregator_accounts = []
     aggregator_payments = []
     aggregator_callback_logs = []
     aggregator_name_by_id = {}
     aggregator_secret_flash = await _consume_aggregator_secret_flash(request, user)
     antiscam = {}
+    valid_risk_states = {member.value for member in TrafficStatus}
+    valid_risk_methods = {member.value for member in PaymentMethod}
+    valid_risk_bank_codes = {bank.code for bank in get_enabled_banks()}
+    risk_filters = {
+        'query': request.query_params.get('risk_query', '').strip(),
+        'trader_id': request.query_params.get('risk_trader_id', '').strip(),
+        'bank_code': request.query_params.get('risk_bank_code', '').strip(),
+        'payment_method': request.query_params.get('risk_payment_method', '').strip(),
+        'state': request.query_params.get('risk_state', '').strip(),
+    }
+    if risk_filters['bank_code'] not in valid_risk_bank_codes:
+        risk_filters['bank_code'] = ''
+    if risk_filters['payment_method'] not in valid_risk_methods:
+        risk_filters['payment_method'] = ''
+    if risk_filters['state'] not in valid_risk_states:
+        risk_filters['state'] = ''
     settlement_merchant_names = {}
     merchant_filter_trader_id = request.query_params.get('merchant_trader_id', '').strip()
     merchant_deal_id = request.query_params.get('merchant_deal_id', '').strip()
-    deposit_filters = {
-        'query': (request.query_params.get('deposit_query', '').strip() or merchant_deal_id),
-        'amount': request.query_params.get('deposit_amount', '').strip(),
-        'requisite': request.query_params.get('deposit_requisite', '').strip(),
-        'date': request.query_params.get('deposit_date', '').strip(),
-    }
+    if role in {Role.operator.value, Role.trader.value}:
+        deposit_filters = normalized_deposit_filters(
+            request.query_params,
+            valid_bank_codes=(bank.code for bank in get_enabled_banks()),
+        )
+    else:
+        deposit_filters = {
+            'view': '',
+            'query': (request.query_params.get('deposit_query', '').strip() or merchant_deal_id),
+            'amount': request.query_params.get('deposit_amount', '').strip(),
+            'requisite': request.query_params.get('deposit_requisite', '').strip(),
+            'date': request.query_params.get('deposit_date', '').strip(),
+            'bank_code': '',
+            'payment_method': '',
+            'status': '',
+        }
+    deposit_aggregates = {}
     appeal_filters = {
         'query': request.query_params.get('appeal_query', '').strip(),
         'amount': request.query_params.get('appeal_amount', '').strip(),
@@ -4588,6 +4886,20 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     users = (await db.execute(select(User).where(User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value] else []
     merchant_users = [u for u in users if u.role == Role.merchant.value]
     trader_users = (await db.execute(select(User).where(User.role.in_([Role.operator.value, Role.trader.value]), User.is_archived.is_(False)).order_by(User.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else []
+    trader_preview_urls = {}
+    if user.role == Role.superadmin.value:
+        for preview_trader in trader_users:
+            preview_token = issue_preview_context_token(
+                request.session,
+                preview_role=Role.trader.value,
+                subject_id=str(preview_trader.id),
+            )
+            if preview_token:
+                trader_preview_urls[str(preview_trader.id)] = (
+                    f'{cabinet_base}/{Role.trader.value}'
+                    f'?preview_context={quote_plus(preview_token)}'
+                    '&section=deposits&view=active'
+                )
     merchants = (await db.execute(select(Merchant).where(Merchant.is_archived.is_(False)).order_by(Merchant.created_at.desc()).limit(300))).scalars().all() if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value] else ([merchant] if merchant else [])
     if user.role in {Role.superadmin.value, Role.admin.value}:
         teamlead_users = [row for row in users if row.role == Role.teamlead.value]
@@ -4853,6 +5165,24 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         webhook_events = (await db.execute(select(WebhookEvent).order_by(WebhookEvent.created_at.desc()).limit(300))).scalars().all()
     elif role == Role.merchant.value and merchant:
         webhook_events = (await db.execute(select(WebhookEvent).where(WebhookEvent.merchant_id == merchant.id).order_by(WebhookEvent.created_at.desc()).limit(300))).scalars().all()
+    if webhook_events:
+        webhook_event_ids = [event.id for event in webhook_events]
+        webhook_attempt_rows = (await db.execute(
+            select(WebhookDeliveryAttempt)
+            .where(WebhookDeliveryAttempt.webhook_event_id.in_(webhook_event_ids))
+            .order_by(
+                WebhookDeliveryAttempt.webhook_event_id.asc(),
+                WebhookDeliveryAttempt.attempt_no.asc(),
+            )
+        )).scalars().all()
+        attempts_by_event_id = build_attempts_by_event_id(webhook_attempt_rows)
+        webhook_event_views = [
+            build_webhook_event_view(
+                event,
+                attempts_by_event_id.get(event.id, []),
+            )
+            for event in webhook_events
+        ]
     if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
         aggregator_accounts = (await db.execute(select(AggregatorAccount).where(AggregatorAccount.is_archived.is_(False)).order_by(AggregatorAccount.created_at.desc()).limit(300))).scalars().all()
         aggregator_name_by_id = {str(account.id): account.name for account in aggregator_accounts}
@@ -4967,13 +5297,14 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 and str(rule.entity_id) == selected_fee_entity['id']
             ]
     can_view_operations = user.role in [Role.superadmin.value, Role.admin.value, Role.support.value, Role.operator.value, Role.trader.value]
-    if user.role in [Role.operator.value, Role.trader.value]:
-        requisites = (await db.execute(
-            select(Requisite)
-            .where(Requisite.trader_id == user.id, Requisite.is_archived.is_(False))
-            .order_by(Requisite.created_at.desc())
-            .limit(300)
-        )).scalars().all()
+    trader_deposit_view = None
+    if trader_subject:
+        trader_deposit_view = await _load_trader_deposit_view(
+            db,
+            subject_trader_id=trader_subject.id,
+            filters=deposit_filters,
+        )
+        requisites = trader_deposit_view['requisites']
     elif can_view_operations:
         requisites = (await db.execute(select(Requisite).where(Requisite.is_archived.is_(False)).order_by(Requisite.created_at.desc()).limit(300))).scalars().all()
     else:
@@ -4990,16 +5321,9 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         if _can_view_requisite_value(user, r)
     }
     trader_deposit_ids_for_appeals = set()
-    if user.role in [Role.operator.value, Role.trader.value]:
-        if req_by_id:
-            deposits = (await db.execute(
-                select(Deposit)
-                .where(Deposit.requisites_id.in_(list(req_by_id.keys())))
-                .order_by(Deposit.created_at.desc())
-                .limit(500)
-            )).scalars().all()
-        else:
-            deposits = []
+    if trader_subject:
+        deposits = trader_deposit_view['deposits']
+        deposit_aggregates = trader_deposit_view['aggregates']
     elif can_view_operations:
         deposits = (await db.execute(select(Deposit).order_by(Deposit.created_at.desc()).limit(500))).scalars().all()
     elif role == Role.merchant.value and merchant:
@@ -5034,47 +5358,50 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
                 if dep.requisites_id and req_by_id.get(dep.requisites_id) and str(req_by_id[dep.requisites_id].trader_id) == merchant_filter_trader_id
             ]
         deposits = filtered_merchant_deposits
-    if any(deposit_filters.values()):
+    if (
+        any(deposit_filters.values())
+        and not trader_subject
+        and user.role not in [Role.operator.value, Role.trader.value]
+    ):
         deposits = [
             dep for dep in deposits
             if deposit_matches_filters(dep, req_by_id.get(dep.requisites_id), deposit_filters)
         ]
-    if user.role in [Role.operator.value, Role.trader.value] and trader_deposit_ids_for_appeals:
-        active_appeal_deposit_ids = set((await db.execute(
-            select(Appeal.operation_id).where(
-                Appeal.operation_type == 'deposit',
-                Appeal.operation_id.in_(trader_deposit_ids_for_appeals),
-                Appeal.status.in_([AppealStatus.opened.value, AppealStatus.in_review.value]),
-            )
-        )).scalars().all())
-        if active_appeal_deposit_ids:
-            deposits = [dep for dep in deposits if dep.id not in active_appeal_deposit_ids]
-    now = datetime.now(timezone.utc)
-    deposit_details = {}
-    for dep in deposits:
-        req = req_by_id.get(dep.requisites_id)
-        deadline = _deposit_deadline(dep)
-        remaining_seconds = max(0, int((deadline - now).total_seconds()))
-        merchant_related = bool(role == Role.merchant.value and merchant and dep.merchant_id == merchant.id)
-        deposit_details[str(dep.id)] = {
-            'requisite': display_requisite_value(req) if req and _can_view_requisite_value(user, req, merchant_related=merchant_related) else '',
-            'bank': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
-            'provider_label': requisite_provider_label(req.method) if req else 'Банк',
-            'provider_name': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
-            'receiver_name': (req.full_name or req.owner_name) if req else '',
-            'deadline_iso': deadline.isoformat(),
-            'remaining_seconds': remaining_seconds,
-            'is_active': dep.status in DEPOSIT_ACTIVE_FOR_TRADER,
-            'merchant_fee': (dep.metadata_json or {}).get('merchant_fee_amount', ''),
-            'merchant_payable': (
-                (dep.metadata_json or {}).get('merchant_payable_amount')
-                or (dep.metadata_json or {}).get(
-                    'merchant_' 'net_amount',
-                    '',
-                )
-            ),
-            'platform_income': (dep.metadata_json or {}).get('platform_income_amount', ''),
-        }
+    if trader_subject:
+        deposit_details = _trader_deposit_details(
+            user,
+            trader_subject,
+            deposits,
+            requisites,
+        )
+    else:
+        now = datetime.now(timezone.utc)
+        deposit_details = {}
+        for dep in deposits:
+            req = req_by_id.get(dep.requisites_id)
+            deadline = _deposit_deadline(dep)
+            remaining_seconds = max(0, int((deadline - now).total_seconds()))
+            merchant_related = bool(role == Role.merchant.value and merchant and dep.merchant_id == merchant.id)
+            deposit_details[str(dep.id)] = {
+                'requisite': display_requisite_value(req) if req and _can_view_requisite_value(user, req, merchant_related=merchant_related) else '',
+                'bank': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+                'provider_label': requisite_provider_label(req.method) if req else 'Банк',
+                'provider_name': requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else '',
+                'receiver_name': (req.full_name or req.owner_name) if req else '',
+                'deadline_iso': deadline.isoformat(),
+                'remaining_seconds': remaining_seconds,
+                'is_active': dep.status in DEPOSIT_ACTIVE_FOR_TRADER,
+                'merchant_fee': (dep.metadata_json or {}).get('merchant_fee_amount', ''),
+                'merchant_payable': (
+                    (dep.metadata_json or {}).get('merchant_payable_amount')
+                    or (dep.metadata_json or {}).get(
+                        'merchant_' 'net_amount',
+                        '',
+                    )
+                ),
+                'platform_income': (dep.metadata_json or {}).get('platform_income_amount', ''),
+                'failure_reason': (dep.metadata_json or {}).get('failure_reason', ''),
+            }
     if user.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
         payouts = (await db.execute(select(Payout).order_by(Payout.created_at.desc()).limit(200))).scalars().all()
     elif user.role in [Role.operator.value, Role.trader.value]:
@@ -5109,6 +5436,16 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             str(actor.id): f"{actor.email} ({'trader' if actor.role in [Role.operator.value, Role.trader.value] else actor.role})"
             for actor in audit_actor_users
         }
+    audit_views = [
+        build_audit_view(
+            row,
+            audit_actor_names.get(
+                str(row.actor_id or ''),
+                'Система' if not row.actor_id else str(row.actor_id),
+            ),
+        )
+        for row in audit_logs
+    ]
     if user.role == Role.superadmin.value:
         for rolling_merchant in merchants:
             finance_row = merchant_finance_rows[str(rolling_merchant.id)]
@@ -5365,9 +5702,38 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
             'requisites': trader_requisites.get(str(t.id), []),
         }
 
-    current_trader_stats = build_trader_stats(user) if user.role in [Role.operator.value, Role.trader.value] else {}
+    current_trader_stats = build_trader_stats(trader_subject) if trader_subject else {}
     if user.role == Role.superadmin.value:
         antiscam = await antiscam_dashboard_rows(db)
+        filtered_risk_requisites = list(antiscam.get('requisites', []))
+        if risk_filters['query']:
+            needle = risk_filters['query'].casefold()
+            filtered_risk_requisites = [
+                row for row in filtered_risk_requisites
+                if needle in str(requisite_values.get(str(row.id), '')).casefold()
+                or needle in str(row.id).casefold()
+            ]
+        if risk_filters['trader_id']:
+            filtered_risk_requisites = [
+                row for row in filtered_risk_requisites
+                if str(row.trader_id or '') == risk_filters['trader_id']
+            ]
+        if risk_filters['bank_code']:
+            filtered_risk_requisites = [
+                row for row in filtered_risk_requisites
+                if row.bank_code == risk_filters['bank_code']
+            ]
+        if risk_filters['payment_method']:
+            filtered_risk_requisites = [
+                row for row in filtered_risk_requisites
+                if row.method == risk_filters['payment_method']
+            ]
+        if risk_filters['state']:
+            filtered_risk_requisites = [
+                row for row in filtered_risk_requisites
+                if row.traffic_status == risk_filters['state']
+            ]
+        antiscam['requisites'] = filtered_risk_requisites
     rapira_quote = await get_rapira_rub_usdt_quote()
     rapira_source = f'{rapira_quote.source} stale' if rapira_quote.stale else rapira_quote.source
     bank_options = [
@@ -5388,7 +5754,7 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
     ]
     context = {
         'request': request,
-        'msg': message,
+        'ui_message': ui_message,
         'session_view_token': session_view_fingerprint(request.session),
         'cabinet_poll_interval_seconds': settings.CABINET_POLL_INTERVAL_SECONDS,
         'auth_realm': auth_realm,
@@ -5439,6 +5805,14 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'merchant_filter_trader_id': merchant_filter_trader_id,
         'merchant_deal_id': merchant_deal_id,
         'deposit_filters': deposit_filters,
+        'deposit_aggregates': deposit_aggregates,
+        'deposit_refresh_url': (
+            f'{cabinet_base}/partials/deposits?preview=trader'
+            if trader_preview_active
+            else f'{cabinet_base}/partials/deposits'
+        ),
+        'deposit_active_statuses': sorted(DEPOSIT_ACTIVE_STATUSES),
+        'deposit_terminal_statuses': sorted(DEPOSIT_TERMINAL_STATUSES),
         'appeal_filters': appeal_filters,
         'merchant_stats': merchant_stats,
         'merchant_trader_rows': merchant_trader_rows,
@@ -5455,6 +5829,10 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'income_aggregator_options': income_aggregator_options,
         'income_dashboard': income_dashboard,
         'trader_users': trader_users,
+        'trader_preview_active': trader_preview_active,
+        'trader_preview_subject': trader_subject,
+        'trader_display_user': trader_subject or user,
+        'trader_preview_urls': trader_preview_urls,
         'merchants': merchants,
         'trader_requisites': trader_requisites,
         'trader_email_map': trader_email_map,
@@ -5462,7 +5840,9 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'trader_details': trader_details,
         'current_trader_stats': current_trader_stats,
         'antiscam': antiscam,
+        'risk_filters': risk_filters,
         'audit_logs': audit_logs,
+        'audit_views': audit_views,
         'audit_actor_names': audit_actor_names,
         'rf_banks': RF_BANKS,
         'bank_options': bank_options,
@@ -5487,6 +5867,8 @@ async def role_cabinet(request: Request, role: str, db: AsyncSession):
         'appeal_messages_by_id': appeal_messages_by_id,
         'appeal_rejection_reasons': TRADER_REJECTION_REASONS,
         'webhook_events': webhook_events,
+        'attempts_by_event_id': attempts_by_event_id,
+        'webhook_event_views': webhook_event_views,
         'aggregator_accounts': aggregator_accounts,
         'aggregator_payments': aggregator_payments,
         'aggregator_callback_logs': aggregator_callback_logs,
