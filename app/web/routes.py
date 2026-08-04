@@ -995,7 +995,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
             name='login.html',
             context=login_context(
                 request,
-                'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.',
+                'Слишком много попыток входа. Повторите позже.',
             ),
             status_code=429,
         )
@@ -1022,7 +1022,7 @@ async def login_submit(request: Request, email: str = Form(...), password: str =
                 name='login.html',
                 context=login_context(
                     request,
-                    'РЎР»РёС€РєРѕРј РјРЅРѕРіРѕ РїРѕРїС‹С‚РѕРє РІС…РѕРґР°. РџРѕРІС‚РѕСЂРёС‚Рµ РїРѕР·Р¶Рµ.',
+                    'Слишком много попыток входа. Повторите позже.',
                 ),
                 status_code=429,
             )
@@ -2500,7 +2500,7 @@ async def _require_superadmin_web(request: Request, db: AsyncSession) -> User | 
         request.scope.get('session', {}).clear()
         return RedirectResponse(
             '/login?error='
-            + quote_plus('РўСЂРµР±СѓРµС‚СЃСЏ РЅРѕРІС‹Р№ РІС…РѕРґ СЃ 2FA'),
+            + quote_plus('Требуется новый вход с 2FA'),
             status_code=303,
         )
     return actor

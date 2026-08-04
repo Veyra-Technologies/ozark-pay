@@ -6,6 +6,16 @@ CABINET = (ROOT / "app/templates/cabinet.html").read_text(encoding="utf-8")
 TEAMLEAD = (ROOT / "app/templates/teamlead.html").read_text(encoding="utf-8")
 MERCHANT_API = (ROOT / "app/api/v1/merchant.py").read_text(encoding="utf-8")
 UI_MESSAGES = (ROOT / "app/web/ui_messages.py").read_text(encoding="utf-8")
+WEB_ROUTES = (ROOT / "app/web/routes.py").read_text(encoding="utf-8")
+
+
+def test_login_error_messages_are_valid_utf8_russian_text():
+    assert "РЎР" not in WEB_ROUTES
+    assert "РўСЂ" not in WEB_ROUTES
+    assert WEB_ROUTES.count(
+        "Слишком много попыток входа. Повторите позже."
+    ) == 3
+    assert "quote_plus('Требуется новый вход с 2FA')" in WEB_ROUTES
 
 
 def test_teamlead_static_helper_banners_are_absent():
