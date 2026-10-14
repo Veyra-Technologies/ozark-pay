@@ -1,0 +1,14 @@
+<h3>SETTLE · USDT</h3>
+<div class="grid">
+  <div class="metric metric--accent"><b>К выплате</b><p>{{ (balance.available if balance else 0)|decimal_display }} USDT</p></div>
+  <div class="metric"><b>Холд</b><p>{{ (balance.frozen if balance else 0)|decimal_display }} USDT</p></div>
+  <div class="metric"><b>Расчётный баланс</b><p>{{ ((balance.available + balance.frozen) if balance else 0)|decimal_display }} USDT</p></div>
+</div>
+<h3>История расчётов</h3>
+<div class="table-wrap"><table><thead><tr><th>Дата</th><th>Операция</th><th>Тип</th><th>Сумма</th></tr></thead><tbody>
+{% for entry in merchant_display.get('ledger',[]) %}
+<tr><td>{{ entry.created_at|dt_compact }}</td><td><span class="cell-mono">{{ entry.operation_id|short_identifier if entry.operation_id else '—' }}</span></td><td>{{ {'credit':'Зачисление','hold':'Резерв Settle','release':'Освобождение резерва','debit':'Списание Settle','crossborder_credit':'Зачисление','crossborder_refund':'Возврат'}.get(entry.entry_type, entry.entry_type|status_label) }}</td><td class="text-amount">{{ entry.amount|decimal_display }} USDT</td></tr>
+{% else %}<tr><td colspan="4">Расчётов пока нет</td></tr>{% endfor %}
+</tbody></table></div>
+
+{% include '_merchant_settlement.html' %}

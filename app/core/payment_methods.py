@@ -5,7 +5,9 @@ from app.core.enums import PaymentMethod
 
 PAYMENT_METHOD_LABELS: dict[str, str] = {
     PaymentMethod.sbp.value: 'СБП',
+    PaymentMethod.sbp_qr.value: 'QR НСПК',
     PaymentMethod.c2c.value: 'Карта',
+    PaymentMethod.bank_account.value: 'Номер счёта',
     PaymentMethod.mobile_commerce.value: 'Мобильная коммерция',
     PaymentMethod.mobile.value: 'Мобильная коммерция',
 }
@@ -28,7 +30,11 @@ PAYMENT_METHOD_ALIASES: dict[str, str] = {
     'card_number': PaymentMethod.c2c.value,
     'bank_transfer': PaymentMethod.c2c.value,
     'c2c': PaymentMethod.c2c.value,
+    'bank_account': PaymentMethod.bank_account.value,
+    'iban': PaymentMethod.bank_account.value,
     'sbp': PaymentMethod.sbp.value,
+    'sbp_qr': PaymentMethod.sbp_qr.value,
+    'sbp-qr': PaymentMethod.sbp_qr.value,
     'mobile': PaymentMethod.mobile.value,
     'mobile_commerce': PaymentMethod.mobile_commerce.value,
     'mobile-commerce': PaymentMethod.mobile_commerce.value,
@@ -43,9 +49,21 @@ def normalize_payment_method(value: str | None, *, canonical_mobile: bool = Fals
     return method
 
 
-def payment_method_label(value: str | None) -> str:
+def payment_method_label(value: str | None, country: str | None = None) -> str:
     clean = (value or '').strip()
+    if country == 'GE' and clean == PaymentMethod.c2c.value:
+        return 'Номер карты'
     return PAYMENT_METHOD_LABELS.get(clean, clean or '—')
+
+
+def requisite_method_options(country: str | None) -> tuple[dict[str, str], ...]:
+    """Bank identifier types; independent of parser, tariff and payment direction."""
+    if country == 'GE':
+        return ({'value': 'c2c', 'label': 'Номер карты'},
+                {'value': 'bank_account', 'label': 'Номер счёта'})
+    if country == 'AM':
+        return ({'value': 'c2c', 'label': 'Карта'},)
+    return PAYMENT_METHOD_OPTIONS if country == 'RU' else ()
 
 
 def get_payment_method_display_name(value: str | None) -> str:

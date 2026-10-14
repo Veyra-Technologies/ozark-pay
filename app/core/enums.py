@@ -5,6 +5,7 @@ class Role(StrEnum):
     superadmin = 'superadmin'
     admin = 'admin'
     support = 'support'
+    teamlead = 'teamlead'
     merchant = 'merchant'
     aggregator = 'aggregator'
     operator = 'operator'
@@ -22,6 +23,75 @@ class DepositStatus(StrEnum):
     appeal_opened = 'appeal_opened'
 
 
+class RollingAccountStatus(StrEnum):
+    active = 'active'
+    exhausted = 'exhausted'
+    suspended = 'suspended'
+
+
+class RollingTransferStatus(StrEnum):
+    pending_confirmation = 'pending_confirmation'
+    confirmed = 'confirmed'
+    disputed = 'disputed'
+    cancelled = 'cancelled'
+
+
+class RollingConsumptionType(StrEnum):
+    recovery = 'recovery'
+    reversal = 'reversal'
+
+
+class RollingAllocationStatus(StrEnum):
+    pending = 'pending'
+    paid = 'paid'
+    released = 'released'
+    reversed = 'reversed'
+
+
+class RollingEligibilityStatus(StrEnum):
+    eligible = 'eligible'
+    ineligible = 'ineligible'
+
+
+class RollingLedgerType(StrEnum):
+    funding = 'funding'
+    topup = 'topup'
+    pending_added = 'pending_added'
+    pending_released = 'pending_released'
+    recovery = 'recovery'
+    settle_overflow = 'settle_overflow'
+    reversal = 'reversal'
+    manual_adjustment = 'manual_adjustment'
+    write_off = 'write_off'
+
+
+class TeamLeadAccrualStatus(StrEnum):
+    credited = 'credited'
+    reversed = 'reversed'
+
+
+class TeamLeadReferralSource(StrEnum):
+    trader_referral = 'trader_referral'
+    merchant_referral = 'merchant_referral'
+
+
+class TeamLeadSettlementStatus(StrEnum):
+    pending = 'pending'
+    completed = 'completed'
+    rejected = 'rejected'
+
+
+class TeamLeadLedgerType(StrEnum):
+    accrual_credit = 'accrual_credit'
+    debt_offset = 'debt_offset'
+    accrual_reversal = 'accrual_reversal'
+    settlement_freeze = 'settlement_freeze'
+    settlement_release = 'settlement_release'
+    settlement_complete = 'settlement_complete'
+    manual_adjustment = 'manual_adjustment'
+    write_off = 'write_off'
+
+
 class PayoutStatus(StrEnum):
     created = 'created'
     pending = 'pending'
@@ -35,7 +105,9 @@ class PayoutStatus(StrEnum):
 
 class PaymentMethod(StrEnum):
     sbp = 'sbp'
+    sbp_qr = 'sbp_qr'
     c2c = 'c2c'
+    bank_account = 'bank_account'
     mobile_commerce = 'mobile_commerce'
     mobile = 'mobile'
 

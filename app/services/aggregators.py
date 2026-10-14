@@ -29,6 +29,7 @@ from app.models import (
     User,
 )
 from app.services.requisites import SelectedPaymentRequisite, select_deposit_requisite
+from app.services.deposit_ttl import new_deposit_expires_at
 from app.services.fee_tiers import (
     FeeConfigurationError,
     create_operation_fee_snapshot,
@@ -37,13 +38,18 @@ from app.services.fee_tiers import (
     validate_margin,
 )
 from app.services.webhooks import _post_validated_webhook
+from app.services.rapira import RollingRateUnavailable
+from app.services.rolling import (
+    RollingError,
+    create_pending_allocation,
+    rolling_quote_for_deposit_create,
+)
 
 
 AGGREGATOR_ACTIVE_STATUS = 'active'
 AGGREGATOR_TERMINAL_STATUSES = {'paid', 'expired', 'cancelled', 'rejected', 'failed'}
 CALLBACK_RETRY_DELAYS = [1, 5, 15, 60, 180]
 CALLBACK_MAX_ATTEMPTS = 5
-PAYMENT_TTL = timedelta(minutes=15)
 IDEMPOTENCY_CONFLICT = 'idempotency_conflict'
 
 
@@ -479,6 +485,18 @@ async def create_payment(
     if internal_merchant.status != AGGREGATOR_ACTIVE_STATUS:
         raise AggregatorError('aggregator merchant is not active')
 
+    deposit_created_at = datetime.now(timezone.utc)
+    try:
+        rolling_quote = await rolling_quote_for_deposit_create(
+            db,
+            aggregator.platform_merchant_id,
+            created_at=deposit_created_at,
+        )
+    except RollingRateUnavailable as exc:
+        raise AggregatorError(exc.code) from exc
+    except RollingError as exc:
+        raise AggregatorError(getattr(exc, 'code', 'rolling_error')) from exc
+
     selected = await select_deposit_requisite(
         db,
         merchant_id=aggregator.platform_merchant_id,
@@ -499,6 +517,8 @@ async def create_payment(
         status=DepositStatus.pending.value,
         requisites_id=selected.requisite.id,
         client_ip=client_ip,
+        created_at=deposit_created_at,
+        expires_at=new_deposit_expires_at(),
         metadata_json={
             **selected.settlement_metadata(),
             'source': 'aggregator',
@@ -514,7 +534,7 @@ async def create_payment(
     db.add(dep)
     try:
         await db.flush()
-        await create_operation_fee_snapshot(
+        snapshot = await create_operation_fee_snapshot(
             db,
             deposit=dep,
             merchant_rule=merchant_rate_rule,
@@ -522,6 +542,15 @@ async def create_payment(
             executor_type='aggregator',
             executor_id=aggregator.id,
         )
+        await create_pending_allocation(
+            db,
+            deposit=dep,
+            snapshot=snapshot,
+            quote=rolling_quote,
+        )
+    except RollingError as exc:
+        await db.rollback()
+        raise AggregatorError(getattr(exc, 'code', 'rolling_error')) from exc
     except IntegrityError as exc:
         await db.rollback()
         existing = await _existing_aggregator_result(
@@ -541,7 +570,6 @@ async def create_payment(
         if existing:
             return existing
         raise AggregatorError(IDEMPOTENCY_CONFLICT) from exc
-    expires_at = datetime.now(timezone.utc) + PAYMENT_TTL
     payment = AggregatorPayment(
         aggregator_id=aggregator.id,
         aggregator_merchant_id=internal_merchant.id,
@@ -555,7 +583,7 @@ async def create_payment(
         client_id=client_id,
         client_ip=client_ip,
         callback_url_to_merchant=callback_url or internal_merchant.merchant_callback_url,
-        expires_at=expires_at,
+        expires_at=dep.expires_at,
         metadata_json={'callback_url': callback_url, 'success_url': success_url, 'fail_url': fail_url},
     )
     db.add(payment)
@@ -703,12 +731,17 @@ async def deliver_callback_log(db: AsyncSession, log_id: UUID) -> AggregatorCall
         .with_for_update()
     )).scalar_one()
     now = datetime.now(timezone.utc)
-    if log.status in {'sent', 'delivering', 'configuration_error'}:
+    if log.status in {'sent', 'configuration_error'}:
+        return log
+    if log.status == 'delivering' and (
+        not log.next_retry_at or log.next_retry_at > now
+    ):
         return log
     if log.status in {'pending', 'failed'} and log.next_retry_at and log.next_retry_at > now:
         return log
     if log.attempt >= CALLBACK_MAX_ATTEMPTS:
         log.status = 'failed'
+        log.next_retry_at = None
         return log
     payment = (await db.execute(select(AggregatorPayment).where(AggregatorPayment.id == log.related_payment_id))).scalar_one()
     aggregator = (await db.execute(select(AggregatorAccount).where(AggregatorAccount.id == payment.aggregator_id))).scalar_one()
@@ -738,28 +771,71 @@ async def deliver_callback_log(db: AsyncSession, log_id: UUID) -> AggregatorCall
     log.status = 'delivering'
     log.attempt += 1
     payment.callback_attempts += 1
+    log.next_retry_at = now + timedelta(minutes=2)
+    claim_attempt = log.attempt
+    target_url = log.target_url
+    log_id = log.id
+    payment_id = payment.id
+    await db.flush()
+    # Release the callback/payment row locks before DNS and HTTP. The lease is
+    # reclaimed by the periodic scanner if the worker dies after this commit.
+    await db.commit()
+
+    status_code = None
+    final_error = None
     try:
-        status_code = await _post_validated_webhook(log.target_url, body, headers, timeout_seconds=10.0)
-        log.response_status_code = status_code
-        log.response_body = ''
-        if 200 <= status_code < 300:
-            log.status = 'sent'
-            log.error_message = None
-            log.next_retry_at = None
-            log.sent_at = datetime.now(timezone.utc)
-            if log.direction == 'aggregator_to_merchant':
-                payment.callback_status = 'sent'
-        else:
+        status_code = await _post_validated_webhook(
+            target_url,
+            body,
+            headers,
+            timeout_seconds=10.0,
+        )
+        if not 200 <= status_code < 300:
             raise AggregatorError(f'HTTP {status_code}')
     except Exception as exc:
-        log.status = 'failed' if log.attempt >= CALLBACK_MAX_ATTEMPTS else 'pending'
-        log.error_message = str(exc)[:1000]
-        payment.last_callback_error = log.error_message
+        final_error = str(exc)[:1000]
+
+    log = (await db.execute(
+        select(AggregatorCallbackLog)
+        .where(AggregatorCallbackLog.id == log_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    payment = (await db.execute(
+        select(AggregatorPayment)
+        .where(AggregatorPayment.id == payment_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )).scalar_one()
+    if log.status != 'delivering' or log.attempt != claim_attempt:
+        return log
+
+    log.response_status_code = status_code
+    log.response_body = ''
+    if final_error is None:
+        log.status = 'sent'
+        log.error_message = None
+        log.next_retry_at = None
+        log.sent_at = datetime.now(timezone.utc)
+        if log.direction == 'aggregator_to_merchant':
+            payment.callback_status = 'sent'
+    else:
+        log.status = (
+            'failed'
+            if log.attempt >= CALLBACK_MAX_ATTEMPTS
+            else 'pending'
+        )
+        log.error_message = final_error
+        payment.last_callback_error = final_error
         if log.direction == 'aggregator_to_merchant':
             payment.callback_status = log.status
         if log.status == 'pending':
-            delay = CALLBACK_RETRY_DELAYS[min(log.attempt - 1, len(CALLBACK_RETRY_DELAYS) - 1)]
-            log.next_retry_at = datetime.now(timezone.utc) + timedelta(minutes=delay)
+            delay = CALLBACK_RETRY_DELAYS[
+                min(log.attempt - 1, len(CALLBACK_RETRY_DELAYS) - 1)
+            ]
+            log.next_retry_at = datetime.now(timezone.utc) + timedelta(
+                minutes=delay
+            )
         else:
             log.next_retry_at = None
     return log

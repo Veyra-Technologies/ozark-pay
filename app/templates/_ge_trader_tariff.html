@@ -1,0 +1,17 @@
+<div data-crossborder-live data-base="{{ cabinet_base }}/crossborder/live">
+{{ csrf_input(request) }}
+<h2>Тарифы · Трансгран KZ → GE</h2>
+<p>Границы ступеней задаются в USDT. Индивидуальный тариф действует для новых заявок; ранее принятые сохраняют свои условия.</p>
+{% if profile_ge_tariff %}<p>Сейчас: {{ 'индивидуальный тариф' if profile_ge_tariff.entity_id else 'общий тариф GE' }} · версия {{ profile_ge_tariff.version }}.</p>{% else %}<p class="note">{{ profile_ge_tariff_error }}</p>{% endif %}
+{% set display_tariff = profile_ge_tariff %}{% include '_tariff_local_display.html' %}
+  <details class="panel" open><summary>Новая версия тарифного плана</summary><form data-live-action="tariff" data-live-tariff>
+    <label>Тарифный метод</label><select name="payment_method"><option value="kz-ge">Трансгран KZ → GE</option></select>
+    <label>Сторона и валюта</label><select name="party"><option value="trader">Трейдер · GE · BASE_USDT</option></select>
+    <label>Кабинет</label><select name="entity_id"><option value="{{ w.id }}" data-party="trader">{{ w.email }}</option></select>
+    <label>Начало действия</label><input type="datetime-local" name="effective_from" required><label>Статус</label><select name="is_active"><option value="true">Включён</option><option value="false">Отключён</option></select>
+    <p>Границы BASE_USDT [от, до), пустая верхняя граница означает отсутствие предела.</p>
+    <div data-tier-rows>{% for tier in (profile_ge_tariff|default({})).get('tiers', []) %}<div class="row" data-tier-row><div><label>От, USDT</label><input data-tier-min value="{{ tier.min }}" type="number" min="0.00000001" step="0.00000001" required></div><div><label>До, USDT</label><input data-tier-max value="{{ tier.max or '' }}" type="number" min="0.00000001" step="0.00000001"></div><div><label>Процент</label><input data-tier-percent value="{{ tier.percent }}" type="number" min="0" max="100" step="0.0001" required></div><button type="button" class="secondary" data-tier-remove>Удалить</button></div>{% else %}<div class="row" data-tier-row><div><label>От, USDT</label><input data-tier-min value="0.00000001" type="number" min="0.00000001" step="0.00000001" required></div><div><label>До, USDT</label><input data-tier-max type="number" min="0.00000001" step="0.00000001"></div><div><label>Процент</label><input data-tier-percent type="number" min="0" max="100" step="0.0001" required></div><button type="button" class="secondary" data-tier-remove>Удалить</button></div>{% endfor %}</div>
+    <button type="button" class="secondary" data-tier-add>Добавить диапазон</button>
+    <button class="primary" type="submit">Сохранить тарифную версию</button><div data-live-result role="status"></div>
+  </form></details>
+</div>

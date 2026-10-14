@@ -1,0 +1,13 @@
+{% if role in ['trader','operator'] %}
+<div class="quote-details quote-details--compact" data-work-quote="{{ cabinet_base }}/traders/{{ work_quote_account.id }}/quote">
+  <b>{{ 'Binance · TBC Bank · ориентир' if work_quote.source == 'binance_tbc' else 'XE · среднерыночный' if work_quote.source == 'xe' else 'Rapira · ask' }} <span data-work-rate>{{ work_quote.rate|decimal_display if work_quote.available and work_quote.rate else '—' }}</span> {{ work_quote.currency or '' }} за <span data-raw-value>1 USDT</span></b>
+</div>
+{% else %}
+<div class="quote-details" data-work-quote="{{ cabinet_base }}/traders/{{ work_quote_account.id }}/quote">
+  <b>{{ 'Binance · TBC Bank · ориентир' if work_quote.source == 'binance_tbc' else 'XE · среднерыночный' if work_quote.source == 'xe' else 'Rapira · ask' if work_quote.source == 'rapira' else 'Источник не назначен' }}</b>
+  <span><b data-work-rate>{{ work_quote.rate|decimal_display if work_quote.rate else '—' }}</b> {{ work_quote.currency or '' }} за <span data-raw-value>1 USDT</span></span>
+  <span data-work-status role="status">{{ work_quote.reason }}</span>
+  <span>Время источника: <time data-work-provider>{{ work_quote.provider_timestamp or '—' }}</time></span>
+  <span>Получен: <time data-work-fetched>{{ work_quote.fetched_at or '—' }}</time></span>
+</div>
+{% endif %}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -17,15 +18,43 @@ _cache_value: Decimal | None = None
 _cache_expires_at: datetime | None = None
 _last_success_value: Decimal | None = None
 _last_success_at: datetime | None = None
+_strict_rolling_cache: RollingRapiraQuote | None = None
+_PROVIDER_FUTURE_SKEW = timedelta(seconds=5)
 
 
 @dataclass(frozen=True)
 class RapiraRateQuote:
     rate_rub: Decimal
     source: str
-    updated_at: datetime
+    updated_at: datetime | None
     stale: bool
     cache_seconds: int
+
+
+@dataclass(frozen=True)
+class RollingRapiraQuote:
+    symbol: str
+    rate: Decimal
+    side: str
+    source: str
+    provider_timestamp: datetime | None
+    fetched_at: datetime
+    freshness_basis: str
+    stale: bool
+    provider_field: str
+    provider_value: Decimal | None = None
+    observation_id: str | None = None
+    configuration_id: str | None = None
+    configuration_version: int | None = None
+    expires_at: datetime | None = None
+
+    @property
+    def updated_at(self) -> datetime:
+        return self.provider_timestamp or self.fetched_at
+
+
+class RollingRateUnavailable(ValueError):
+    code = 'rolling_rate_unavailable'
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -35,7 +64,7 @@ def _to_decimal(value: Any) -> Decimal | None:
         parsed = Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
-    return parsed if parsed > 0 else None
+    return parsed if parsed.is_finite() and parsed > 0 else None
 
 
 def _pick_price(row: dict[str, Any]) -> Decimal | None:
@@ -50,32 +79,165 @@ def _normalize_symbol(value: Any) -> str:
     return str(value or '').upper().replace('-', '/').strip()
 
 
-def parse_rapira_rub_usdt_rate(payload: Any) -> Decimal | None:
+def parse_rapira_market_payload(payload: Any) -> list[dict[str, Any]]:
+    """Return provider market rows without applying a quote policy."""
     rows = payload.get('data') if isinstance(payload, dict) else payload
     if isinstance(rows, dict):
         rows = rows.get('items') or rows.get('rates') or rows.get('data') or list(rows.values())
     if not isinstance(rows, list):
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _symbol_direction(symbol: str) -> str | None:
+    compact = symbol.replace('/', '')
+    if symbol in RAPIRA_SYMBOLS or compact in RAPIRA_SYMBOLS:
+        return 'direct'
+    if symbol in RUB_USDT_SYMBOLS or compact in RUB_USDT_SYMBOLS:
+        return 'inverse'
+    return None
+
+
+def _metadata_direction(row: dict[str, Any]) -> str | None:
+    base = _normalize_symbol(row.get('baseCurrency'))
+    quote = _normalize_symbol(row.get('quoteCurrency'))
+    if base == 'USDT' and quote == 'RUB':
+        return 'direct'
+    if base == 'RUB' and quote == 'USDT':
+        return 'inverse'
+    return None
+
+
+def _pair_direction(row: dict[str, Any]) -> str | None:
+    """Preserve the legacy symbol-first metadata fallback policy."""
+    symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+    return _symbol_direction(symbol) or _metadata_direction(row)
+
+
+def _strict_pair_direction(row: dict[str, Any]) -> str | None:
+    """Use only a recognized canonical symbol for a strict Rolling quote."""
+    symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+    direction = _symbol_direction(symbol)
+    if direction is None:
         return None
 
-    for row in rows:
-        if not isinstance(row, dict):
+    metadata_direction = _metadata_direction(row)
+    if metadata_direction and metadata_direction != direction:
+        logging.getLogger('app.finance').warning(
+            'rolling_rapira_pair_metadata_conflict',
+            extra={
+                'symbol': symbol,
+                'base_currency': _normalize_symbol(row.get('baseCurrency')),
+                'quote_currency': _normalize_symbol(row.get('quoteCurrency')),
+            },
+        )
+    return direction
+
+
+def _provider_datetime(value: Any) -> datetime | None:
+    if value in (None, ''):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        timestamp = float(value)
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000
+        try:
+            return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip().replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_strict_rolling_ask_quote(
+    payload: Any,
+    *,
+    fetched_at: datetime | None = None,
+    evaluated_at: datetime | None = None,
+) -> RollingRapiraQuote | None:
+    fetched_at = fetched_at or datetime.now(timezone.utc)
+    evaluated_at = evaluated_at or fetched_at
+    if fetched_at.tzinfo is None or evaluated_at.tzinfo is None:
+        return None
+    fetched_at = fetched_at.astimezone(timezone.utc)
+    evaluated_at = evaluated_at.astimezone(timezone.utc)
+    max_age = timedelta(seconds=settings.ROLLING_RAPIRA_MAX_AGE_SECONDS)
+    fetched_age = evaluated_at - fetched_at
+    if fetched_age > max_age or fetched_age < -_PROVIDER_FUTURE_SKEW:
+        return None
+
+    for row in parse_rapira_market_payload(payload):
+        direction = _strict_pair_direction(row)
+        if direction is None:
             continue
-        symbol = _normalize_symbol(row.get('symbol') or row.get('pair') or row.get('market'))
+        ask = _to_decimal(row.get('askPrice'))
+        if not ask:
+            continue
+        rate = ask if direction == 'direct' else Decimal('1') / ask
+        raw_provider_timestamp = next(
+            (
+                row.get(field)
+                for field in ('updatedAt', 'updated_at', 'timestamp', 'time')
+                if row.get(field) not in (None, '')
+            ),
+            None,
+        )
+        provider_timestamp = _provider_datetime(raw_provider_timestamp)
+        if raw_provider_timestamp is not None:
+            if provider_timestamp is None:
+                continue
+            provider_age = fetched_at - provider_timestamp
+            if provider_age > max_age or provider_age < -_PROVIDER_FUTURE_SKEW:
+                continue
+        freshness_basis = (
+            'provider_timestamp'
+            if provider_timestamp is not None
+            else 'fetched_at'
+        )
+        return RollingRapiraQuote(
+            symbol='USDT/RUB',
+            rate=rate,
+            side='ask',
+            source='rapira_live',
+            provider_timestamp=provider_timestamp,
+            fetched_at=fetched_at,
+            freshness_basis=freshness_basis,
+            stale=False,
+            provider_field='askPrice',
+            provider_value=ask,
+        )
+    return None
+
+
+def parse_rapira_rub_usdt_rate(payload: Any) -> Decimal | None:
+    for row in parse_rapira_market_payload(payload):
         price = _pick_price(row)
         if not price:
             continue
-        compact = symbol.replace('/', '')
-        if symbol in RAPIRA_SYMBOLS or compact in RAPIRA_SYMBOLS:
+        direction = _pair_direction(row)
+        if direction == 'direct':
             return price
-        if symbol in RUB_USDT_SYMBOLS or compact in RUB_USDT_SYMBOLS:
+        if direction == 'inverse':
             return Decimal('1') / price
-        base = _normalize_symbol(row.get('baseCurrency'))
-        quote = _normalize_symbol(row.get('quoteCurrency'))
-        if base == 'RUB' and quote == 'USDT':
-            return Decimal('1') / price
-        if base == 'USDT' and quote == 'RUB':
-            return price
     return None
+
+
+def _log_fetch_failure(exc: Exception) -> None:
+    # Record transport/status diagnostics, never URLs, credentials or provider payloads.
+    chain = []
+    cause: BaseException | None = exc
+    while cause is not None and len(chain) < 6:
+        chain.append(type(cause).__name__)
+        cause = cause.__cause__
+    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+    logging.getLogger('app.finance').warning(
+        'rapira_fetch_failed transport=%s status=%s', ' -> '.join(chain), status,
+    )
 
 
 async def fetch_rapira_rub_usdt_rate() -> Decimal | None:
@@ -93,17 +255,102 @@ async def fetch_rapira_rub_usdt_rate() -> Decimal | None:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
             response = await client.get(url, headers={'accept': 'application/json'})
             response.raise_for_status()
-            parsed = parse_rapira_rub_usdt_rate(response.json())
-    except (httpx.HTTPError, ValueError):
+            parsed = parse_rapira_rub_usdt_rate(response.json(parse_float=Decimal))
+    except (httpx.HTTPError, ValueError) as exc:
+        _log_fetch_failure(exc)
         return None
 
     if parsed and parsed > 0:
+        now = datetime.now(timezone.utc)
         _cache_value = parsed
         _last_success_value = parsed
         _last_success_at = now
         _cache_expires_at = now + timedelta(seconds=max(5, settings.RAPIRA_RATES_CACHE_SECONDS))
         return parsed
+    logging.getLogger('app.finance').warning('rapira_response_missing_valid_pair')
     return None
+
+
+async def _fetch_strict_rolling_ask_quote() -> RollingRapiraQuote:
+    """Return a fresh direct USDT/RUB Rapira ask without any fallback."""
+    global _strict_rolling_cache
+    now = datetime.now(timezone.utc)
+    max_age = timedelta(seconds=settings.ROLLING_RAPIRA_MAX_AGE_SECONDS)
+    url = settings.RAPIRA_RATES_URL.strip()
+    if not settings.RAPIRA_RATES_ENABLED or not url:
+        raise RollingRateUnavailable('rolling_rate_unavailable')
+
+    if _strict_rolling_cache:
+        freshness_age = now - _strict_rolling_cache.updated_at
+        cache_age = now - _strict_rolling_cache.fetched_at
+        strict_cache_seconds = min(
+            60,
+            settings.ROLLING_RAPIRA_MAX_AGE_SECONDS,
+            max(1, settings.RAPIRA_RATES_CACHE_SECONDS),
+        )
+        if (
+            _strict_rolling_cache.symbol == 'USDT/RUB'
+            and _strict_rolling_cache.side == 'ask'
+            and _strict_rolling_cache.source == 'rapira_live'
+            and _strict_rolling_cache.provider_field == 'askPrice'
+            and -_PROVIDER_FUTURE_SKEW <= freshness_age <= max_age
+            and timedelta(0) <= cache_age <= timedelta(seconds=strict_cache_seconds)
+        ):
+            return _strict_rolling_cache
+
+    timeout = httpx.Timeout(settings.RAPIRA_RATES_TIMEOUT_SECONDS)
+    try:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            for attempt in range(2):
+                try:
+                    response = await client.get(url, headers={'accept': 'application/json'})
+                    if response.status_code >= 500 and attempt == 0:
+                        await asyncio.sleep(1)
+                        continue
+                    break
+                except httpx.TransportError:
+                    if attempt:
+                        raise
+                    await asyncio.sleep(1)
+            response.raise_for_status()
+            fetched_at = datetime.now(timezone.utc)
+            quote = parse_strict_rolling_ask_quote(
+                response.json(parse_float=Decimal),
+                fetched_at=fetched_at,
+                evaluated_at=fetched_at,
+            )
+    except (httpx.HTTPError, ValueError) as exc:
+        _log_fetch_failure(exc)
+        raise RollingRateUnavailable('rolling_rate_unavailable') from exc
+    if not quote:
+        logging.getLogger('app.finance').warning('rolling_rapira_response_missing_fresh_ask')
+        raise RollingRateUnavailable('rolling_rate_unavailable')
+    _strict_rolling_cache = quote
+    return quote
+
+
+async def get_strict_rolling_ask_quote() -> RollingRapiraQuote:
+    """Financial entry point: shared cache, active DB policy, pinned evidence."""
+    from sqlalchemy.exc import SQLAlchemyError
+    from app.db.session import AsyncSessionLocal
+    from app.services.binance_p2p import timestamp
+    from app.services.rate_registry import parser_state
+    try:
+        async with AsyncSessionLocal() as db:
+            state = await parser_state(db, 'rapira', refresh=True)
+            if not state['available']:
+                raise RollingRateUnavailable('rolling_rate_unavailable')
+            snapshot = state['quote']
+            await db.commit()
+        provider_time = timestamp(snapshot['provider_timestamp']) if snapshot.get('provider_timestamp') else None
+        return RollingRapiraQuote(symbol='USDT/RUB', rate=Decimal(snapshot['rate']), side='ask', source='rapira_live',
+            provider_timestamp=provider_time, fetched_at=timestamp(snapshot['fetched_at']),
+            freshness_basis='provider_timestamp' if provider_time else 'fetched_at', stale=False, provider_field='askPrice',
+            provider_value=Decimal(snapshot['provider_value']), observation_id=snapshot['id'],
+            configuration_id=snapshot['configuration_id'], configuration_version=snapshot['configuration_version'],
+            expires_at=timestamp(snapshot['expires_at']))
+    except (SQLAlchemyError, ValueError, KeyError) as exc:
+        raise RollingRateUnavailable('rolling_rate_unavailable') from exc
 
 
 def _configured_fallback_rate() -> Decimal:
@@ -117,7 +364,7 @@ async def get_rapira_rub_usdt_quote() -> RapiraRateQuote:
         return RapiraRateQuote(
             rate_rub=_cache_value,
             source='Rapira',
-            updated_at=_last_success_at or now,
+            updated_at=_last_success_at,
             stale=False,
             cache_seconds=settings.RAPIRA_RATES_CACHE_SECONDS,
         )
@@ -127,7 +374,7 @@ async def get_rapira_rub_usdt_quote() -> RapiraRateQuote:
         return RapiraRateQuote(
             rate_rub=live_rate,
             source='Rapira',
-            updated_at=_last_success_at or now,
+            updated_at=_last_success_at,
             stale=False,
             cache_seconds=settings.RAPIRA_RATES_CACHE_SECONDS,
         )
@@ -136,7 +383,7 @@ async def get_rapira_rub_usdt_quote() -> RapiraRateQuote:
         return RapiraRateQuote(
             rate_rub=_last_success_value,
             source='Rapira',
-            updated_at=_last_success_at or now,
+            updated_at=_last_success_at,
             stale=True,
             cache_seconds=settings.RAPIRA_RATES_CACHE_SECONDS,
         )
@@ -144,7 +391,7 @@ async def get_rapira_rub_usdt_quote() -> RapiraRateQuote:
     return RapiraRateQuote(
         rate_rub=_configured_fallback_rate(),
         source='SETTLEMENT_USDT_RUB_RATE',
-        updated_at=now,
+        updated_at=None,
         stale=True,
         cache_seconds=settings.RAPIRA_RATES_CACHE_SECONDS,
     )

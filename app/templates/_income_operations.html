@@ -1,0 +1,14 @@
+<div class="table-wrap"><table class="operational-table"><thead><tr><th>Дата</th><th>Операция</th><th>Участники</th><th>Метод</th><th class="amount-cell">Сумма</th><th class="amount-cell">Доход</th><th>Статус</th><th></th></tr></thead><tbody>
+{% for row in income_dashboard.get('rows',[]) %}{% set snap = row.snapshot %}
+<tr><td>{{ snap.rate_snapshot_at|dt_compact }}</td><td>{{ (row.deposit.id|string)[:8] }}</td><td><span class="cell-ellipsis" title="{{ row.merchant.name }}">{{ row.merchant.name }}</span><small class="cell-ellipsis" title="{{ row.executor_name }}">{{ row.executor_name }}</small></td><td>{{ snap.payment_method|payment_method_label }}</td><td class="amount-cell">{{ snap.calculation_base_amount|decimal_display }} {{ snap.currency }}</td><td class="amount-cell">{{ snap.platform_income_amount|decimal_display }} {{ snap.currency }}</td><td><span class="status-pill">{{ row.deposit.status|deposit_status_label }}</span></td><td><button type="button" class="secondary" data-modal-open="income{{ row.deposit.id }}">Открыть</button>
+<template id="template-income{{ row.deposit.id }}"><div class="modal" id="income{{ row.deposit.id }}"><div class="modalbox modalbox-wide"><h2>Расчёт по операции {{ (row.deposit.id|string)[:8] }}</h2><dl class="profile-data">
+<dt>Сумма</dt><dd>{{ snap.calculation_base_amount|decimal_display }} {{ snap.currency }}</dd><dt>Комиссия мерчанта</dt><dd>{{ snap.merchant_rate_percent|decimal_display }}% · {{ snap.merchant_fee_amount|decimal_display }} {{ snap.currency }}</dd><dt>Комиссия исполнителя</dt><dd>{{ snap.executor_rate_percent|decimal_display }}% · {{ snap.executor_fee_amount|decimal_display }} {{ snap.currency }}</dd><dt>Доход площадки</dt><dd>{{ snap.platform_margin_percent|decimal_display }}% · {{ snap.platform_income_amount|decimal_display }} {{ snap.currency }}</dd><dt>Расчёт</dt><dd>{{ 'Завершён' if snap.settlement_status == 'settled' else 'Ожидается' }} · {{ snap.settled_at|dt_compact if snap.settled_at else '—' }}</dd></dl>
+<details><summary>Идентификаторы и правила</summary><pre id="income-raw{{ row.deposit.id }}">Операция: {{ row.deposit.id }}
+Номер мерчанта: {{ row.deposit.external_id }}
+Мерчант: {{ snap.merchant_id }}
+Исполнитель: {{ snap.executor_id }}
+Ledger: {{ snap.ledger_reference or '—' }}
+Правило мерчанта: {{ snap.merchant_rate_rule_id }} · версия {{ snap.merchant_rate_version }}
+Правило исполнителя: {{ snap.executor_rate_rule_id }} · версия {{ snap.executor_rate_version }}
+Статус: {{ row.deposit.status }} / {{ snap.settlement_status }}</pre><button class="secondary" type="button" data-workspace-copy="income-raw{{ row.deposit.id }}">Копировать</button></details><button type="button" class="secondary" data-modal-close="income{{ row.deposit.id }}">Закрыть</button></div></div></template></td></tr>
+{% else %}<tr><td colspan="8">Операций нет.</td></tr>{% endfor %}</tbody></table></div>

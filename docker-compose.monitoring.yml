@@ -1,8 +1,10 @@
 services:
   api:
     environment:
-      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1,0.0.0.0},api,host.docker.internal
+      METRICS_TOKEN_FILE: /run/secrets/metrics_token
       METRICS_ENABLED: "true"
+    secrets:
+      - metrics_token
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -18,6 +20,11 @@ services:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
       - prometheus_data:/prometheus
+    secrets:
+      - metrics_token
+    networks:
+      - backend
+      - default
     depends_on:
       - api
     restart: unless-stopped
@@ -67,3 +74,11 @@ volumes:
   prometheus_data:
   grafana_data:
   loki_data:
+
+secrets:
+  metrics_token:
+    file: ${METRICS_TOKEN_SECRET_FILE:?METRICS_TOKEN_SECRET_FILE must point to a protected token file}
+
+networks:
+  backend:
+    driver: bridge

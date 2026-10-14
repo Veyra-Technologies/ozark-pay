@@ -1,0 +1,7 @@
+<div class="row" data-working-profile-fields>
+  <div><label>Страна работы</label><select name="working_country" required data-work-country><option value="">Выберите страну</option>{% for code, country in working_countries.items() %}<option value="{{ code }}" data-currency="{{ country[1] }}" data-source="{{ 'rapira' if code == 'RU' else 'xe' }}">{{ country[0] }}</option>{% endfor %}</select></div>
+  <div><label>Валюта приёма</label><input name="working_currency" readonly data-work-currency placeholder="Определяется страной"></div>
+  <div><label>Источник курса</label><select name="working_rate_source" required data-work-source><option value="">Сначала выберите страну</option></select></div>
+  {% if creating_trader %}<div><label>Тарифный метод</label><select name="trader_tariff_method" data-trader-tariff-method data-method-catalog='{{ trader_tariff_methods|tojson }}'><option value="">Сначала выберите страну</option></select></div>{% endif %}
+</div>
+<p class="compact-note">Rapira: RUB за <span data-raw-value>1 USDT</span>, ask. XE: справочный курс AMD. GE: автоматически назначается Binance GEL/TBC для информационного ориентира. Карты GE доступны для маршрута KZ → GE; расчёт этого маршрута использует Binance. Приём AMD отключён.</p>

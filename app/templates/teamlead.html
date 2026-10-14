@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TeamLead · OzarkPay</title><link rel="stylesheet" href="/static/workspace.css?v=20261003-currency"><script src="/static/presentation.js?v=20261003-layout" defer></script>
+<script src="/static/workspace.js?v=20261003" defer></script><link rel="stylesheet" href="/static/profiles.css?v=20261003-layout">
+</head>
+<body class="ozark-app teamlead-workspace">
+{% macro render_ui_message(scopes) -%}{% if ui_message and ui_message.section in scopes %}<div class="ui-message ui-message-{{ ui_message.kind }}" role="alert">{{ ui_message.message }}</div>{% endif %}{%- endmacro %}
+{% set sections = ['Обзор','Мои трейдеры','Мои мерчанты','Вывод средств','Начисления','Начисления мерчантов','История выплат','Журнал баланса','Безопасность'] %}
+<a class="skip-link" href="#workspace-main">К содержимому</a>
+<header class="top"><button class="menu-toggle" type="button" aria-label="Открыть меню" aria-controls="workspace-nav" aria-expanded="false">☰</button><div class="top-brand"><h2>Партнёрская программа</h2><div>TeamLead · рабочее пространство</div></div><div class="top-actions"><form method="post" action="{{ logout_path }}" class="logout-form">{{ csrf_input(request) }}<button class="secondary" type="submit">Выйти</button></form></div></header>
+<div class="wrap">{% include '_workspace_nav.html' %}<main class="card" id="workspace-main" tabindex="-1">
+<section id="sec1" class="section active"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Обзор доходов</h1><p class="section-subtitle">Ваш заработок, доступные средства и команда.</p></div><a class="primary" href="#sec4" data-workspace-target="sec4">Вывести средства ↗</a></div>
+{{ render_ui_message(['teamlead','settlements']) }}
+<div class="grid">
+<div class="metric"><b>Доступно в рублях</b><strong>{{ balance.available_rub|money_rub }}</strong><small>Резерв уже исключён</small></div>
+<div class="metric metric--accent"><b>Можно получить после комиссии</b>{% if withdrawal.available %}<strong data-teamlead-max>{{ (withdrawal.max_usdt)|decimal_display }} USDT</strong><small data-teamlead-max-note>Комиссия {{ (withdrawal.fee_usdt)|decimal_display }} USDT учтена</small>{% else %}<strong class="unavailable" data-teamlead-max>Расчёт USDT недоступен</strong><small data-teamlead-max-note>{{ withdrawal.reason }}</small>{% endif %}</div>
+<div class="metric"><b>В резерве</b><strong>{{ balance.frozen_rub|money_rub }}</strong><small>По запросам на вывод</small></div>
+<div class="metric"><b>Задолженность</b><strong class="{{ 'bad' if balance.debt_rub else '' }}">{{ balance.debt_rub|money_rub }}</strong><small>{{ 'Вывод заблокирован' if balance.debt_rub else 'Задолженности нет' }}</small></div>
+</div>
+<div class="quote-details" data-teamlead-quote-details {% if not withdrawal.available %}hidden{% endif %}>{% if withdrawal.available %}<span>Курс: <b>1 USDT = {{ (withdrawal.rate)|decimal_display }} RUB</b></span><span>{{ withdrawal.source }}</span><span>Комиссия: <b>{{ (withdrawal.fee_usdt)|decimal_display }} USDT / {{ (withdrawal.fee_rub)|decimal_display }} RUB</b></span><span>Получен: {{ withdrawal.fetched_at[:19]|replace("T"," ") }} UTC</span>{% endif %}</div>
+<div class="note">USDT — расчёт суммы к выводу, а не отдельный баланс. Конвертация не выполняется при просмотре; при отправке запроса курс проверяется заново.</div>
+<div class="grid"><div class="metric"><b>Общий заработок</b><strong>{{ balance.total_earned_rub|money_rub }}</strong></div><div class="metric"><b>Выплачено, без комиссии</b><strong>{{ balance.total_paid_rub|money_rub }}</strong></div><div class="metric"><b>Доход за трейдеров</b><strong>{{ trader_income_rub|money_rub }}</strong><small>{{ trader_rows|length }} в команде</small></div><div class="metric"><b>Доход за мерчантов</b><strong>{{ merchant_income_rub|money_rub }}</strong><small>{{ merchant_rows|length }} в команде</small></div></div>
+<div class="split-layout"><div class="panel"><h2>Мои трейдеры</h2><p class="muted">Оборот назначенных операций: {{ trader_gross_rub|money_rub }}</p><a class="secondary" href="#sec2" data-workspace-target="sec2">Открыть команду ↗</a></div><div class="panel"><h2>Мои мерчанты</h2><p class="muted">Оборот назначенных операций: {{ merchant_gross_rub|money_rub }}</p><a class="secondary" href="#sec3" data-workspace-target="sec3">Открыть мерчантов ↗</a></div></div></section>
+<section id="sec2" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Мои трейдеры</h1></div></div>
+    <div class="section-title"><h2>Мои трейдеры</h2><span class="badge">{{ trader_rows|length }}</span></div>
+    <div class="note">Показываются только идентификатор кабинета, email и финансовая статистика TeamLead. Реквизиты, карты и телефоны недоступны.</div>
+    <div class="table-wrap"><table>
+      <tr><th>Трейдер</th><th>Процент</th><th>Успешный оборот</th><th>Начислено</th><th>Операций</th></tr>
+      {% for row in trader_rows %}<tr><td><b>{{ row.email }}</b></td><td>{{ (row.commission_percent)|decimal_display }}%</td><td>{{ (row.оборот_rub)|decimal_display }} RUB</td><td>{{ (row.accrual_rub)|decimal_display }} RUB</td><td>{{ row.operations }}</td></tr>
+      {% else %}<tr><td colspan="5">Активных назначений пока нет.</td></tr>{% endfor %}
+    </table></div>
+</section>
+<section id="sec3" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Мои мерчанты</h1></div></div>
+    <div class="section-title"><h2>Мои мерчанты</h2><span class="badge">{{ merchant_rows|length }}</span></div>
+    <div class="note">Показаны только название и финансовая статистика TeamLead. API credentials и внутренние данные мерчанта недоступны.</div>
+    <div class="table-wrap"><table>
+      <tr><th>Мерчант</th><th>Процент</th><th>Успешный оборот</th><th>Начислено</th><th>Операций</th></tr>
+      {% for row in merchant_rows %}<tr><td><b>{{ row.name }}</b></td><td>{{ (row.commission_percent)|decimal_display }}%</td><td>{{ (row.оборот_rub)|decimal_display }} RUB</td><td>{{ (row.accrual_rub)|decimal_display }} RUB</td><td>{{ row.operations }}</td></tr>
+      {% else %}<tr><td colspan="5">Активных назначений пока нет.</td></tr>{% endfor %}
+    </table></div>
+</section>
+<section id="sec4" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Вывод средств</h1></div></div>
+{{ render_ui_message(['teamlead','settlements']) }}
+<div class="split-layout"><div class="panel"><h2>Вывод USDT · TRC20</h2><p class="muted">Доступно {{ balance.available_rub|money_rub }}. Комиссия {{ (withdrawal.fee_usdt)|decimal_display }} USDT оплачивается сверх получаемой суммы.</p>
+<form method="post" action="{{ cabinet_base }}/teamlead/settlements/request" data-teamlead-withdrawal data-session-view="{{ session_view_token }}" data-quote-url="{{ cabinet_base }}/teamlead/settlements/quote" data-confirm="Создать запрос на вывод и зарезервировать рассчитанную сумму в RUB?">
+{{ csrf_input(request) }}<input type="hidden" name="idempotency_key" value="{{ settlement_idempotency_key }}">
+<label for="tl-amount">Сумма к получению, USDT</label><input id="tl-amount" type="number" name="requested_usdt" min="0.000001" step="0.000001" {% if withdrawal.available %}max="{{ withdrawal.max_usdt }}"{% endif %} required placeholder="0,000000">
+<div class="actions quote-actions"><button class="secondary btn-small" type="button" data-fill-max data-maximum="{{ withdrawal.max_usdt if withdrawal.available else '' }}">Доступный максимум</button><button class="secondary btn-small" type="button" data-refresh-quote>Обновить расчёт</button></div>
+<label for="tl-wallet">Адрес кошелька TRC20</label><input id="tl-wallet" name="wallet_address" minlength="34" maxlength="34" pattern="T[1-9A-HJ-NP-Za-km-z]{33}" required placeholder="T…" autocomplete="off">
+<div class="quote-result" data-quote-result role="status" aria-live="polite">{% if withdrawal.available %}Введите сумму, чтобы увидеть точное списание и комиссию.{% else %}Расчёт USDT недоступен. {{ withdrawal.reason }}{% endif %}</div>
+<button class="primary" type="submit" disabled>Запросить вывод</button></form></div>
+<div><div class="panel"><h3>Как рассчитывается сумма</h3><p>Комиссия составляет {{ (withdrawal.fee_usdt)|decimal_display }} USDT. Выплата и комиссия переводятся в RUB по свежему курсу Rapira ask и отдельно округляются до копеек.</p><p class="muted">Резерв не включается в доступный баланс. Задолженность и незавершённая заявка блокируют новый вывод.</p></div><div class="panel"><h3>Следующий вывод</h3><p>{% if next_settlement_at %}{{ next_settlement_at|dt_full }}{% else %}Нет ограничения по предыдущей выплате{% endif %}</p><p class="compact-note">После завершения выплаты действует интервал 168 часов.</p>{% if pending_settlement %}<span class="status-pill status-wait">Есть незавершённый запрос</span>{% endif %}</div></div></div>
+</section>
+<section id="sec5" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Начисления за трейдеров</h1></div></div>
+    <div class="table-wrap"><table>
+      <tr><th>Дата</th><th>Источник</th><th>Трейдер</th><th>Оборот</th><th>Ставка при начислении</th><th>Начисление</th><th>На баланс</th><th>В погашение долга</th><th>Статус</th></tr>
+      {% for row in accruals %}<tr><td>{{ row.created_at|dt_compact }}</td><td><span class="badge">За трейдера</span></td><td>{{ teamlead_trader_labels.get(row.trader_id, 'Архивный трейдер') }}</td><td>{{ row.оборот_rub }}</td><td>{{ (row.commission_percent_snapshot)|decimal_display }}%</td><td>{{ (row.accrual_rub)|decimal_display }}</td><td>{{ (row.credited_to_available_rub)|decimal_display }}</td><td>{{ (row.applied_to_debt_rub)|decimal_display }}</td><td>{{ row.status|status_label }}{% if row.reversal_reason %}<br><span class="bad">{{ row.reversal_reason }}</span>{% endif %}</td></tr>
+      {% else %}<tr><td colspan="9">Начислений нет.</td></tr>{% endfor %}
+    </table></div>
+</section>
+<section id="sec6" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Начисления за мерчантов</h1></div></div>
+    <div class="table-wrap"><table>
+      <tr><th>Дата</th><th>Источник</th><th>Мерчант</th><th>Оборот</th><th>Ставка при начислении</th><th>Начисление</th><th>На баланс</th><th>В погашение долга</th><th>Статус</th></tr>
+      {% for row in merchant_accruals %}<tr><td>{{ row.created_at|dt_compact }}</td><td><span class="badge">За мерчанта</span></td><td>{{ teamlead_merchant_labels.get(row.merchant_id, 'Архивный мерчант') }}</td><td>{{ row.оборот_rub }}</td><td>{{ (row.commission_percent_snapshot)|decimal_display }}%</td><td>{{ (row.accrual_rub)|decimal_display }}</td><td>{{ (row.credited_to_available_rub)|decimal_display }}</td><td>{{ (row.applied_to_debt_rub)|decimal_display }}</td><td>{{ row.status|status_label }}{% if row.reversal_reason %}<br><span class="bad">{{ row.reversal_reason }}</span>{% endif %}</td></tr>
+      {% else %}<tr><td colspan="9">Начислений нет.</td></tr>{% endfor %}
+    </table></div>
+</section>
+<section id="sec7" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>История выплат</h1></div></div>
+    <div class="table-wrap"><table>
+      <tr><th>Дата запроса</th><th>Кошелёк</th><th>USDT + комиссия</th><th>Курс при создании</th><th>Списание RUB</th><th>Статус</th><th>Результат</th></tr>
+      {% for row in settlements %}<tr><td>{{ row.requested_at|dt_compact }}</td><td class="mono">{{ row.wallet_address }}</td><td>{{ (row.requested_usdt)|decimal_display }} + {{ (row.fee_usdt)|decimal_display }}</td><td>{{ (row.rapira_rate_rub)|decimal_display }} {{ row.rate_symbol }} {{ row.rate_side }}<br>{{ row.rate_source }} · {{ row.freshness_basis }}<br>fetched {{ row.fetched_at|dt_full }}{% if row.provider_timestamp %}<br>provider {{ row.provider_timestamp|dt_full }}{% endif %}</td><td>{{ (row.total_debit_rub)|decimal_display }}</td><td>{{ row.status|status_label }}</td><td>{% if row.reject_reason %}<span class="bad">{{ row.reject_reason }}</span>{% elif row.tx_hash %}<span class="mono">{{ row.tx_hash }}</span>{% else %}—{% endif %}</td></tr>
+      {% else %}<tr><td colspan="7">Запросов нет.</td></tr>{% endfor %}
+    </table></div>
+</section>
+<section id="sec8" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Журнал баланса</h1></div></div>
+    <div class="note {{ 'ok' if reconciliation.reconciled else 'bad' }}"><b>{{ 'Баланс сверён с журналом операций' if reconciliation.reconciled else 'Обнаружено расхождение — обратитесь в поддержку' }}</b></div>
+    <div class="table-wrap"><table>
+      <tr><th>Дата</th><th>Тип</th><th>Источник</th><th>Сумма RUB</th><th>Доступно после</th><th>Резерв после</th><th>Долг после</th><th>Причина</th></tr>
+      {% for row in ledger %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.entry_type }}</td><td>{% if row.source_type == 'merchant_referral' %}За мерчанта{% elif row.source_type == 'trader_referral' or row.accrual_id %}За трейдера{% else %}Общий баланс{% endif %}</td><td>{{ (row.amount_rub)|decimal_display }}</td><td>{{ row.available_after|decimal_display }}</td><td>{{ row.frozen_after|decimal_display }}</td><td>{{ row.debt_after|decimal_display }}</td><td>{{ row.reason }}</td></tr>
+      {% else %}<tr><td colspan="8">Операций пока нет.</td></tr>{% endfor %}
+    </table></div>
+</section>
+<section id="sec9" class="section"><div class="section-head"><div><span class="eyebrow">OzarkPay / TeamLead</span><h1>Безопасность</h1></div></div>
+    {{ render_ui_message(['security']) }}
+    <div class="note">2FA обязательна для TeamLead и для каждого финансового запроса. Отключение 2FA для этой роли запрещено.</div>
+    <form method="post" action="{{ cabinet_base }}/security/password" data-confirm="Изменить пароль и завершить текущие сессии?">
+      {{ csrf_input(request) }}
+      <label>Текущий пароль</label><input type="password" name="current_password" required>
+      <label>Новый пароль</label><input type="password" name="new_password" minlength="10" required>
+      <button class="primary" type="submit">Изменить пароль</button>
+    </form>
+</section>
+</main></div><script nonce="{{ csp_nonce(request) }}">document.querySelectorAll('form[data-confirm]').forEach(form=>form.addEventListener('submit',event=>{if(!confirm(form.dataset.confirm))event.preventDefault();}));</script></body></html>

@@ -1,0 +1,1 @@
+<nav class="profile-pager" aria-label="Страницы истории">{% if profile_page > 1 %}<a class="secondary" href="?tab={{ profile_tab }}&page={{ profile_page - 1 }}">← Назад</a>{% endif %}<span>Страница {{ profile_page }} · по 20 записей</span>{% if profile_has_next %}<a class="secondary" href="?tab={{ profile_tab }}&page={{ profile_page + 1 }}">Далее →</a>{% endif %}</nav>

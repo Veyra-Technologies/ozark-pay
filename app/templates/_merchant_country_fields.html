@@ -1,0 +1,13 @@
+<div class="merchant-country-fields" data-merchant-country-fields data-merchant-catalog='{{ country_catalog|tojson }}'
+     data-current-country="{{ country_merchant.working_country if country_merchant else '' }}"
+     data-current-plan="{{ country_merchant.tariff_plan_id if country_merchant and country_merchant.tariff_plan_id else '' }}"
+     data-current-methods='{{ (country_merchant.payment_methods if country_merchant and country_merchant.payment_methods else [])|tojson }}'>
+  <div><label>Страна кабинета</label><select name="{{ field_prefix }}country" data-merchant-country required {% if country_merchant %}disabled{% endif %}>
+    <option value="">Выберите страну</option>{% for code, policy in country_catalog.items() %}<option value="{{ code }}">{{ policy.label }} · {{ policy.currency }}</option>{% endfor %}
+  </select><p class="compact-note">После создания страна неизменяема.</p></div>
+  <div><label>Валюта кабинета</label><input name="{{ field_prefix }}currency" data-merchant-currency readonly required></div>
+  <div><label>Финансовый парсер</label><select name="{{ field_prefix }}parser_id" data-merchant-parser required></select></div>
+  <div><label>Тарифный план страны</label><select name="{{ field_prefix }}tariff_plan_id" data-merchant-plan required></select></div>
+  <div><label>Разрешённые методы</label><select name="{{ 'merchant_payment_methods' if field_prefix else 'methods' }}" data-merchant-methods multiple required></select></div>
+  <p class="compact-note" data-merchant-basis></p>
+</div>

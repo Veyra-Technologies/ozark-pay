@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -10,8 +11,18 @@ from app.core.metrics import metrics_registry, normalize_path
 from app.core.security import sha256_text
 
 
-_redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+_redis = None
+_redis_loop = None
 security_logger = logging.getLogger('app.security')
+
+
+def _redis_for_current_loop():
+    global _redis, _redis_loop
+    loop = asyncio.get_running_loop()
+    if _redis is None or _redis_loop is not loop:
+        _redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        _redis_loop = loop
+    return _redis
 
 
 def _parse_limit(value: str) -> tuple[int, int]:
@@ -37,9 +48,10 @@ async def hit_rate_limit(scope: str, request: Request, identifier: str, limit: s
     bucket = int(time.time()) // window
     key = f'rl:{scope}:{ip}:{ident}:{bucket}'
     try:
-        count = await _redis.incr(key)
+        redis = _redis_for_current_loop()
+        count = await redis.incr(key)
         if count == 1:
-            await _redis.expire(key, window + 5)
+            await redis.expire(key, window + 5)
         if count > max_hits:
             return window
     except Exception as exc:

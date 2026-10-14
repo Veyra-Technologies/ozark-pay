@@ -1,0 +1,108 @@
+{% set u = profile_user %}{% set mc = merchant_credentials.get(u.id|string) %}
+{% set finance = merchant_finance_rows.get(mc.merchant_id, {}) %}
+{% set merchant_tl_rows = merchant_teamlead_assignments.get(mc.merchant_id, []) %}
+<header class="profile-heading"><a class="back-link" href="{{ cabinet_base }}?section=merchants">← Мерчанты</a><h1>{{ mc.name }}</h1><p>{{ u.email }} · {{ 'Заблокирован' if u.is_locked else 'Активен' if u.is_active else 'Отключён' }}</p></header>
+{% if mc.working_country in [none,'RU'] %}<div class="profile-metrics">{% if finance.balance %}<div><small>Доступно · RUB</small><b>{{ (finance.balance.available if finance.balance else 0)|decimal_display }}</b></div><div><small>Заморожено · RUB</small><b>{{ (finance.balance.frozen if finance.balance else 0)|decimal_display }}</b></div>{% endif %}<div><small>Комиссия</small><b>{% if profile_merchant_tariff %}{{ profile_merchant_tariff.tiers[0].percent|decimal_display }}%{{ ' и другие ступени' if profile_merchant_tariff.tiers|length > 1 else '' }}{% else %}{{ mc.commission_percent|decimal_display }}%{% endif %}</b></div></div>{% endif %}
+{% set profile_tabs = [('main','Основное'),('finance','Финансы'),('tariffs','Тарифы')] + ([('rolling','Rolling')] if mc.working_country in [none,'RU'] else []) + [('integration','Интеграция'),('history','История')] %}
+{% include '_profile_tabs.html' %}
+<div class="profile-content" data-commission-modal="merchant:{{ mc.merchant_id }}">
+{% if profile_tab == 'main' %}
+<section class="panel merchant-summary"><div class="merchant-summary-heading"><h2>{{ mc.name }}</h2><span class="status-pill {{ 'status-wait' if mc.sandbox_mode else 'status-ok' }}">{{ 'Sandbox' if mc.sandbox_mode else 'Production' }}</span></div>
+<dl class="merchant-summary-grid"><div><dt>Email кабинета</dt><dd>{{ u.email }}</dd></div><div><dt>Страна · валюта</dt><dd>{{ mc.working_country or 'Требует назначения' }} · {{ mc.working_currency or '—' }}</dd></div>
+<div class="merchant-id"><dt>Merchant ID</dt><dd><code>{{ mc.merchant_id }}</code><button type="button" class="secondary btn-small" data-copy-value="{{ mc.merchant_id }}">Копировать ID</button></dd></div></dl></section>
+{% if mc.working_country in ['RU','KZ'] %}{% include '_merchant_country_settings.html' %}{% endif %}
+{% elif profile_tab == 'finance' and mc.working_country == 'KZ' %}<div class="panel"><h2>Финансы · KZ</h2><p>Номинал операций — KZT; расчёты и баланс — USDT. История доступна в административном списке операций KZ → GE.</p></div>
+{% elif profile_tab == 'finance' %}<div class="panel"><h2>Финансы</h2><p>Расчётный баланс ведётся в RUB. Переводы Rolling учитываются отдельно в USDT.</p>{% if finance.balance %}<dl class="profile-data"><dt>Доступно</dt><dd>{{ (finance.balance.available if finance.balance else 0)|money_rub }}</dd><dt>Заморожено</dt><dd>{{ (finance.balance.frozen if finance.balance else 0)|money_rub }}</dd></dl><a class="secondary" href="?tab=rolling">Переводы и погашения Rolling</a>{% else %}<p class="note">Финансовый обзор доступен Superadmin.</p>{% endif %}</div>
+{% elif profile_tab == 'tariffs' %}
+{% if mc.working_country in ['RU','KZ'] %}{% include '_merchant_tariff_editor.html' %}{% else %}<p>Для редактирования тарифов необходимо назначить поддерживаемую страну кабинета.</p>{% endif %}
+
+{% elif profile_tab == 'rolling' and mc.working_country in [none,'RU'] %}    {% if mc and merchant_finance_rows.get(mc.merchant_id) %}
+    {% set finance = merchant_finance_rows.get(mc.merchant_id) %}
+    {% set fro = finance.overview %}
+    <div class="modal-section panel rolling-card">
+      <div class="rolling-header">
+        <div class="heading"><h3>Rolling</h3><div class="compact-note">Подтверждённый временный финансовый цикл поверх базового settle.</div></div>
+        <span class="status-pill {{ 'status-ok' if fro.status == 'active' else 'status-bad' if fro.status in ['disputed','suspended'] else 'status-neutral' }}">{{ fro.status|status_label }}</span>
+      </div>
+      <div class="rolling-metrics">
+        <div class="rolling-metric"><b>Доступный баланс</b><span class="value">{{ (finance.balance.available if finance.balance else '0.00')|decimal_display }} RUB</span></div>
+        <div class="rolling-metric"><b>Заморожено</b><span class="value">{{ (finance.balance.frozen if finance.balance else '0.00')|decimal_display }} RUB</span></div>
+        <div class="rolling-metric"><b>Подтверждено</b><span class="value">{{ (fro.principal)|decimal_display }} USDT</span></div>
+        <div class="rolling-metric"><b>Погашено</b><span class="value">{{ (fro.recovered)|decimal_display }} USDT</span></div>
+        <div class="rolling-metric"><b>Остаток долга</b><span class="value">{{ (fro.outstanding)|decimal_display }} USDT</span></div>
+        <div class="rolling-metric"><b>Ожидание / спор</b><span class="value">{{ fro.pending_transfers }} / {{ fro.disputed_transfers }}</span></div>
+      </div>
+      {% if role == 'superadmin' %}
+      <form method="post" action="{{ cabinet_base }}/rolling/merchants/{{ mc.merchant_id }}/transfers" class="panel rolling-form-card" data-confirm="Зарегистрировать отправленный Rolling transfer? Балансы изменятся только после подтверждения мерчантом.">{{ csrf_input(request) }}
+        <h3>Отправлен новый Rolling</h3>
+        <div class="row"><div><label>Сумма, USDT</label><input name="amount_usdt" type="number" min="0.000001" step="0.000001" required></div><div><label>Сеть</label><input name="network" required maxlength="32" placeholder="TRC20"></div></div>
+        <label>Адрес получателя</label><input name="destination_address" required maxlength="160" placeholder="USDT wallet">
+        <label>Хэш транзакции</label><input name="tx_hash" required maxlength="160" placeholder="Transaction hash">
+        <label>Отправлено (UTC)</label><input name="sent_at" type="datetime-local" required>
+        <label>Комментарий / основание</label><input name="comment" maxlength="500" placeholder="Основание отправки">
+        <input type="hidden" name="idempotency_key" required maxlength="180" value="rolling-transfer:{{ mc.merchant_id }}:{{ range(100000,999999)|random }}">
+        <button class="primary" type="submit">Зарегистрировать отправку</button>
+      </form>
+      {% endif %}
+      <h3>История переводов</h3>
+      <div class="table-wrap"><table><tr><th>#</th><th>Сумма</th><th>Сеть / адрес</th><th>Хэш транзакции</th><th>Отправлено / подтверждено</th><th>Статус</th><th>Действие</th></tr>
+      {% for transfer in finance.transfers %}
+      <tr>
+        <td>{{ transfer.sequence_no }}</td><td>{{ (transfer.amount_usdt)|decimal_display }} USDT</td>
+        <td><span class="badge">{{ transfer.network or 'legacy' }}</span><br><span class="cell-mono cell-ellipsis" title="{{ transfer.destination_address or '—' }}">{{ transfer.destination_address or '—' }}</span></td>
+        <td>{% if transfer.tx_hash %}<div class="rolling-copy-wrap"><span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash }}</span><button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}" aria-label="Скопировать" title="Скопировать">⧉</button></div>{% else %}<span class="muted">legacy migration</span>{% endif %}</td>
+        <td>{{ transfer.sent_at|dt_compact }}{% if transfer.confirmed_at %}<br>{{ transfer.confirmed_at|dt_compact }}{% endif %}</td>
+        <td>{{ transfer.status|status_label }}{% if transfer.dispute_reason %}<br><span class="compact-note">{{ transfer.dispute_reason }}</span>{% endif %}</td>
+        <td>{% if role == 'superadmin' and transfer.status in ['pending_confirmation','disputed'] %}<form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/cancel" data-confirm="Отменить неподтверждённый transfer?">{{ csrf_input(request) }}<input name="reason" required maxlength="500" placeholder="Причина отмены"><button class="dangerbtn btn-small" type="submit">Отменить</button></form>{% else %}<span class="muted">—</span>{% endif %}</td>
+      </tr>
+      {% else %}<tr><td colspan="7">Переводов Rolling нет</td></tr>{% endfor %}
+      </table></div>
+      <h3>История погашений</h3>
+      <div class="table-wrap"><table><tr><th>Дата</th><th>Операция</th><th>Перевод</th><th>Тип</th><th>USDT</th><th>RUB</th><th>Курс</th></tr>
+      {% for item in finance.consumptions %}<tr><td>{{ item.created_at|dt_compact }}</td><td><span class="cell-mono cell-ellipsis" title="{{ item.deposit_id }}">{{ item.deposit_id }}</span></td><td><span class="cell-mono cell-ellipsis" title="{{ item.rolling_transfer_id }}">{{ item.rolling_transfer_id }}</span></td><td>{{ item.entry_type }}</td><td>{{ (item.amount_usdt)|decimal_display }}</td><td>{{ (item.amount_rub)|decimal_display }}</td><td>{{ (item.rate_rub)|decimal_display }}</td></tr>{% else %}<tr><td colspan="7">Погашений пока нет</td></tr>{% endfor %}
+      </table></div>
+      {% if finance.reconciliation %}<div class="note">Сверка: <b>{{ 'OK' if finance.reconciliation.ok else 'MISMATCH' }}</b></div>{% endif %}
+    </div>
+    {% else %}<p class="note">Управление Rolling доступно Superadmin.</p>{% endif %}
+
+{% elif profile_tab == 'integration' %}
+<div class="panel"><h2>Webhook и доступ API</h2><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/integration">{{ csrf_input(request) }}<label>Webhook URL</label><input name="webhook_url" value="{{ mc.webhook_url }}" type="url"><label>Разрешённые IP-адреса</label><input name="ip_whitelist" value="{{ mc.ip_whitelist }}"><label><input type="checkbox" name="sandbox_mode" {% if mc.sandbox_mode %}checked{% endif %}> Тестовый режим</label><button class="primary" type="submit">Сохранить интеграцию</button></form></div>
+    <h3>Ключи API</h3>
+    {% if mc and 'production' not in mc['active_key_modes'] %}<div class="note">У мерчанта нет активного Production key. Интеграция не готова к боевому трафику.</div>{% endif %}
+    <div class="table-wrap"><table><tr><th>API key</th><th>Secret</th><th>Mode</th><th>Статус</th><th>Created at</th><th>Last used at</th><th>Actions</th></tr>
+    {% if mc and mc['keys'] %}{% for k in mc['keys'] %}<tr>
+      <td><span class="cell-mono cell-ellipsis" title="{{ k.api_key }}">{{ k.api_key }}</span></td>
+      <td>скрыт · показывается один раз</td>
+      <td>{% if k.mode == 'production' %}<span class="status-pill status-ok">Production</span><div class="compact-note">Production key. Используется для реального трафика.</div>{% else %}<span class="status-pill status-wait">Sandbox</span><div class="compact-note">Тестовый ключ. Не использовать для боевого трафика.</div>{% endif %}</td>
+      <td>{% if k.is_active %}<span class="status-pill status-ok">active</span>{% else %}<span class="status-pill status-bad">revoked</span>{% endif %}</td>
+      <td><span class="text-date" title="{{ k.created_at|dt_full }}">{{ k.created_at|dt_compact }}</span></td>
+      <td>{% if k.last_used_at %}<span class="text-date" title="{{ k.last_used_at|dt_full }}">{{ k.last_used_at|dt_compact }}</span>{% else %}—{% endif %}</td>
+      <td>{% if k.is_active %}<div class="actions-row"><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/{{ k.id }}/rotate" data-confirm="Отозвать выбранный {{ 'Production' if k.mode == 'production' else 'Sandbox' }} key и показать новый secret один раз?">{{ csrf_input(request) }}<button class="secondary" type="submit">Перевыпустить</button></form><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/{{ k.id }}/revoke" data-confirm="Отозвать выбранный API key? Это действие немедленно остановит запросы с ним.">{{ csrf_input(request) }}<button class="danger" type="submit">Отозвать</button></form></div>{% else %}—{% endif %}</td>
+    </tr>{% endfor %}{% else %}<tr><td colspan="7">Ключей нет</td></tr>{% endif %}</table></div>
+    {% if mc %}<div class="actions-row"><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/issue" data-confirm="Выпустить отдельный Sandbox API key и показать secret один раз?">{{ csrf_input(request) }}<input type="hidden" name="mode" value="sandbox"><button class="secondary" type="submit" {% if 'sandbox' in mc['active_key_modes'] %}disabled title="Активный Sandbox key уже существует — используйте перевыпуск"{% endif %}>Выпустить Sandbox API key/secret</button></form><form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/api-keys/issue" data-confirm="Выпустить Production API key для реального трафика и показать secret один раз?">{{ csrf_input(request) }}<input type="hidden" name="mode" value="production"><button class="primary" type="submit" {% if 'production' in mc['active_key_modes'] %}disabled title="Активный Production key уже существует — используйте перевыпуск"{% endif %}>Выпустить Production API key/secret</button></form></div>{% endif %}
+    {% if role == 'superadmin' and mc %}
+    <h3>Ключи подписи Webhook</h3>
+    {% if mc.webhook_configuration_required %}<div class="note">configuration_required: webhook URL настроен, но отдельный signing key отсутствует. Доставка заблокирована; Merchant API secret не используется как fallback.</div>{% endif %}
+    <div class="table-wrap"><table><tr><th>Key ID</th><th>Статус</th><th>Created</th><th>Retire at</th></tr>
+    {% for key in mc.webhook_signing_keys %}<tr><td><span class="cell-mono cell-ellipsis" title="{{ key.key_id }}">{{ key.key_id }}</span></td><td><span class="status-pill {{ 'status-ok' if key.status == 'active' else 'status-wait' if key.status == 'retiring' else 'status-bad' }}">{{ key.status|status_label }}</span></td><td>{{ key.created_at|dt_compact }}</td><td>{{ key.retire_at|dt_compact if key.retire_at else '—' }}</td></tr>{% else %}<tr><td colspan="4">Ключи подписи Webhook отсутствуют.</td></tr>{% endfor %}
+    </table></div>
+    <div class="actions-row">
+      {% if mc.has_active_webhook_signing_key %}<form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/webhook-signing-keys/rotate" data-confirm="Rotate webhook signing key? Старый ключ останется retiring на overlap-период.">{{ csrf_input(request) }}<button class="secondary" type="submit">Перевыпустить ключ Webhook</button></form>
+      {% else %}<form method="post" action="{{ cabinet_base }}/merchants/{{ mc.merchant_id }}/webhook-signing-keys/issue" data-confirm="Выпустить отдельный webhook signing secret и показать его один раз?">{{ csrf_input(request) }}<button class="primary" type="submit">Выпустить ключ Webhook</button></form>{% endif %}
+    </div>
+    {% endif %}
+
+{% elif profile_tab == 'history' %}    {% if mc %}
+    <div class="panel">
+      <h3>TeamLead за мерчанта</h3>
+      {% set active_merchant_tl = merchant_tl_rows|selectattr('valid_to', 'none')|list %}
+      {% if active_merchant_tl %}{% set active_assignment = active_merchant_tl[0] %}
+      <div class="detail-grid"><div class="detail-card"><b>Текущий TeamLead</b>{{ teamlead_user_labels.get(active_assignment.teamlead_id, 'Архивный TeamLead') }}</div><div class="detail-card"><b>Процент</b>{{ (active_assignment.commission_percent)|decimal_display }}%</div><div class="detail-card"><b>Действует с</b>{{ active_assignment.valid_from|dt_full }}</div></div>
+      {% if role == 'superadmin' %}<form method="post" action="{{ cabinet_base }}/teamlead/merchant-assignments/{{ mc.merchant_id }}/close" data-confirm="Закрыть текущее назначение TeamLead?">{{ csrf_input(request) }}<div class="row"><div><label>Valid to (UTC)</label><input type="datetime-local" name="valid_to"></div><div><label>Причина</label><input name="reason" maxlength="500" required></div></div><button class="dangerbtn" type="submit">Закрыть назначение</button></form>{% endif %}
+      {% else %}<div class="muted">TeamLead не назначен.</div>{% endif %}
+      <h3>История</h3><div class="table-wrap"><table><tr><th>TeamLead</th><th>%</th><th>From</th><th>To</th><th>Причина</th></tr>{% for assignment in merchant_tl_rows %}<tr><td>{{ teamlead_user_labels.get(assignment.teamlead_id, 'Архивный TeamLead') }}</td><td>{{ (assignment.commission_percent)|decimal_display }}</td><td>{{ assignment.valid_from|dt_full }}</td><td>{{ assignment.valid_to|dt_full if assignment.valid_to else 'active' }}</td><td>{{ assignment.reason }}{% if assignment.close_reason %}<br><span class="muted">{{ assignment.close_reason }}</span>{% endif %}</td></tr>{% else %}<tr><td colspan="5">История пуста.</td></tr>{% endfor %}</table></div>
+    </div>
+    {% endif %}
+
+{% include '_profile_activity.html' %}
+{% endif %}</div>

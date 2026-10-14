@@ -1,3 +1,4 @@
+from app.services.trader_work import accepts_currency
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
@@ -61,12 +62,19 @@ class SelectedPaymentRequisite:
             'receiver_name': self.requisite.full_name or self.requisite.owner_name,
             'requisite': self.value,
             'bank': provider.get('bank', ''),
+            'bank_name': (
+                provider.get('bank', '')
+                if provider.get('provider_type') == 'bank'
+                else ''
+            ),
             'exact_amount': str(self.exact_amount),
-            'currency': 'RUB',
+            'currency': getattr(self.requisite, 'currency', 'RUB'),
             'method': method,
             'payment_method': method,
             'method_label': payment_method_label(method),
             **provider,
+            'bank_id': getattr(self.requisite, 'bank_id', None),
+            'country': getattr(self.requisite, 'country', 'RU'),
         }
 
     def settlement_metadata(self) -> dict:
@@ -173,6 +181,8 @@ def _can_use_trader(
     commission_percent: Decimal | None = None,
 ) -> bool:
     if trader is None:
+        return False
+    if not accepts_currency(trader, 'RUB'):
         return False
     if not _assigned_to_merchant(trader, merchant_id):
         return False

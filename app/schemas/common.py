@@ -1,6 +1,7 @@
 from decimal import Decimal
 from datetime import datetime, timezone
 from uuid import UUID
+from typing import Literal
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from app.core.enums import AppealStatus, BlacklistKind, KycStatus, PaymentMethod, RiskDecision, Role
 from app.core.mobile_operators import find_mobile_operator
@@ -30,6 +31,13 @@ class RefreshIn(BaseModel):
     refresh_token: str = Field(min_length=40)
 
 class MerchantCreate(BaseModel):
+    currency: str
+    tariff_plan_id: UUID
+    payment_methods: list[str] = Field(min_length=1)
+    model_config = ConfigDict(extra='forbid')
+    country: Literal['RU', 'KZ', 'GE']
+    parser_id: str
+    business_id: UUID | None = None
     email: str = Field(min_length=5, max_length=255)
     password: str = Field(min_length=12, max_length=128)
     name: str = Field(min_length=2, max_length=160)
@@ -231,13 +239,17 @@ class BalanceOut(BaseModel):
     currency: str
 
 class RequisiteIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
     owner_name: str
     full_name: str | None = Field(default=None, max_length=160)
     method: PaymentMethod
     value: str = Field(min_length=3, max_length=255)
     bank_code: str | None = Field(default=None, max_length=64)
+    bank_id: str | None = Field(default=None, max_length=64)
     operator_code: str | None = Field(default=None, max_length=64)
     bank_name: str | None = None
+    country: str | None = Field(default=None, min_length=2, max_length=2)
+    currency: str | None = Field(default=None, min_length=3, max_length=8)
     trader_id: UUID | None = None
     automation_id: str | None = Field(default=None, max_length=120)
     last4: str | None = Field(default=None, max_length=4)
@@ -270,7 +282,7 @@ class RequisiteIn(BaseModel):
             return PaymentMethod.mobile_commerce
         return value
 
-    @field_validator('bank_code', 'operator_code', 'bank_name')
+    @field_validator('bank_code', 'bank_id', 'operator_code', 'bank_name')
     @classmethod
     def strip_provider_value(cls, value: str | None) -> str | None:
         clean = (value or '').strip()
@@ -278,6 +290,10 @@ class RequisiteIn(BaseModel):
 
     @model_validator(mode='after')
     def validate_provider_by_method(self):
+        if self.bank_id:
+            if self.method not in {PaymentMethod.c2c, PaymentMethod.bank_account}:
+                raise ValueError('foreign bank_id requires a card or bank account')
+            return self
         if self.method in {PaymentMethod.sbp, PaymentMethod.c2c}:
             bank = find_bank(self.bank_code or self.bank_name)
             if not bank or not bank.enabled:
@@ -344,6 +360,18 @@ class RiskEventOut(BaseModel):
     details: dict
 
 class UserCreateIn(BaseModel):
+    merchant_currency: str | None = None
+    merchant_tariff_plan_id: UUID | None = None
+    merchant_payment_methods: list[str] | None = None
+    trader_tariff_method: str | None = None
+    model_config = ConfigDict(extra='forbid')
+    merchant_country: Literal['RU', 'KZ', 'GE'] | None = None
+    merchant_parser_id: str | None = None
+    business_id: UUID | None = None
+    working_country: str | None = Field(default=None, pattern='^(RU|AM|GE)$')
+    working_currency: str | None = None
+    working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe)$')
+    trader_account_id: UUID | None = None
     email: str = Field(min_length=5, max_length=255)
     password: str = Field(min_length=12, max_length=128)
     role: Role
@@ -357,11 +385,19 @@ class UserCreateIn(BaseModel):
             raise ValueError('invalid email')
         return value
 
+class WorkingCountryIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    working_country: str = Field(pattern='^(RU|AM|GE)$')
+    working_currency: str | None = None
+    working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe)$')
+
+
 class FeeRuleIn(BaseModel):
     entity_type: str = Field(default='merchant', pattern='^(merchant|trader|aggregator)$')
     entity_id: UUID | None = None
     fee_side: str = Field(default='merchant_fee', pattern='^(merchant_fee|executor_fee)$')
-    payment_method: PaymentMethod | None = None
+    payment_method: PaymentMethod | Literal['bank_transfer'] | None = None
+    direction: Literal['kz-ge'] | None = None
     currency: str = Field(default='RUB', min_length=3, max_length=8)
     min_amount: Decimal = Field(default=0, ge=0, decimal_places=2)
     max_amount: Decimal | None = Field(default=None, gt=0, decimal_places=2)

@@ -1,0 +1,37 @@
+/* Partner profiles. Shared shell, controls and tables live in workspace.css. */
+.profile-heading{margin:0 0 22px}
+.profile-heading .back-link{display:inline-block;margin-bottom:20px;font-size:13px}
+.profile-heading h1{font-size:28px;line-height:1.25;letter-spacing:-.02em;margin:0 0 8px;overflow-wrap:anywhere}
+.profile-heading p{color:var(--muted);font-size:13px;margin:6px 0 14px}
+.profile-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:14px;margin-bottom:24px}
+.profile-metrics>div{min-width:0;padding:18px 20px;background:#102b3c;border:1px solid #294656;border-radius:8px}
+.profile-metrics small,.working-profile small{display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
+.profile-metrics b{display:block;font-size:25px;font-variant-numeric:tabular-nums;font-weight:600}
+.profile-tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid #35505f;margin-bottom:24px;padding-bottom:8px}
+.profile-tabs a{font-size:13px;color:var(--muted);text-decoration:none;padding:9px 14px;border-radius:6px}
+.profile-tabs a[aria-current=page]{background:#174456;color:#d9fbff}
+.profile-content{max-width:1160px;min-width:0}
+.profile-content>.panel{margin:0 0 20px}
+.profile-content .modal-section{margin:0 0 24px}
+.profile-content h2{margin-bottom:18px}
+.profile-content form:not(.inline-form){max-width:900px}
+.profile-content details:not(.action-menu){border-top:1px solid var(--line);margin-top:20px;padding-top:14px}
+.profile-data{display:grid;grid-template-columns:minmax(130px,1fr) minmax(0,3fr);gap:14px 24px;font-size:13px;line-height:1.5}
+.profile-data dt{color:var(--muted)}
+.profile-data dd{margin:0;min-width:0}
+.list-tools{display:flex;flex-wrap:wrap;align-items:end;gap:14px;max-width:680px;margin-bottom:18px}
+.list-tools label{margin:0;flex:1 1 150px}
+.list-tools label:first-child{flex:2 1 240px}
+.working-profile{display:flex;flex-wrap:wrap;align-items:center;gap:18px 28px;padding:16px 20px;border:1px solid #2b5466;border-radius:8px;margin-bottom:24px;background:#123344}
+.working-profile>div{min-width:0}
+.working-profile b{font-size:14px;overflow-wrap:anywhere}
+.working-profile p{flex:1 1 280px;font-size:13px;color:var(--muted);margin:0 0 0 auto;max-width:400px}
+@media(max-width:780px){
+  .profile-heading h1{font-size:23px}
+  .profile-tabs a{padding:9px 10px}
+  .profile-data{grid-template-columns:1fr;gap:5px}
+  .profile-data dd{margin-bottom:12px}
+}
+
+/* Country cabinet identity: compact values remain readable and copyable. */
+.merchant-summary{padding:20px;min-width:0}.merchant-summary-heading{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap}.merchant-summary-heading h2{font-size:20px;margin:0;overflow-wrap:anywhere}.merchant-summary-grid{display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:18px;margin:20px 0 0}.merchant-summary-grid>div{min-width:0}.merchant-summary-grid dt{font-size:12px;color:var(--muted);margin-bottom:6px}.merchant-summary-grid dd{margin:0;overflow-wrap:anywhere;font-size:15px}.merchant-id{grid-column:1/-1}.merchant-id dd{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.merchant-id code{font-size:13px;font-weight:400;white-space:nowrap;overflow:auto;max-width:100%}.merchant-country-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.merchant-country-fields>div{min-width:0}.merchant-country-fields select[multiple]{min-height:112px}.merchant-country-fields>.compact-note{grid-column:1/-1}.profile-heading p{overflow-wrap:anywhere}@media(max-width:640px){.merchant-summary-grid,.merchant-country-fields{grid-template-columns:minmax(0,1fr)}.merchant-summary{padding:16px}.merchant-id dd{align-items:flex-start;flex-direction:column}}

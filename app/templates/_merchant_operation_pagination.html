@@ -1,0 +1,8 @@
+{% if merchant_display.get('page',1) > 1 or merchant_display.get('has_more') %}
+<div class="actions">
+{% set query = '&deposit_query=' ~ (deposit_filters.get('query','')|urlencode) ~ '&deposit_amount=' ~ (deposit_filters.get('amount','')|urlencode) ~ '&deposit_requisite=' ~ (deposit_filters.get('requisite','')|urlencode) ~ '&deposit_date=' ~ (deposit_filters.get('date','')|urlencode) ~ '&merchant_trader_id=' ~ (merchant_filter_trader_id|urlencode) %}
+{% if merchant_display.page > 1 %}<a class="secondary" href="{{ cabinet_base }}?section=sec2&merchant_operation_page={{ merchant_display.page - 1 }}{{ query }}">Предыдущие</a>{% endif %}
+<span>Страница {{ merchant_display.page }}</span>
+{% if merchant_display.has_more %}<a class="secondary" href="{{ cabinet_base }}?section=sec2&merchant_operation_page={{ merchant_display.page + 1 }}{{ query }}">Следующие</a>{% endif %}
+</div>
+{% endif %}

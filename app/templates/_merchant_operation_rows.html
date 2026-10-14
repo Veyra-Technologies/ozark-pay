@@ -1,0 +1,17 @@
+{% for op in merchant_display.get('operations',[]) %}
+<tr data-merchant-operation="{{ op.id }}">
+  <td data-label="Дата">{{ op.created_at|dt_compact }}</td>
+  <td data-label="Операция"><span class="short-id">{{ op.id|short_identifier }}</span><small class="cell-mono">{{ op.external_id }}</small></td>
+  <td data-label="Участники"><span class="cell-ellipsis">{{ merchant.name }}</span><small class="cell-ellipsis">{{ op.trader_email }}</small></td>
+  <td data-label="Метод">KZ → GE<small>{{ op.bank }}</small></td>
+  <td data-label="Сумма" class="amount-cell">{{ op.amount_kzt|decimal_display }} KZT<small>К расчёту: {{ op.merchant_usdt|decimal_display }} USDT</small></td>
+  <td data-label="Статус"><span class="status-pill {{ 'status-ok' if op.status == 'paid' else 'status-wait' if op.status == 'accepted' else 'status-neutral' }}">{{ {'paid':'Оплачено','accepted':'Ожидает оплаты','cancelled':'Отменено','refunded':'Возвращено'}.get(op.status,op.status) }}</span></td>
+  <td data-label="Действие"><button class="secondary" type="button" data-modal-open="merchantOperation{{ op.id }}">Открыть</button>
+    <template id="template-merchantOperation{{ op.id }}"><div class="modal" id="merchantOperation{{ op.id }}"><div class="modalbox modalbox-wide"><h2>Операция {{ op.id|short_identifier }}</h2>
+      <div class="detail-grid"><div class="detail-card"><b>Номинал</b>{{ op.amount_kzt|decimal_display }} KZT</div><div class="detail-card"><b>Общий оборот</b>{{ op.base_usdt|decimal_display }} USDT</div><div class="detail-card"><b>К выплате мерчанту</b>{{ op.merchant_usdt|decimal_display }} USDT</div><div class="detail-card"><b>Комиссия площадки</b>{{ op.merchant_fee_usdt|decimal_display }} USDT</div><div class="detail-card"><b>Ожидаемое поступление</b>{{ op.expected_gel|decimal_display }} GEL</div><div class="detail-card"><b>Фактическое поступление</b>{{ op.actual_gel|decimal_display if op.actual_gel is not none else '—' }} GEL</div></div>
+      <dl class="profile-data"><dt>Идентификатор</dt><dd>{{ op.id }}</dd><dt>Номер мерчанта</dt><dd>{{ op.external_id }}</dd><dt>Банк</dt><dd>{{ op.bank }}</dd><dt>Получатель</dt><dd>{{ op.beneficiary }}</dd></dl>
+      <button class="secondary" type="button" data-modal-close="merchantOperation{{ op.id }}">Закрыть</button>
+    </div></div></template>
+  </td>
+</tr>
+{% else %}<tr><td colspan="7">Заявок пока нет.</td></tr>{% endfor %}

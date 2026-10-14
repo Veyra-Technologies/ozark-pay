@@ -1,14 +1,16 @@
 from decimal import Decimal
+from app.core.settlement_policy import SETTLEMENT_FEE_USDT
 from functools import lru_cache
 from urllib.parse import urlparse
 
 from cryptography.fernet import Fernet
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
     APP_NAME: str = 'Processing Platform'
+    APP_VERSION: str = '2.0.0-rc2'
     BRAND_CONFIG_PATH: str = 'branding/default.yml'
     ENV: str = 'local'
     DEBUG: bool = False
@@ -27,7 +29,17 @@ class Settings(BaseSettings):
     SUPERADMIN_2FA_SECRET: str = Field(min_length=16)
     SEED_DEMO_DATA: bool = False
     ALLOW_SANDBOX_KEYS_IN_PRODUCTION: bool = False
-    PLATFORM_WEBHOOK_RETRY_LIMIT: int = 5
+    PLATFORM_WEBHOOK_RETRY_LIMIT: int = Field(default=5, ge=1, le=20)
+    WEBHOOK_LEASE_SECONDS: int = Field(default=120, ge=15, le=3600)
+    WEBHOOK_RETRY_BASE_SECONDS: int = Field(default=30, ge=1, le=3600)
+    WEBHOOK_RETRY_MAX_SECONDS: int = Field(default=3600, ge=1, le=86400)
+    WEBHOOK_RETRY_JITTER_SECONDS: int = Field(default=15, ge=0, le=600)
+    WEBHOOK_RETRY_AFTER_MAX_SECONDS: int = Field(default=3600, ge=1, le=86400)
+    WEBHOOK_SIGNING_KEY_OVERLAP_SECONDS: int = Field(
+        default=86400,
+        ge=60,
+        le=2592000,
+    )
     RATE_LIMIT_DEFAULT: str = '120/minute'
     LOGIN_RATE_LIMIT: str = '10/minute'
     AUTH_FAILURE_LIMIT: int = 7
@@ -39,6 +51,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_FAIL_CLOSED_IN_PRODUCTION: bool = True
     RATE_LIMIT_REDIS_FAILURE_RETRY_AFTER_SECONDS: int = 30
     HMAC_TIMESTAMP_TOLERANCE_SECONDS: int = 300
+    MERCHANT_HMAC_V1_ENABLED: bool = False
     SESSION_COOKIE_NAME: str = 'processing_session'
     SESSION_COOKIE_MAX_AGE_SECONDS: int = 7200
     CSRF_TRUSTED_ORIGINS: str = 'http://localhost:8000,http://127.0.0.1:8000'
@@ -56,14 +69,41 @@ class Settings(BaseSettings):
     REQUEST_ID_HEADER: str = 'X-Request-ID'
     METRICS_ENABLED: bool = True
     METRICS_TOKEN: str = ''
+    METRICS_TOKEN_FILE: str = ''
     SETTLEMENT_USDT_RUB_RATE: Decimal = Decimal('100.00')
-    SETTLEMENT_TRANSFER_FEE_USDT: Decimal = Decimal('5.00')
+    SETTLEMENT_TRANSFER_FEE_USDT: Decimal = SETTLEMENT_FEE_USDT
     RAPIRA_RATES_ENABLED: bool = True
     RAPIRA_RATES_URL: str = 'https://api.rapira.net/open/market/rates'
     RAPIRA_RATES_TIMEOUT_SECONDS: float = 5.0
     RAPIRA_RATES_CACHE_SECONDS: int = 15
+    XE_API_ACCESS_ID: SecretStr = SecretStr('')
+    XE_API_ACCESS_KEY: SecretStr = SecretStr('')
+    XE_TIMEOUT_SECONDS: float = Field(default=8, ge=1, le=30)
+    XE_REFRESH_SECONDS: int = Field(default=60, ge=60, le=86400)
+    # Set to the purchased quota of returned rates (not HTTP requests).
+    # Zero keeps network requests disabled until the account limit is configured.
+    XE_MONTHLY_RATE_LIMIT: int = Field(default=0, ge=0)
+    XE_MAX_AGE_SECONDS: int = Field(default=120, ge=30, le=3600)
+    BINANCE_P2P_ENABLED: bool = True
+    CROSSBORDER_WEBHOOK_SECRET: str = ''
+    CROSSBORDER_WEBHOOK_ACTOR_ID: str = ''
+    BINANCE_P2P_URL: str = 'https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search'
+    BINANCE_P2P_REFRESH_SECONDS: int = Field(default=60, ge=15, le=3600)
+    BINANCE_P2P_MAX_AGE_SECONDS: int = Field(default=120, ge=30, le=3600)
+    BINANCE_P2P_TIMEOUT_SECONDS: float = Field(default=8, ge=1, le=30)
+    BINANCE_P2P_RETRIES: int = Field(default=2, ge=0, le=5)
+    BINANCE_P2P_RETRY_BACKOFF_SECONDS: float = Field(default=.5, ge=.1, le=10)
+    BINANCE_P2P_RETRY_AFTER_MAX_SECONDS: int = Field(default=10, ge=1, le=60)
+    BINANCE_P2P_MAX_PAGES: int = Field(default=5, ge=1, le=10)
+    BINANCE_P2P_PAGE_SIZE: int = Field(default=10, ge=10, le=20)
+    CROSSBORDER_QUOTE_TTL_SECONDS: int = Field(default=60, ge=5, le=300)
+    DEPOSIT_PROCESSING_TTL_SECONDS: int = Field(default=900, ge=60, le=86400)
+    ROLLING_RAPIRA_MAX_AGE_SECONDS: int = Field(default=60, ge=5, le=3600)
     SECRET_FLASH_TTL_SECONDS: int = 300
     CABINET_POLL_INTERVAL_SECONDS: int = 10
+    EXTERNAL_PROCESSOR_TIMEOUT_SECONDS: float = Field(default=8, ge=1, le=30)
+    EXTERNAL_PROCESSOR_WEBHOOK_TOLERANCE_SECONDS: int = Field(default=300, ge=30, le=3600)
+    EXTERNAL_PROCESSOR_SANDBOX_HOSTS: str = 'host.docker.internal,localhost,127.0.0.1,tradespace'
 
     @property
     def cors_list(self) -> list[str]:
@@ -82,11 +122,23 @@ class Settings(BaseSettings):
         return [x.strip() for x in self.TRUSTED_PROXY_IPS.split(',') if x.strip()]
 
     @property
+    def external_processor_sandbox_hosts(self) -> list[str]:
+        return [x.strip().lower().rstrip('.') for x in self.EXTERNAL_PROCESSOR_SANDBOX_HOSTS.split(',') if x.strip()]
+
+    @property
     def is_production(self) -> bool:
         return self.ENV.lower() in {'production', 'prod'}
 
     @model_validator(mode='after')
     def validate_production_safety(self):
+        if self.METRICS_TOKEN_FILE:
+            from pathlib import Path
+            try:
+                self.METRICS_TOKEN = Path(self.METRICS_TOKEN_FILE).read_text().strip()
+            except OSError as exc:
+                raise ValueError('metrics secret file is unavailable') from exc
+            if len(self.METRICS_TOKEN) < 24:
+                raise ValueError('metrics secret file must contain a strong token')
         if not self.is_production:
             return self
 

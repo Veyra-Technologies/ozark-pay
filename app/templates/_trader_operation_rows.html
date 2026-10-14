@@ -1,0 +1,9 @@
+{% for op in crossborder.get('operations', []) if (deposit_view == 'active') == (op.status == 'accepted') %}
+<tr data-kz-operation="{{ op.id }}">
+{% if deposit_view == 'active' %}<td data-label="Осталось"><span class="timer" data-countdown="{{ op.remaining_seconds }}">{{ '%02d:%02d'|format(op.remaining_seconds//60,op.remaining_seconds%60) }}</span></td>{% else %}<td data-label="Дата">{{ op.created_at[:16]|replace('T',' ') }} UTC</td>{% endif %}
+<td data-label="Сумма"><b>{{ op.amount_kzt|decimal_display }} KZT</b><br>{% if op.expected_gel %}≈ {{ op.expected_gel|decimal_display }} GEL{% else %}Ориентир GEL недоступен{% endif %}</td>
+<td data-label="Банк и метод">{{ op.bank_label }}<br>{{ op.requisite_method_label }} · KZ → GE</td>
+{% if deposit_view == 'active' %}<td data-label="Реквизит / получатель">{{ op.beneficiary_label }}</td>
+<td data-label="Статус">Ожидает поступления</td>{% else %}<td data-label="Результат">{{ {'paid':'Оплачено','cancelled':'Отменено','refunded':'Возвращено'}.get(op.status,op.status) }}{% if op.actual_gel %}<br>{{ op.actual_gel|decimal_display }} GEL{% endif %}</td><td data-label="Основание">{{ op.confirmation_reference or '—' }}</td>{% endif %}
+<td data-label="Действие"><a class="secondary btn-small" href="{{ cabinet_base }}?section=deposits&amp;view={{ deposit_view }}#cb-{{ op.id }}" data-open-operation="cb-{{ op.id }}">Подробнее</a></td>
+</tr>{% endfor %}

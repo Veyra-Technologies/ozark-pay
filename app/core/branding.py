@@ -56,6 +56,8 @@ def _resolve_branding_path(path: str | None) -> Path:
 
 def load_branding(path: str | None = None) -> BrandConfig:
     resolved = _resolve_branding_path(path)
+    if not resolved.exists() and (path or settings.BRAND_CONFIG_PATH) == 'branding/default.yml':
+        resolved = Path(__file__).resolve().parents[1] / '_branding' / 'default.yml'
     payload = _load_simple_yaml(resolved)
     return BrandConfig(**payload)
 

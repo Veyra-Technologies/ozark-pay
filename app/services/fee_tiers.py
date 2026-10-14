@@ -9,16 +9,16 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.payment_methods import normalize_payment_method
-from app.models import AggregatorAccount, Deposit, FeeRule, Merchant, OperationFeeSnapshot, User
+from app.models import AggregatorAccount, Deposit, ExternalProcessorConnection, FeeRule, Merchant, OperationFeeSnapshot, User
 
 
 MONEY_QUANT = Decimal('0.01')
 PERCENT_QUANT = Decimal('0.0001')
-SUPPORTED_ENTITY_TYPES = {'merchant', 'trader', 'aggregator'}
+SUPPORTED_ENTITY_TYPES = {'merchant', 'trader', 'aggregator', 'external_processor'}
 SUPPORTED_FEE_SIDES = {'merchant_fee', 'executor_fee'}
 SUPPORTED_CURRENCIES = {'RUB'}
 MAX_RATE_PERCENT = Decimal('100.0000')
-COMMISSION_TIER_METHODS = ('sbp', 'c2c', 'mobile_commerce')
+COMMISSION_TIER_METHODS = ('sbp', 'c2c', 'mobile_commerce', 'sbp_qr')
 COMMISSION_TIER_RANGES = (
     {
         'key': '100_999',
@@ -126,6 +126,14 @@ def normalize_currency(value: str) -> str:
     return normalized
 
 
+def normalize_dimensions(payment_method, currency, direction=None):
+    if direction:
+        if direction not in ('kz-am', 'kz-ge') or currency != 'USDT' or payment_method != 'bank_transfer':
+            raise FeeConfigurationError('crossborder tariffs require a direction, bank_transfer and USDT')
+        return payment_method, currency
+    return normalize_method(payment_method), normalize_currency(currency)
+
+
 def normalize_scope(entity_type: str, entity_id: UUID | str, fee_side: str) -> tuple[str, UUID, str]:
     entity_type = (entity_type or '').strip().lower()
     fee_side = (fee_side or '').strip().lower()
@@ -135,8 +143,8 @@ def normalize_scope(entity_type: str, entity_id: UUID | str, fee_side: str) -> t
         raise FeeConfigurationError('unknown fee side')
     if fee_side == 'merchant_fee' and entity_type != 'merchant':
         raise FeeConfigurationError('merchant_fee requires merchant entity')
-    if fee_side == 'executor_fee' and entity_type not in {'trader', 'aggregator'}:
-        raise FeeConfigurationError('executor_fee requires trader or aggregator entity')
+    if fee_side == 'executor_fee' and entity_type not in {'trader', 'aggregator', 'external_processor'}:
+        raise FeeConfigurationError('executor_fee requires trader, aggregator or external processor entity')
     try:
         parsed_id = UUID(str(entity_id))
     except (TypeError, ValueError) as exc:
@@ -158,6 +166,7 @@ def validate_rule_values(
     rate_percent: Decimal | str,
     effective_from: datetime,
     effective_to: datetime | None,
+    direction: str | None = None,
 ) -> dict:
     normalized_entity_type, normalized_entity_id, normalized_fee_side = normalize_scope(entity_type, entity_id, fee_side)
     minimum = money(min_amount)
@@ -175,12 +184,16 @@ def validate_rule_values(
             effective_to = effective_to.replace(tzinfo=timezone.utc)
         if effective_to <= effective_from:
             raise FeeConfigurationError('effective_to must be greater than effective_from')
+    payment_method, currency = normalize_dimensions(payment_method, currency, direction)
+    if direction and normalized_entity_type in {'aggregator', 'external_processor'}:
+        raise FeeConfigurationError('crossborder executor tariffs are not supported')
     return {
         'entity_type': normalized_entity_type,
         'entity_id': normalized_entity_id,
         'fee_side': normalized_fee_side,
-        'payment_method': normalize_method(payment_method),
-        'currency': normalize_currency(currency),
+        'payment_method': payment_method,
+        'currency': currency,
+        'direction': direction,
         'min_amount': minimum,
         'max_amount': maximum,
         'rate_percent': rate(rate_percent),
@@ -201,8 +214,8 @@ async def _lock_rule_scope(db: AsyncSession, values: dict) -> None:
     bind = db.get_bind()
     if bind is not None and bind.dialect.name == 'postgresql':
         scope = '|'.join(
-            str(values[key])
-            for key in ('entity_type', 'entity_id', 'fee_side', 'payment_method', 'currency')
+            str(values.get(key))
+            for key in ('entity_type', 'entity_id', 'fee_side', 'payment_method', 'currency', 'direction')
         )
         await db.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:scope, 0))'), {'scope': scope})
 
@@ -215,6 +228,7 @@ async def ensure_no_overlap(db: AsyncSession, values: dict, *, exclude_id: UUID 
         FeeRule.fee_side == values['fee_side'],
         FeeRule.payment_method == values['payment_method'],
         FeeRule.currency == values['currency'],
+        FeeRule.direction == values.get('direction'),
         FeeRule.is_active == True,
     ).with_for_update()
     if exclude_id is not None:
@@ -233,6 +247,7 @@ async def ensure_entity_exists(db: AsyncSession, values: dict) -> None:
     if values['entity_type'] == 'merchant':
         query = select(Merchant.id).join(User, User.id == Merchant.owner_id).where(
             Merchant.id == values['entity_id'],
+            or_(Merchant.working_country == 'RU', Merchant.working_country.is_(None)),
             Merchant.is_archived.is_(False),
             User.role == 'merchant',
             User.is_active.is_(True),
@@ -240,18 +255,29 @@ async def ensure_entity_exists(db: AsyncSession, values: dict) -> None:
             User.is_archived.is_(False),
         )
     elif values['entity_type'] == 'trader':
+        account = await db.get(User, values['entity_id'])
+        if account and account.role == 'operator' and account.trader_account_id:
+            parent = await db.get(User, account.trader_account_id)
+            if not parent or parent.working_country not in (None, 'RU'):
+                raise FeeConfigurationError('RU fee rules cannot apply to a foreign trader account')
         query = select(User.id).where(
             User.id == values['entity_id'],
             User.role.in_(['trader', 'operator']),
+            or_(User.working_country == 'RU', User.working_country.is_(None)),
             User.is_active.is_(True),
             User.is_locked.is_(False),
             User.is_archived.is_(False),
         )
-    else:
+    elif values['entity_type'] == 'aggregator':
         query = select(AggregatorAccount.id).where(
             AggregatorAccount.id == values['entity_id'],
             AggregatorAccount.status == 'active',
             AggregatorAccount.is_archived.is_(False),
+        )
+    else:
+        query = select(ExternalProcessorConnection.id).where(
+            ExternalProcessorConnection.id == values['entity_id'],
+            ExternalProcessorConnection.is_archived.is_(False),
         )
     if (await db.execute(query)).scalar_one_or_none() is None:
         raise FeeConfigurationError('fee entity does not exist or is inactive')
@@ -291,6 +317,7 @@ async def replace_fee_rule(db: AsyncSession, current: FeeRule, *, actor_id: UUID
         values['entity_type'] != current.entity_type
         or values['entity_id'] != current.entity_id
         or values['fee_side'] != current.fee_side
+        or values['direction'] != current.direction
     ):
         raise FeeConfigurationError('fee rule scope cannot be changed between versions')
     await ensure_entity_exists(db, values)
@@ -324,7 +351,7 @@ def build_commission_tier_context(rules: list[FeeRule]) -> dict[str, dict[str, d
             continue
         method_state[tier['key']] = {
             'configured': True,
-            'rate_percent': f'{Decimal(rule.rate_percent):.2f}',
+            'rate_percent': str(rule.rate_percent),
             'version': int(rule.version or 1),
             'updated_at': (rule.updated_at or rule.created_at).isoformat() if (rule.updated_at or rule.created_at) else '',
         }
@@ -350,10 +377,30 @@ async def replace_commission_tiers(
     if effective_at.tzinfo is None:
         effective_at = effective_at.replace(tzinfo=timezone.utc)
 
-    parsed_rates = {
-        tier['field']: commission_rate(raw_rates.get(tier['field'], ''))
-        for tier in COMMISSION_TIER_RANGES
-    }
+    await _lock_rule_scope(db, {'entity_type': entity_type, 'entity_id': entity_id,
+                               'fee_side': fee_side, 'payment_method': payment_method, 'currency': 'RUB'})
+    existing_rules = (await db.execute(
+        select(FeeRule).where(
+            FeeRule.entity_type == entity_type,
+            FeeRule.entity_id == entity_id,
+            FeeRule.fee_side == fee_side,
+            FeeRule.payment_method == payment_method,
+            FeeRule.currency == 'RUB',
+        ).with_for_update()
+    )).scalars().all()
+    parsed_rates = {}
+    for tier in COMMISSION_TIER_RANGES:
+        raw = str(raw_rates.get(tier['field'], '')).strip().replace(',', '.')
+        current = next((rule for rule in sorted(existing_rules, key=lambda r: r.version or 1, reverse=True)
+                        if rule.is_active and _matches_commission_tier(rule, tier)), None)
+        # The UI keeps the exact persisted value in its original named input.
+        # Only an unchanged existing rate may retain precision beyond the edit limit.
+        try:
+            unchanged = current is not None and Decimal(raw) == Decimal(current.rate_percent)
+        except InvalidOperation:
+            unchanged = False
+        parsed_rates[tier['field']] = Decimal(current.rate_percent) if unchanged else commission_rate(raw)
+
     scope_values = validate_rule_values(
         entity_type=entity_type,
         entity_id=entity_id,
@@ -368,15 +415,6 @@ async def replace_commission_tiers(
     )
     await ensure_entity_exists(db, scope_values)
     await _lock_rule_scope(db, scope_values)
-    existing_rules = (await db.execute(
-        select(FeeRule).where(
-            FeeRule.entity_type == entity_type,
-            FeeRule.entity_id == entity_id,
-            FeeRule.fee_side == fee_side,
-            FeeRule.payment_method == payment_method,
-            FeeRule.currency == 'RUB',
-        ).with_for_update()
-    )).scalars().all()
     old_values = [
         {
             'rule_id': str(rule.id),
@@ -432,11 +470,15 @@ async def resolve_fee_rule(
     currency: str,
     amount: Decimal | str,
     at: datetime | None = None,
+    direction: str | None = None,
 ) -> FeeRule:
     entity_type, entity_id, fee_side = normalize_scope(entity_type, entity_id, fee_side)
-    payment_method = normalize_method(payment_method)
-    currency = normalize_currency(currency)
-    amount = money(amount)
+    payment_method, currency = normalize_dimensions(payment_method, currency, direction)
+    # Crossborder tiers compare the unrounded USDT equivalent, never a rounded
+    # intermediate value near a tariff boundary.
+    amount = Decimal(str(amount)) if direction else money(amount)
+    if not amount.is_finite() or amount < 0:
+        raise FeeConfigurationError('invalid money value')
     at = at or utcnow()
     rows = (await db.execute(
         select(FeeRule).where(
@@ -445,6 +487,7 @@ async def resolve_fee_rule(
             FeeRule.fee_side == fee_side,
             FeeRule.payment_method == payment_method,
             FeeRule.currency == currency,
+            FeeRule.direction == direction,
             FeeRule.is_active == True,
             FeeRule.min_amount <= amount,
             or_(FeeRule.max_amount.is_(None), FeeRule.max_amount > amount),
@@ -480,7 +523,7 @@ async def create_operation_fee_snapshot(
     )).scalar_one_or_none()
     if existing:
         return existing
-    if executor_type not in {'trader', 'aggregator'}:
+    if executor_type not in {'trader', 'aggregator', 'external_processor'}:
         raise FeeConfigurationError('invalid settlement owner')
     executor_id = UUID(str(executor_id))
     if merchant_rule.entity_type != 'merchant' or merchant_rule.entity_id != deposit.merchant_id:

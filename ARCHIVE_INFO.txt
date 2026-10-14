@@ -1,0 +1,6 @@
+OzarkPay source archive
+Generated (UTC): 2026-10-11T16:04:38+00:00
+Git branch: codex/tradespace-external-aggregator
+Base commit: d0470ad
+Includes current working-tree source changes.
+Excludes Git metadata, local secrets, databases, backups, uploads, logs, caches, virtual environments, runtime artifacts, and older archives.

@@ -1,0 +1,21 @@
+{% if role == 'merchant' and merchant and merchant.working_country == 'KZ' %}
+{% include '_merchant_operation_rows.html' %}
+{% else %}
+{% for d in deposits %}{% set dd = deposit_details.get(d.id|string, {}) %}
+<tr>
+  <td data-label="Дата">{{ d.created_at|dt_compact }}</td>
+  <td data-label="Операция"><span class="short-id">{{ (d.id|string)[:8] }}</span></td>
+  <td data-label="Участники"><span class="cell-ellipsis" title="{{ dd.get('merchant_name','') }}">{{ dd.get('merchant_name') or 'Мерчант' }}</span><small class="cell-ellipsis" title="{{ dd.get('trader_email','') }}">{{ dd.get('trader_email') or '—' }}</small></td>
+  <td data-label="Метод"><span>{{ d.method|payment_method_label }}</span><small class="cell-ellipsis">{{ dd.get('provider_name') or dd.get('bank') or '—' }}</small></td>
+  <td data-label="Сумма" class="amount-cell">{{ d.amount|decimal_display }} {{ d.currency }}</td>
+  <td data-label="Статус"><span class="status-pill {{ 'status-ok' if d.status == 'paid' else 'status-wait' if d.status in ['created','pending','appeal_opened'] else 'status-neutral' }}">{{ d.status|deposit_status_label }}</span></td>
+  <td data-label="Действие"><button class="secondary" type="button" data-modal-open="depositDetail{{ d.id }}">Открыть</button>
+    <template id="template-depositDetail{{ d.id }}"><div class="modal" id="depositDetail{{ d.id }}"><div class="modalbox modalbox-wide"><h2>Операция {{ (d.id|string)[:8] }}</h2>
+    <div class="detail-grid"><div class="detail-card"><b>Сумма</b>{{ d.amount|decimal_display }} {{ d.currency }}</div><div class="detail-card"><b>Статус</b>{{ d.status|deposit_status_label }}</div><div class="detail-card"><b>Получатель</b>{{ dd.get('receiver_name') or '—' }}</div><div class="detail-card"><b>Реквизит</b><span class="cell-wrap">{{ dd.get('requisite') or '—' }}</span><button type="button" class="secondary" data-copy-value="{{ dd.get('requisite','') }}">Копировать</button></div></div>
+    <dl class="profile-data"><dt>Создана</dt><dd>{{ d.created_at|dt_compact }}</dd><dt>Обновлена</dt><dd>{{ d.updated_at|dt_compact }}</dd><dt>Идентификатор</dt><dd>{{ d.id }} <button class="secondary" type="button" data-copy-value="{{ d.id }}">Копировать</button></dd><dt>Номер мерчанта</dt><dd>{{ d.external_id }} <button class="secondary" type="button" data-copy-value="{{ d.external_id }}">Копировать</button></dd><dt>Метод / банк</dt><dd>{{ d.method|payment_method_label }} · {{ dd.get('provider_name') or dd.get('bank') or '—' }}</dd><dt>Получатель</dt><dd>{{ dd.get('receiver_name') or '—' }}</dd><dt>Причина завершения</dt><dd>{{ dd.get('failure_reason','')|failure_reason_label }}</dd></dl>
+    {% if role in ['admin','superadmin'] and d.status in ['created','pending','appeal_opened'] %}<div class="actions"><form method="post" action="{{ cabinet_base }}/deposits/{{ d.id }}/confirm" data-confirm="Принять пополнение {{ d.amount|decimal_display }} {{ d.currency }}?">{{ csrf_input(request) }}<button class="primary" type="submit">Принять</button></form><form method="post" action="{{ cabinet_base }}/deposits/{{ d.id }}/decline" data-confirm="Отклонить пополнение?">{{ csrf_input(request) }}<label>Причина отклонения<input name="reason" maxlength="400" required></label><button class="dangerbtn" type="submit">Отклонить</button></form></div>{% endif %}
+    <button class="secondary" type="button" data-modal-close="depositDetail{{ d.id }}">Закрыть</button></div></div></template>
+  </td>
+</tr>{% else %}<tr><td colspan="7">Заявок пока нет.</td></tr>{% endfor %}
+
+{% endif %}

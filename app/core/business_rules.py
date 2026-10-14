@@ -17,6 +17,13 @@ ROLE_PERMISSIONS = {
         'blacklist.manage',
         'audit.read',
         'reports.export',
+        'teamlead.manage',
+        'teamlead.finance',
+        'teamlead.create',
+        'teamlead.read_basic',
+        'platform_wallet.manage',
+        'platform_wallet.read',
+        'ai_office.manage',
     ],
     Role.admin.value: [
         'users.manage_operational',
@@ -32,6 +39,9 @@ ROLE_PERMISSIONS = {
         'limits.manage',
         'blacklist.manage',
         'reports.export',
+        'teamlead.create',
+        'teamlead.read_basic',
+        'platform_wallet.read',
     ],
     Role.support.value: [
         'operations.read_all',
@@ -39,6 +49,10 @@ ROLE_PERMISSIONS = {
         'appeals.reply',
         'risk.read',
         'webhooks.retry',
+    ],
+    Role.teamlead.value: [
+        'teamlead.read_own',
+        'teamlead.settlement.create_own',
     ],
     Role.merchant.value: [
         'merchant_api.use',
@@ -50,16 +64,16 @@ ROLE_PERMISSIONS = {
     Role.operator.value: [
         'requisites.manage_own',
         'operations.confirm',
-        'operations.complete',
         'sms.confirm',
         'appeals.reply',
+        'platform_wallet.read',
     ],
     Role.trader.value: [
         'requisites.manage_own',
         'operations.confirm',
-        'operations.complete',
         'sms.confirm',
         'appeals.reply',
+        'platform_wallet.read',
     ],
 }
 

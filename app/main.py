@@ -9,6 +9,7 @@ from redis.asyncio import Redis
 from sqlalchemy import select, text
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.core.config import settings
+from app.core.api_errors import MerchantApiError
 from app.core.branding import get_branding
 from app.core.enums import Role
 from app.core.logging import configure_logging
@@ -29,17 +30,38 @@ class CustomORJSONResponse(ORJSONResponse):
 
 app=FastAPI(
     title=brand.api_docs_title,
-    version='1.0.0',
+    version=settings.APP_VERSION,
     default_response_class=CustomORJSONResponse,
     docs_url=None,
     redoc_url=None,
     openapi_url=None,
 )
+
+
+@app.exception_handler(MerchantApiError)
+async def merchant_api_error_handler(
+    request: Request,
+    exc: MerchantApiError,
+) -> ORJSONResponse:
+    error = {
+        'code': exc.code,
+        'message': exc.message,
+        'request_id': str(request.scope.get('request_id') or ''),
+    }
+    if exc.details:
+        error['details'] = exc.details
+    return CustomORJSONResponse(
+        status_code=exc.status_code,
+        content={'error': error},
+    )
+
+
 if settings.trusted_hosts and '*' not in settings.trusted_hosts:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list, allow_credentials=True, allow_methods=['GET','POST','PUT','PATCH','DELETE'], allow_headers=['*'])
-app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.MAX_REQUEST_BODY_BYTES)
 app.add_middleware(CSRFOriginMiddleware)
+# Bound the actual body before CSRF parsing or endpoint execution.
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.MAX_REQUEST_BODY_BYTES)
 app.add_middleware(
     RealmSessionMiddleware,
     secret_key=settings.SECRET_KEY,
@@ -52,7 +74,7 @@ app.add_middleware(SuspiciousInputMiddleware)
 app.add_middleware(SimpleRedisRateLimitMiddleware, limit=120, window=60)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestObservabilityMiddleware)
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
+app.mount("/static", StaticFiles(directory=str(Path(__file__).resolve().parent / 'static')), name="static")
 app.include_router(api_router)
 app.include_router(web_router)
 
@@ -96,7 +118,13 @@ async def protected_openapi(request: Request):
     return CustomORJSONResponse(app.openapi())
 
 @app.get('/health')
-async def health(): return {'status':'ok'}
+async def health():
+    return {'status': 'ok', 'version': settings.APP_VERSION}
+
+
+@app.get('/version')
+async def version():
+    return {'version': settings.APP_VERSION}
 
 @app.get('/ready')
 async def ready():
@@ -137,7 +165,7 @@ async def metrics(request: Request):
 @app.get('/favicon.ico', include_in_schema=False)
 async def favicon():
     if brand.favicon.startswith('/static/'):
-        asset_path = Path('app') / brand.favicon.lstrip('/')
+        asset_path = Path(__file__).resolve().parent / brand.favicon.lstrip('/')
         if asset_path.exists() and asset_path.is_file():
             media_type = 'image/svg+xml' if asset_path.suffix.lower() == '.svg' else None
             return FileResponse(asset_path, media_type=media_type)

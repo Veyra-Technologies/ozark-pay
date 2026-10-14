@@ -70,6 +70,14 @@ TOP_RU_BANKS: tuple[BankInfo, ...] = (
     BankInfo('tochka', 'Точка Банк', ('Точка', 'Tochka'), True, 480),
     BankInfo('forabank', 'Фора-Банк', ('Фора Банк', 'Fora Bank'), True, 490),
     BankInfo('rnkb', 'РНКБ', ('Российский Национальный Коммерческий Банк', 'RNKB'), True, 500),
+    BankInfo('cifra_bank', 'Цифра банк', ('Цифра Банк', 'Cifra Bank'), True, 510),
+    BankInfo(
+        'mts_money_exi_bank',
+        'МТС Деньги (ЭКСИ-Банк)',
+        ('МТС Деньги', 'ЭКСИ-Банк', 'EXI Bank'),
+        True,
+        520,
+    ),
 )
 
 

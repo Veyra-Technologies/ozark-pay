@@ -1,0 +1,7 @@
+{% if display_tariff and display_tariff.basis == 'base_usdt' %}
+<div class="note"><b>Ориентировочные диапазоны · {{ display_tariff.display_currency }}</b>
+{% if display_tariff.display_tiers %}<p>Автоматический Binance P2P: {{ display_tariff.display_rate }} {{ display_tariff.display_currency }}/USDT · {{ display_tariff.display_fetched_at }}.</p>
+{% for tier in display_tariff.display_tiers %}<div>≈ {{ tier.min }} … {{ tier.max or '∞' }} {{ display_tariff.display_currency }} · {{ tier.percent }}%</div>{% endfor %}
+{% else %}<p>Свежая автоматическая котировка недоступна. Локальный пересчёт не показан.</p>{% endif %}
+<p>Это отображение текущих границ. Выбор ступени и расчёты используют утверждённые USDT; сохранение процентов не требует курса GEL.</p></div>
+{% endif %}

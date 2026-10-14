@@ -1,0 +1,6 @@
+# Local HTTP access. Use with docker-compose.production.yml and a private
+# .env.local containing ENV=local, DEBUG=true, APP_ENV_FILE=.env.local.
+services:
+  api:
+    ports:
+      - "127.0.0.1:8000:8000"

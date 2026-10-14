@@ -17,7 +17,7 @@
         {% for tier in commission_tier_ranges %}
           {% set initial = tiers.get('sbp', {}).get(tier.key, {}) %}
           <tr>
-            <td><b>{{ tier.label }}</b><div class="compact-note">[{{ tier.min_amount }}, {{ tier.max_amount }})</div></td>
+            <td><b>от {{ tier.min_amount|decimal_display }} ₽</b><div class="compact-note">менее {{ tier.max_amount|decimal_display }} ₽</div></td>
             <td><input name="{{ tier.field }}" value="{{ initial.get('rate_percent', '') }}" inputmode="decimal" pattern="[0-9]+([.,][0-9]{1,2})?" autocomplete="off" required data-commission-rate="{{ tier.key }}" aria-label="Комиссия {{ tier.label }}"></td>
             <td><span class="status-pill {{ 'status-ok' if initial.get('configured') else 'status-wait' }}" data-commission-status="{{ tier.key }}">{{ 'Настроено' if initial.get('configured') else 'Не настроено' }}</span></td>
             <td><span data-commission-version="{{ tier.key }}">{% if initial.get('configured') %}v{{ initial.get('version') }}{% else %}—{% endif %}</span><div class="compact-note" data-commission-updated="{{ tier.key }}">{{ initial.get('updated_at', '') }}</div></td>

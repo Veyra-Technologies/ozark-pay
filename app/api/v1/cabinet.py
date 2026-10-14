@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from app.services.trader_work import trader_account_id
+from fastapi import APIRouter, Depends, HTTPException, File, Form, UploadFile
+from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.session import get_db
@@ -64,7 +66,7 @@ async def _operation_visible_to_user(db: AsyncSession, user: User, operation_typ
         if not operation.requisites_id:
             raise HTTPException(404, 'operation not found')
         req = (await db.execute(select(Requisite).where(Requisite.id == operation.requisites_id))).scalar_one_or_none()
-        if not req or req.trader_id != user.id:
+        if not req or not trader_account_id(user) or req.trader_id != trader_account_id(user):
             raise HTTPException(404, 'operation not found')
         return operation
 
@@ -73,8 +75,39 @@ async def _operation_visible_to_user(db: AsyncSession, user: User, operation_typ
 @router.get('/wallet')
 async def wallet(db: AsyncSession=Depends(get_db), user: User=Depends(current_user)):
     m=await my_merchant(db,user)
-    b=(await db.execute(select(Balance).where(Balance.merchant_id==m.id))).scalar_one_or_none()
-    return {'merchant':m.name,'available':b.available if b else 0,'frozen':b.frozen if b else 0,'holds':b.frozen if b else 0,'history_endpoint':'/api/v1/cabinet/operations'}
+    currency = 'USDT' if m.working_country == 'KZ' else 'RUB'
+    rows=(await db.execute(select(Balance).where(Balance.merchant_id==m.id))).scalars().all()
+    b=next((row for row in rows if row.currency == currency), None)
+    return {'merchant':m.name,'country':m.working_country,'currency':currency,
+            'available':b.available if b else 0,'frozen':b.frozen if b else 0,'holds':b.frozen if b else 0,
+            'balances':[{'currency':row.currency,'available':row.available,'frozen':row.frozen} for row in rows],
+            'history_endpoint':'/api/v1/crossborder/operations' if currency == 'USDT' else '/api/v1/cabinet/operations'}
+
+
+@router.get('/working-profile')
+async def working_profile(db: AsyncSession=Depends(get_db), user: User=Depends(require_roles(Role.operator, Role.trader))):
+    from app.services.trader_work import accepts_currency
+    account_id = trader_account_id(user)
+    account = await db.get(User, account_id) if account_id else None
+    ge_route = bool(account and account.working_country == 'GE' and account.is_active
+                    and not account.is_locked and not account.is_archived)
+    return {'trader_id': account_id, 'working_country': account.working_country if account else None,
+            'working_currency': account.working_currency if account else None,
+            'working_rate_source': account.working_rate_source if account else None,
+            'payment_methods': ['sbp', 'c2c', 'mobile_commerce'] if accepts_currency(account) else [],
+            'settlement_currency': 'RUB', 'legacy_balance_currency': 'RUB',
+            'crossborder_settlement_currency': 'USDT', 'crossborder_collateral_currency': 'USDT',
+            'crossborder_bank_route_ready': ge_route,
+            'crossborder_directions': ['kz-ge'] if ge_route else [],
+            'crossborder_confirmation': 'manual_or_signed_webhook' if ge_route else None,
+            'country_editable': False}
+
+
+@router.get('/working-profile/quote')
+async def working_quote(db: AsyncSession=Depends(get_db), user: User=Depends(require_roles(Role.operator, Role.trader))):
+    from app.services.work_rates import profile_quote
+    account_id = trader_account_id(user)
+    return await profile_quote(await db.get(User, account_id) if account_id else None, db=db)
 
 @router.get('/operations')
 async def operations(db: AsyncSession=Depends(get_db), user: User=Depends(current_user)):
@@ -86,6 +119,9 @@ async def operations(db: AsyncSession=Depends(get_db), user: User=Depends(curren
 @router.get('/statistics')
 async def statistics(db: AsyncSession=Depends(get_db), user: User=Depends(current_user)):
     m=await my_merchant(db,user)
+    if m.working_country == 'KZ':
+        from app.services.crossborder_operations import statistics as crossborder_statistics
+        return await crossborder_statistics(db, user)
     turnover=(await db.execute(select(func.coalesce(func.sum(Deposit.amount),0)).where(Deposit.merchant_id==m.id, Deposit.status==DepositStatus.paid.value))).scalar_one()
     successful_deposits=(await db.execute(select(func.count()).select_from(Deposit).where(Deposit.merchant_id==m.id, Deposit.status==DepositStatus.paid.value))).scalar_one()
     failed_deposits=(await db.execute(select(func.count()).select_from(Deposit).where(Deposit.merchant_id==m.id, Deposit.status.in_([DepositStatus.failed.value,DepositStatus.cancelled.value,DepositStatus.expired.value])))).scalar_one()
@@ -98,19 +134,24 @@ async def sms(data: SmsIn, db: AsyncSession=Depends(get_db), user: User=Depends(
     s=await ingest_sms(db,data.provider_message_id,data.sender,data.body); await db.commit(); await db.refresh(s); return s
 
 @router.post('/appeals')
-async def create_appeal(data: AppealIn, db: AsyncSession=Depends(get_db), user: User=Depends(current_user)):
-    operation_type = data.operation_type.strip().lower()
-    operation = await _operation_visible_to_user(db, user, operation_type, data.operation_id)
-    final_statuses = {
-        DepositStatus.paid.value,
-        DepositStatus.failed.value,
-        DepositStatus.cancelled.value,
-        DepositStatus.expired.value,
-        PayoutStatus.completed.value,
-        PayoutStatus.failed.value,
-        PayoutStatus.cancelled.value,
-    }
-    if getattr(operation, 'status', None) not in final_statuses:
-        operation.status = DepositStatus.appeal_opened.value if operation_type == 'deposit' else PayoutStatus.appeal_opened.value
-    a=Appeal(operation_type=operation_type, operation_id=data.operation_id, created_by=user.id)
-    db.add(a); await db.flush(); db.add(AppealMessage(appeal_id=a.id, author_id=user.id, message=data.message)); await db.commit(); await db.refresh(a); return a
+async def create_appeal(
+    operation_id: UUID = Form(...), operation_type: str = Form('deposit'),
+    trader_id: UUID = Form(...), amount: str = Form(...), requisite: str = Form(...),
+    recipient_bank: str = Form(...), operation_date: str = Form(...),
+    message: str = Form(''), receipt_file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db), user: User = Depends(require_roles(Role.merchant)),
+):
+    from app.services.appeal_evidence import create_deposit_appeal, save_upload
+    if operation_type != 'deposit':
+        raise HTTPException(422, 'Поддерживаются апелляции по пополнениям с чеком')
+    try:
+        receipt = await save_upload(receipt_file)
+        appeal = await create_deposit_appeal(db, user=user, deposit_id=operation_id,
+            trader_id=trader_id, amount=amount, requisite=requisite,
+            recipient_bank=recipient_bank, operation_date=operation_date,
+            receipt=receipt, message=message)
+        await db.commit()
+        return {'id': appeal.id, 'status': appeal.status, 'evidence_validated': appeal.evidence_validated}
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(422, str(exc)) from exc

@@ -23,17 +23,20 @@ class ReconciliationResult:
     actual_frozen: Decimal
     expected_available: Decimal
     expected_frozen: Decimal
+    quantum: Decimal = TWOPLACES
 
     @property
     def available_delta(self) -> Decimal:
-        return money(self.actual_available - self.expected_available)
+        return (self.actual_available - self.expected_available).quantize(self.quantum)
 
     @property
     def frozen_delta(self) -> Decimal:
-        return money(self.actual_frozen - self.expected_frozen)
+        return (self.actual_frozen - self.expected_frozen).quantize(self.quantum)
 
 
 async def reconcile_merchant_balance(db: AsyncSession, merchant_id: UUID, currency: str = 'RUB') -> ReconciliationResult:
+    from app.services.crossborder_money import usdt
+    quantize_amount = usdt if currency == 'USDT' else money
     balance = (await db.execute(
         select(Balance).where(Balance.merchant_id == merchant_id, Balance.currency == currency)
     )).scalar_one_or_none()
@@ -45,8 +48,8 @@ async def reconcile_merchant_balance(db: AsyncSession, merchant_id: UUID, curren
     expected_available = Decimal('0.00')
     expected_frozen = Decimal('0.00')
     for entry in entries:
-        amount = money(entry.amount)
-        if entry.entry_type == LedgerType.credit.value:
+        amount = quantize_amount(entry.amount)
+        if entry.entry_type in (LedgerType.credit.value, 'crossborder_credit', 'crossborder_refund'):
             expected_available += amount
         elif entry.entry_type == LedgerType.hold.value:
             expected_available -= amount
@@ -61,16 +64,17 @@ async def reconcile_merchant_balance(db: AsyncSession, merchant_id: UUID, curren
                 expected_available -= amount
         elif entry.entry_type == LedgerType.fee.value:
             continue
-    actual_available = money(balance.available if balance else Decimal('0.00'))
-    actual_frozen = money(balance.frozen if balance else Decimal('0.00'))
-    expected_available = money(expected_available)
-    expected_frozen = money(expected_frozen)
+    actual_available = quantize_amount(balance.available if balance else Decimal('0.00'))
+    actual_frozen = quantize_amount(balance.frozen if balance else Decimal('0.00'))
+    expected_available = quantize_amount(expected_available)
+    expected_frozen = quantize_amount(expected_frozen)
     return ReconciliationResult(
         ok=actual_available == expected_available and actual_frozen == expected_frozen,
         actual_available=actual_available,
         actual_frozen=actual_frozen,
         expected_available=expected_available,
         expected_frozen=expected_frozen,
+        quantum=Decimal('.00000001') if currency == 'USDT' else TWOPLACES,
     )
 
 

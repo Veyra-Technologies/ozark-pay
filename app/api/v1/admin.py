@@ -1,3 +1,8 @@
+from app.services.trader_work import configure_new_account, trader_account_id, assign_country
+from app.services.trader_finance import require_working_account
+from app.services.bank_directory import resolve_requisite_jurisdiction
+from app.services.bank_requisites import check_requisite_identity_edit, requisite_list_value, validated_requisite_value
+from app.schemas.common import WorkingCountryIn
 import csv
 import io
 import secrets
@@ -6,7 +11,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pyotp
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +19,7 @@ from app.db.session import get_db
 from app.api.deps import require_roles
 from app.core.business_rules import BUSINESS_RULES, ROLE_PERMISSIONS
 from app.core.compliance import COMPLIANCE_POLICY
-from app.models import Appeal, AppealMessage, AggregatorAccount, AggregatorCallbackLog, AggregatorPayment, Blacklist, FeeRule, KycProfile, LedgerEntry, LimitRule, ReportExport, RiskEvent, User, Merchant, ApiKey, Deposit, Payout, Balance, Requisite, AuditLog, WebhookEvent
+from app.models import Appeal, AppealMessage, AggregatorAccount, AggregatorCallbackLog, AggregatorPayment, BankDirectory, Blacklist, FeeRule, KycProfile, LedgerEntry, LimitRule, ReportExport, RiskEvent, User, Merchant, ApiKey, Deposit, Payout, Balance, Requisite, AuditLog, WebhookEvent, MerchantWebhookSigningKey
 from app.schemas.common import AggregatorCreate, AggregatorStatusIn, AggregatorUpdate, AppealMessageIn, AppealResolveIn, BlacklistIn, FeeRuleIn, KycReviewIn, LimitRuleIn, MerchantCreate, RequisiteIn, UserCreateIn
 from app.core.enums import AppealStatus, Role, DepositStatus, PayoutStatus
 from app.core.access import can_message_appeal, can_view_admin_stats
@@ -34,7 +39,17 @@ from app.services.fee_tiers import (
     replace_fee_rule,
 )
 from app.services.platform_income import platform_income_dashboard
-from app.services.webhooks import queue_webhook
+from app.services.webhooks import (
+    queue_webhook,
+    request_manual_webhook_retry,
+)
+from app.services.webhook_signing_keys import (
+    WebhookSigningKeyError,
+    issue_webhook_signing_key,
+    revoke_webhook_signing_key,
+    rotate_webhook_signing_key,
+    webhook_key_fingerprint,
+)
 from app.services.sms import confirm_deposit_from_sms
 from app.services.webhook_enqueue import enqueue_webhook_delivery
 from app.services.webhook_payloads import build_deposit_webhook_payload, build_payout_webhook_payload
@@ -162,10 +177,13 @@ def _requisite_public(req: Requisite, *, include_value: bool) -> dict:
         'owner_name': req.owner_name,
         'full_name': req.full_name,
         'method': req.method,
-        'value': reveal_text(req.value_encrypted) if include_value else '',
+        'value': (reveal_text(req.value_encrypted) if include_value else requisite_list_value(req)),
         'bank_code': req.bank_code,
+        'bank_id': req.bank_id,
         'operator_code': req.operator_code,
         'bank_name': req.bank_name,
+        'country': req.country,
+        'currency': req.currency,
         **provider,
         'automation_id': req.automation_id,
         'last4': req.last4,
@@ -192,6 +210,16 @@ async def create_merchant(data: MerchantCreate, request: Request, db: AsyncSessi
     db.add(user); await db.flush()
     merchant=Merchant(owner_id=user.id, name=data.name, webhook_url=data.webhook_url, ip_whitelist=data.ip_whitelist, sandbox_mode=data.sandbox_mode)
     db.add(merchant); await db.flush()
+    from app.services.merchant_countries import assign_country as assign_merchant_country
+    try:
+        await assign_merchant_country(db, actor=actor, merchant=merchant, country=data.country,
+                                      parser_id=data.parser_id, business_id=data.business_id)
+        from app.services.merchant_cabinets import configure
+        await configure(db, actor=actor, merchant=merchant, currency=data.currency, parser_id=data.parser_id,
+            tariff_plan_id=data.tariff_plan_id, methods=data.payment_methods)
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(422, str(exc)) from exc
     secret=secrets.token_urlsafe(32); api_key='pk_'+secrets.token_urlsafe(24)
     db.add(ApiKey(merchant_id=merchant.id, api_key=api_key, secret_hash=encrypt_secret(secret), mode='sandbox' if data.sandbox_mode else 'production'))
     db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
@@ -307,13 +335,28 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
         raise HTTPException(403, 'superadmin is created only by seed')
     if (await db.execute(select(User).where(User.email==data.email))).scalar_one_or_none():
         raise HTTPException(409, 'email exists')
-    needs_2fa = data.role in [Role.admin, Role.support]
+    needs_2fa = data.role in [Role.admin, Role.support, Role.teamlead]
     user=User(email=data.email, password_hash=hash_password(data.password), role=data.role.value, twofa_enabled=False, twofa_secret=encrypt_secret(pyotp.random_base32()) if needs_2fa else None)
+    await configure_new_account(db, actor, user, data.working_country, data.working_currency, data.trader_account_id, data.working_rate_source, data.trader_tariff_method)
     db.add(user); await db.flush()
+    if user.role == Role.trader.value:
+        from app.services.trader_finance import ensure_usdt_wallet
+        await ensure_usdt_wallet(db, user.id)
     result={'user_id':user.id,'email':user.email,'role':user.role,'twofa_setup_required':needs_2fa}
     if data.role == Role.merchant:
         merchant=Merchant(owner_id=user.id, name=data.merchant_name or data.email, webhook_url=None, ip_whitelist=[], sandbox_mode=True)
         db.add(merchant); await db.flush()
+        from app.services.merchant_countries import assign_country as assign_merchant_country
+        try:
+            await assign_merchant_country(db, actor=actor, merchant=merchant, country=data.merchant_country,
+                parser_id=data.merchant_parser_id, business_id=data.business_id)
+            from app.services.merchant_cabinets import configure
+            await configure(db, actor=actor, merchant=merchant, currency=data.merchant_currency,
+                parser_id=data.merchant_parser_id, tariff_plan_id=data.merchant_tariff_plan_id,
+                methods=data.merchant_payment_methods)
+        except ValueError as exc:
+            await db.rollback()
+            raise HTTPException(422, str(exc)) from exc
         secret=secrets.token_urlsafe(32); api_key='pk_'+secrets.token_urlsafe(24)
         db.add(ApiKey(merchant_id=merchant.id, api_key=api_key, secret_hash=encrypt_secret(secret), mode='sandbox'))
         db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
@@ -323,10 +366,21 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
     await db.commit()
     return result
 
+@router.post('/users/{user_id}/working-country')
+async def set_working_country(user_id: UUID, data: WorkingCountryIn, request: Request,
+                              db: AsyncSession = Depends(get_db), actor=Depends(require_roles(Role.superadmin, Role.admin))):
+    target = await assign_country(db, actor, user_id, data.working_country, data.working_currency, data.working_rate_source)
+    await audit(db, 'trader_country_assigned', 'user', actor.id, target.id, client_ip(request), {'country': target.working_country, 'currency': target.working_currency})
+    await db.commit()
+    return {'user_id': target.id, 'working_country': target.working_country, 'working_currency': target.working_currency, 'working_rate_source': target.working_rate_source}
+
+
 @router.post('/requisites')
 async def add_requisite(data: RequisiteIn, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin,Role.operator,Role.trader))):
     if actor.role in [Role.operator.value, Role.trader.value]:
-        trader_id = actor.id
+        trader_id = trader_account_id(actor)
+        if data.trader_id and data.trader_id != trader_id:
+            raise HTTPException(403, 'Нельзя назначить реквизит чужому трейдеру')
     else:
         if not data.trader_id:
             raise HTTPException(422, 'trader_id is required when admin creates a requisite')
@@ -340,18 +394,34 @@ async def add_requisite(data: RequisiteIn, request: Request, db: AsyncSession=De
         )).scalar_one_or_none()
         if not trader:
             raise HTTPException(404, 'active trader not found')
-        trader_id = trader.id
+        trader_id = trader_account_id(trader)
+    account = await require_working_account(db, trader_id)
+    jurisdiction = await resolve_requisite_jurisdiction(
+        db,
+        account,
+        method=data.method.value,
+        bank_id=data.bank_id or '',
+        bank_code=data.bank_code or '',
+        operator_code=data.operator_code or '',
+        bank_name=data.bank_name or '',
+        requested_country=data.country,
+        requested_currency=data.currency,
+    )
+    clean_value, suffix = validated_requisite_value(jurisdiction, data.value, data.last4)
     req=Requisite(
-        trader_id=trader_id,
+        trader_id=account.id,
         owner_name=data.owner_name,
         full_name=data.full_name or data.owner_name,
-        method=data.method.value,
-        value_encrypted=encrypt_secret(data.value.strip()),
-        bank_code=data.bank_code,
-        operator_code=data.operator_code,
-        bank_name=data.bank_name,
+        method=jurisdiction.method,
+        value_encrypted=encrypt_secret(clean_value),
+        bank_id=jurisdiction.bank_id,
+        bank_code=jurisdiction.bank_code,
+        operator_code=jurisdiction.operator_code,
+        bank_name=jurisdiction.bank_name,
+        country=jurisdiction.country,
+        currency=jurisdiction.currency,
         automation_id=data.automation_id,
-        last4=data.last4,
+        last4=suffix,
         min_check=data.min_check,
         max_check=data.max_check,
         request_count=data.request_count,
@@ -360,19 +430,104 @@ async def add_requisite(data: RequisiteIn, request: Request, db: AsyncSession=De
         simultaneous_limit=data.simultaneous_limit,
         daily_limit=data.daily_limit,
         operation_limit=data.operation_limit,
+        status=jurisdiction.status,
+        enabled=jurisdiction.enabled,
     )
-    db.add(req); await audit(db,'requisite_created','requisite',actor.id,None,client_ip(request),{'trader_id':str(trader_id),'method':data.method.value}); await db.commit(); await db.refresh(req)
+    db.add(req); await audit(db,'requisite_created','requisite',actor.id,None,client_ip(request),{'trader_id':str(account.id),'method':jurisdiction.method,'country':jurisdiction.country,'currency':jurisdiction.currency,'bank_id':jurisdiction.bank_id}); await db.commit(); await db.refresh(req)
     return _requisite_public(req, include_value=True)
+
+
+@router.get('/requisite-methods')
+async def requisite_methods(actor=Depends(require_roles(Role.superadmin, Role.admin, Role.operator, Role.trader)),
+                            trader_id: UUID | None = None, db: AsyncSession=Depends(get_db)):
+    from app.core.payment_methods import requisite_method_options
+    own_id = trader_account_id(actor) if actor.role in ('operator', 'trader') else trader_id
+    if actor.role in ('operator', 'trader') and trader_id and trader_id != own_id:
+        raise HTTPException(403, 'Чужой кабинет недоступен')
+    account = await require_working_account(db, own_id)
+    return {'country': account.working_country, 'currency': account.working_currency,
+            'methods': requisite_method_options(account.working_country)}
+
+
+@router.get('/requisites/{requisite_id}')
+async def requisite_detail(requisite_id: UUID, request: Request, response: Response,
+                           db: AsyncSession=Depends(get_db),
+                           actor=Depends(require_roles(Role.superadmin, Role.admin, Role.operator, Role.trader))):
+    req = await db.get(Requisite, requisite_id)
+    if not req or (actor.role in ('operator', 'trader') and req.trader_id != trader_account_id(actor)):
+        raise HTTPException(404, 'Реквизит не найден')
+    response.headers['Cache-Control'] = 'no-store'
+    await audit(db, 'requisite_value_viewed', 'requisite', actor.id, req.id, client_ip(request), {'method': req.method})
+    await db.commit()
+    return _requisite_public(req, include_value=True)
+
+
+@router.put('/requisites/{requisite_id}')
+async def update_requisite(requisite_id: UUID, data: RequisiteIn, request: Request,
+                           db: AsyncSession=Depends(get_db),
+                           actor=Depends(require_roles(Role.superadmin, Role.admin, Role.operator, Role.trader))):
+    req = await db.scalar(select(Requisite).where(Requisite.id == requisite_id).with_for_update())
+    if not req or (actor.role in ('operator', 'trader') and req.trader_id != trader_account_id(actor)):
+        raise HTTPException(404, 'Реквизит не найден')
+    if data.trader_id and data.trader_id != req.trader_id:
+        raise HTTPException(422, 'Владельца реквизита менять нельзя')
+    account = await require_working_account(db, req.trader_id)
+    jurisdiction = await resolve_requisite_jurisdiction(
+        db, account, method=data.method.value, bank_id=data.bank_id or '', bank_code=data.bank_code or '',
+        operator_code=data.operator_code or '', bank_name=data.bank_name or '',
+        requested_country=data.country, requested_currency=data.currency)
+    value, suffix = validated_requisite_value(jurisdiction, data.value, data.last4)
+    await check_requisite_identity_edit(db, req, jurisdiction, value)
+    for field in ('method', 'bank_id', 'bank_code', 'operator_code', 'bank_name', 'country', 'currency'):
+        setattr(req, field, getattr(jurisdiction, field))
+    req.value_encrypted = encrypt_secret(value)
+    req.last4 = suffix
+    # A PUT changes only explicitly supplied controls; activation and existing limits are preserved.
+    for field in ('owner_name', 'full_name', 'automation_id', 'min_check', 'max_check', 'daily_limit',
+                  'operation_limit', 'request_count', 'timeframe', 'success_delay_minutes', 'simultaneous_limit'):
+        if field in data.model_fields_set:
+            setattr(req, field, getattr(data, field))
+    if req.max_check < req.min_check:
+        raise HTTPException(422, 'Максимальный чек меньше минимального')
+    await audit(db, 'requisite_updated', 'requisite', actor.id, req.id, client_ip(request), {'method': req.method})
+    await db.commit()
+    await db.refresh(req)
+    return _requisite_public(req, include_value=True)
+
+
+@router.get('/bank-directory')
+async def bank_directory(country: str = Query(..., min_length=2, max_length=2), actor=Depends(require_roles(Role.superadmin,Role.admin,Role.support,Role.operator,Role.trader)), db: AsyncSession=Depends(get_db)):
+    normalized = country.upper()
+    if actor.role in [Role.operator.value, Role.trader.value]:
+        account = await require_working_account(db, trader_account_id(actor))
+        if normalized != account.working_country:
+            raise HTTPException(403, 'bank directory is limited to the assigned country')
+    if normalized not in {'AM', 'GE'}:
+        raise HTTPException(422, 'country must be AM or GE')
+    rows = (await db.execute(select(BankDirectory).where(
+        BankDirectory.country == normalized,
+        BankDirectory.status == 'active',
+    ).order_by(BankDirectory.institution_type, BankDirectory.name))).scalars().all()
+    return [{
+        'id': row.id,
+        'country': row.country,
+        'name': row.name,
+        'institution_type': row.institution_type,
+        'status': row.status,
+        'aliases': row.aliases,
+        'source_url': row.source_url,
+        'verified_on': row.verified_on,
+    } for row in rows]
 
 
 @router.get('/requisites')
 async def list_requisites(request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin,Role.support,Role.merchant,Role.operator,Role.trader))):
     if actor.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
         rows = (await db.execute(select(Requisite).order_by(Requisite.created_at.desc()).limit(500))).scalars().all()
-        payload = [_requisite_public(req, include_value=True) for req in rows]
+        payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
     elif actor.role in [Role.operator.value, Role.trader.value]:
-        rows = (await db.execute(select(Requisite).where(Requisite.trader_id == actor.id).order_by(Requisite.created_at.desc()).limit(500))).scalars().all()
-        payload = [_requisite_public(req, include_value=True) for req in rows]
+        rows = (await db.execute(select(Requisite).where(Requisite.trader_id == trader_account_id(actor)).order_by(Requisite.created_at.desc()).limit(500))).scalars().all()
+        payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
     else:
         merchant = (await db.execute(select(Merchant).where(Merchant.owner_id == actor.id))).scalar_one_or_none()
         if not merchant:
@@ -387,7 +542,7 @@ async def list_requisites(request: Request, db: AsyncSession=Depends(get_db), ac
                 payload = []
             else:
                 rows = (await db.execute(select(Requisite).where(Requisite.id.in_(req_ids)).order_by(Requisite.created_at.desc()))).scalars().all()
-                payload = [_requisite_public(req, include_value=True) for req in rows]
+                payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
     await audit(db, 'requisites_viewed', 'requisite', actor.id, None, client_ip(request), {'count': len(payload), 'role': actor.role})
     await db.commit()
     return payload
@@ -456,8 +611,9 @@ async def create_fee_rule(data: FeeRuleIn, request: Request, db: AsyncSession=De
             entity_type=data.entity_type,
             entity_id=data.entity_id,
             fee_side=data.fee_side,
-            payment_method=data.payment_method.value,
+            payment_method=getattr(data.payment_method, 'value', data.payment_method),
             currency=data.currency,
+            direction=data.direction,
             min_amount=data.min_amount,
             max_amount=data.max_amount,
             rate_percent=data.rate_percent,
@@ -467,7 +623,7 @@ async def create_fee_rule(data: FeeRuleIn, request: Request, db: AsyncSession=De
     except FeeConfigurationError as exc:
         await db.rollback()
         raise HTTPException(422, {'code': getattr(exc, 'code', 'fee_configuration_error')}) from exc
-    await audit(db,'fee_rule_created','fee_rule',actor.id,rule.id,client_ip(request),{'entity_type':data.entity_type,'entity_id':str(data.entity_id),'fee_side':data.fee_side,'payment_method':data.payment_method.value,'currency':data.currency,'min_amount':str(data.min_amount),'max_amount':str(data.max_amount) if data.max_amount is not None else None,'rate_percent':str(data.rate_percent)})
+    await audit(db,'fee_rule_created','fee_rule',actor.id,rule.id,client_ip(request),{'entity_type':data.entity_type,'entity_id':str(data.entity_id),'fee_side':data.fee_side,'payment_method':getattr(data.payment_method, 'value', data.payment_method),'currency':data.currency,'min_amount':str(data.min_amount),'max_amount':str(data.max_amount) if data.max_amount is not None else None,'rate_percent':str(data.rate_percent)})
     await db.commit(); await db.refresh(rule)
     return rule
 
@@ -485,8 +641,9 @@ async def replace_fee_rule_version(rule_id: UUID, data: FeeRuleIn, request: Requ
             entity_type=data.entity_type,
             entity_id=data.entity_id,
             fee_side=data.fee_side,
-            payment_method=data.payment_method.value,
+            payment_method=getattr(data.payment_method, 'value', data.payment_method),
             currency=data.currency,
+            direction=data.direction,
             min_amount=data.min_amount,
             max_amount=data.max_amount,
             rate_percent=data.rate_percent,
@@ -631,6 +788,15 @@ async def confirm_deposit(deposit_id: str, request: Request, db: AsyncSession=De
     except DepositConfirmationError as exc:
         raise HTTPException(exc.status_code, exc.api_detail) from exc
     delivery = enqueue_deposit_confirmation_deliveries(result)
+    if not result.confirmed:
+        raise HTTPException(
+            409,
+            {
+                'code': 'deposit_expired',
+                'reason': result.reason,
+                'status': result.status,
+            },
+        )
     return {'ok':True,'webhook_event_id':result.webhook_event_id,**delivery,**result.settlement}
 
 @router.post('/payouts/{payout_id}/complete')
@@ -739,20 +905,35 @@ async def risk_events(db: AsyncSession=Depends(get_db), actor=Depends(require_ro
 @router.post('/sms/{sms_id}/confirm/{deposit_id}')
 async def manual_sms_confirm(sms_id: UUID, deposit_id: UUID, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin))):
     try:
-        sms, dep, changed = await confirm_deposit_from_sms(db, sms_id, deposit_id)
+        sms, dep, changed, finalization = await confirm_deposit_from_sms(
+            db,
+            sms_id,
+            deposit_id,
+            actor_id=actor.id,
+            actor_ip=client_ip(request),
+        )
     except LookupError:
         await db.rollback()
         raise HTTPException(404, 'sms or deposit not found')
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(409, str(exc)) from exc
-    ev = await queue_webhook(db, dep.merchant_id, 'deposit.paid', build_deposit_webhook_payload(dep, 'deposit.paid', {'source':'sms'}))
-    aggregator_callback_logs = await sync_payment_from_deposit(db, dep)
+    ev = None
+    aggregator_callback_logs = []
+    if changed:
+        ev = await queue_webhook(db, dep.merchant_id, 'deposit.paid', build_deposit_webhook_payload(dep, 'deposit.paid', {'source':'sms'}))
+        aggregator_callback_logs = await sync_payment_from_deposit(db, dep)
     await audit(db,'sms_manual_confirm','sms',actor.id,sms.id,client_ip(request),{'deposit_id':str(dep.id),'changed':changed})
     await db.commit()
-    webhook_enqueued = _enqueue_webhook(ev.id)
+    if finalization:
+        if finalization.webhook_event_id:
+            _enqueue_webhook(finalization.webhook_event_id)
+        for callback_id in finalization.aggregator_callback_log_ids:
+            enqueue_aggregator_callback_delivery(callback_id)
+        raise HTTPException(409, 'deposit expired and was finalized as trader_timeout')
+    webhook_enqueued = bool(ev and _enqueue_webhook(ev.id))
     aggregator_callbacks_enqueued = [enqueue_aggregator_callback_delivery(log.id) for log in aggregator_callback_logs]
-    return {'ok':True,'sms_id':sms.id,'deposit_id':dep.id,'changed':changed,'webhook_event_id':ev.id,'webhook_enqueued':webhook_enqueued,'aggregator_callbacks_enqueued':sum(1 for item in aggregator_callbacks_enqueued if item)}
+    return {'ok':True,'sms_id':sms.id,'deposit_id':dep.id,'changed':changed,'webhook_event_id':ev.id if ev else None,'webhook_enqueued':webhook_enqueued,'aggregator_callbacks_enqueued':sum(1 for item in aggregator_callbacks_enqueued if item)}
 
 @router.post('/appeals/{appeal_id}/messages')
 async def add_appeal_message(appeal_id: UUID, data: AppealMessageIn, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin,Role.support,Role.merchant,Role.operator,Role.trader))):
@@ -782,17 +963,205 @@ async def resolve_appeal(appeal_id: UUID, data: AppealResolveIn, request: Reques
     return {'ok':True,'appeal_id':appeal.id,'status':appeal.status}
 
 @router.post('/webhooks/{event_id}/retry')
-async def admin_retry_webhook(event_id: UUID, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin))):
-    event=(await db.execute(select(WebhookEvent).where(WebhookEvent.id==event_id))).scalar_one_or_none()
+async def admin_retry_webhook(event_id: UUID, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin))):
+    event = await request_manual_webhook_retry(db, event_id)
     if not event: raise HTTPException(404,'webhook event not found')
-    event.status='queued'
-    event.attempts = 0
-    event.next_retry_at = None
-    event.last_error = None
-    await audit(db,'webhook_retry_requested','webhook_event',actor.id,event.id,client_ip(request))
+    await audit(
+        db,
+        'webhook_retry_requested',
+        'webhook_event',
+        actor.id,
+        event.id,
+        client_ip(request),
+        {
+            'event_id': str(event.id),
+            'attempts': event.attempts,
+            'max_attempts': event.max_attempts,
+        },
+    )
     await db.commit()
-    webhook_enqueued = _enqueue_webhook(event.id)
+    webhook_enqueued = (
+        False
+        if event.status == 'delivered'
+        else _enqueue_webhook(event.id)
+    )
     return {'ok':True,'event_id':event.id,'status':event.status,'webhook_enqueued':webhook_enqueued}
+
+
+@router.get('/merchants/{merchant_id}/webhook-signing-keys')
+async def list_webhook_signing_keys(
+    merchant_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    merchant = await db.scalar(
+        select(Merchant).where(Merchant.id == merchant_id)
+    )
+    if not merchant:
+        raise HTTPException(404, 'merchant not found')
+    keys = (
+        await db.execute(
+            select(MerchantWebhookSigningKey)
+            .where(
+                MerchantWebhookSigningKey.merchant_id == merchant.id
+            )
+            .order_by(MerchantWebhookSigningKey.created_at.desc())
+        )
+    ).scalars().all()
+    return {
+        'merchant_id': merchant.id,
+        'configuration_required': not any(
+            key.status == 'active' for key in keys
+        ),
+        'keys': [
+            {
+                'key_id': key.key_id,
+                'status': key.status,
+                'created_at': key.created_at,
+                'retire_at': key.retire_at,
+                'revoked_at': key.revoked_at,
+            }
+            for key in keys
+        ],
+    }
+
+
+@router.post('/merchants/{merchant_id}/webhook-signing-keys')
+async def issue_merchant_webhook_signing_key(
+    merchant_id: UUID,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    merchant = await db.scalar(
+        select(Merchant)
+        .where(Merchant.id == merchant_id)
+        .with_for_update()
+    )
+    if not merchant:
+        raise HTTPException(404, 'merchant not found')
+    try:
+        key, secret = await issue_webhook_signing_key(
+            db,
+            merchant,
+            created_by=actor.id,
+        )
+    except WebhookSigningKeyError as exc:
+        raise HTTPException(409, {'code': exc.code}) from exc
+    await audit(
+        db,
+        'merchant_webhook_signing_key_issued',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant.id),
+            'key_fingerprint': webhook_key_fingerprint(key.key_id),
+        },
+    )
+    await db.commit()
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return {
+        'merchant_id': merchant.id,
+        'key_id': key.key_id,
+        'secret': secret,
+        'secret_display': 'one_time',
+    }
+
+
+@router.post('/merchants/{merchant_id}/webhook-signing-keys/rotate')
+async def rotate_merchant_webhook_signing_key(
+    merchant_id: UUID,
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    merchant = await db.scalar(
+        select(Merchant)
+        .where(Merchant.id == merchant_id)
+        .with_for_update()
+    )
+    if not merchant:
+        raise HTTPException(404, 'merchant not found')
+    try:
+        key, secret, retiring = await rotate_webhook_signing_key(
+            db,
+            merchant,
+            created_by=actor.id,
+        )
+    except WebhookSigningKeyError as exc:
+        raise HTTPException(409, {'code': exc.code}) from exc
+    await audit(
+        db,
+        'merchant_webhook_signing_key_rotated',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant.id),
+            'new_key_fingerprint': webhook_key_fingerprint(key.key_id),
+            'retiring_key_fingerprint': webhook_key_fingerprint(
+                retiring.key_id
+            ),
+            'retire_at': retiring.retire_at.isoformat(),
+        },
+    )
+    await db.commit()
+    response.headers['Cache-Control'] = 'no-store, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return {
+        'merchant_id': merchant.id,
+        'key_id': key.key_id,
+        'secret': secret,
+        'secret_display': 'one_time',
+        'retiring_key_id': retiring.key_id,
+        'retire_at': retiring.retire_at,
+    }
+
+
+@router.post(
+    '/merchants/{merchant_id}/webhook-signing-keys/{key_id}/revoke'
+)
+async def revoke_merchant_webhook_signing_key(
+    merchant_id: UUID,
+    key_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    actor=Depends(require_roles(Role.superadmin)),
+):
+    key = await db.scalar(
+        select(MerchantWebhookSigningKey)
+        .where(
+            MerchantWebhookSigningKey.merchant_id == merchant_id,
+            MerchantWebhookSigningKey.key_id == key_id,
+        )
+        .with_for_update()
+    )
+    if not key:
+        raise HTTPException(404, 'webhook signing key not found')
+    try:
+        await revoke_webhook_signing_key(db, key)
+    except WebhookSigningKeyError as exc:
+        raise HTTPException(409, {'code': exc.code}) from exc
+    await audit(
+        db,
+        'merchant_webhook_signing_key_revoked',
+        'merchant_webhook_signing_key',
+        actor.id,
+        key.id,
+        client_ip(request),
+        {
+            'merchant_id': str(merchant_id),
+            'key_fingerprint': webhook_key_fingerprint(key.key_id),
+        },
+    )
+    await db.commit()
+    return {'ok': True, 'key_id': key.key_id, 'status': key.status}
 
 @router.get('/reports/export')
 async def export_operations_report(

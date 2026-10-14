@@ -83,8 +83,8 @@ async def refresh_token(data: RefreshIn, request: Request, db: AsyncSession=Depe
             raise ValueError()
     except Exception:
         raise HTTPException(401, 'invalid refresh token')
-    stored = (await db.execute(select(RefreshToken).where(RefreshToken.token_hash == sha256_text(data.refresh_token)))).scalar_one_or_none()
-    if not stored or stored.revoked_at or stored.expires_at <= datetime.now(timezone.utc):
+    stored = (await db.execute(select(RefreshToken).where(RefreshToken.token_hash == sha256_text(data.refresh_token)).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
+    if not stored or stored.revoked_at or stored.expires_at <= datetime.now(timezone.utc) or str(stored.user_id) != payload.get('sub') or stored.jti != payload.get('jti'):
         if stored:
             await audit(db, 'suspicious_refresh', 'user', actor_id=stored.user_id, ip=_client_ip(request), details={'reason': 'revoked_or_expired'})
             await db.commit()
@@ -115,7 +115,7 @@ async def refresh_token(data: RefreshIn, request: Request, db: AsyncSession=Depe
 
 @router.post('/logout')
 async def logout(data: RefreshIn, request: Request, db: AsyncSession=Depends(get_db)):
-    stored = (await db.execute(select(RefreshToken).where(RefreshToken.token_hash == sha256_text(data.refresh_token)))).scalar_one_or_none()
+    stored = (await db.execute(select(RefreshToken).where(RefreshToken.token_hash == sha256_text(data.refresh_token)).with_for_update().execution_options(populate_existing=True))).scalar_one_or_none()
     if stored and not stored.revoked_at:
         stored.revoked_at = datetime.now(timezone.utc)
         await audit(db, 'token_revoked', 'user', actor_id=stored.user_id, ip=_client_ip(request))

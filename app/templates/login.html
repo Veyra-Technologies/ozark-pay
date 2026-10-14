@@ -136,6 +136,10 @@
     /* Codex login second line shift */
     .lead span{padding-left:76px!important}
     @media(max-width:980px){.lead span{padding-left:0!important}}
+    {% if expected_realm == 'merchant' %}
+    .features .feature:nth-child(n+2){transform:translateY(8px)}
+    .features{padding-bottom:8px}
+    {% endif %}
   </style>
 </head>
 <body>
@@ -165,8 +169,10 @@
     </section>
     <form class="card" method="post" action="{{ login_action }}">{{ csrf_input(request) }}
       <h1>Вход на площадку</h1>
+      {% if expected_realm != 'merchant' %}
       <p class="muted">Введите email, пароль и 2FA-код, если он подключён в кабинете.</p>
       {% if expected_realm %}<p class="muted">Контур входа: {{ expected_realm }}.</p>{% endif %}
+      {% endif %}
       {% if error %}<div class="err">{{ error }}</div>{% endif %}
       <label for="email">Email</label>
       <input id="email" name="email" type="email" required autocomplete="username" placeholder="example@mail.com">
@@ -175,7 +181,7 @@
       <label for="otp">2FA код</label>
       <input id="otp" name="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="6 цифр из приложения">
       <button class="btn" type="submit">Войти</button>
-      <div class="hint">Доступ не отображается на странице входа. Свяжитесь с администратором сервиса для получения данных.</div>
+      {% if expected_realm != 'merchant' %}<div class="hint">Доступ не отображается на странице входа. Свяжитесь с администратором сервиса для получения данных.</div>{% endif %}
     </form>
   </main>
 </body>

@@ -1,0 +1,8 @@
+<section class="panel merchant-summary">
+  <div class="merchant-summary-heading"><h2>{{ merchant.name }}</h2><span class="status-pill {{ 'status-wait' if merchant.sandbox_mode else 'status-ok' }}">{{ 'Sandbox' if merchant.sandbox_mode else 'Production' }}</span></div>
+  <dl class="merchant-summary-grid">
+    <div><dt>Email кабинета</dt><dd>{{ user.email }}</dd></div>
+    <div><dt>Страна · валюта</dt><dd>{{ merchant.working_country or 'Требует назначения' }} · {{ merchant.working_currency or '—' }}</dd></div>
+    <div class="merchant-id"><dt>Merchant ID</dt><dd><code>{{ merchant.id }}</code><button type="button" class="secondary btn-small" data-copy-value="{{ merchant.id }}">Копировать ID</button></dd></div>
+  </dl>
+</section>

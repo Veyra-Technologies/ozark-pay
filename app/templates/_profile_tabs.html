@@ -1,0 +1,2 @@
+<nav class="profile-tabs" aria-label="Разделы профиля">{% for key, label in profile_tabs %}<a href="?tab={{ key }}" {% if profile_tab == key %}aria-current="page"{% endif %}>{{ label }}</a>{% endfor %}</nav>
+{% if ui_message %}<div class="note">{{ ui_message.message }}</div>{% endif %}

@@ -13,7 +13,6 @@ Required:
 
 Options:
   --ozark-db NAME        Ozark PostgreSQL container name.
-  --casino-db NAME       Casino PostgreSQL container name.
   --help                 Show this help.
 
 The script never accepts or reads an age private identity.
@@ -32,7 +31,6 @@ require_command() {
 output_dir=""
 recipient_file=""
 ozark_db="${OZARK_DB_CONTAINER:-processing_platform_production_ready-db-1}"
-casino_db="${CASINO_DB_CONTAINER:-casino_platform_clean_integrated_fixed_with_start_file-postgres-1}"
 
 while (($#)); do
   case "$1" in
@@ -49,11 +47,6 @@ while (($#)); do
     --ozark-db)
       (($# >= 2)) || die "--ozark-db requires a value"
       ozark_db=$2
-      shift 2
-      ;;
-    --casino-db)
-      (($# >= 2)) || die "--casino-db requires a value"
-      casino_db=$2
       shift 2
       ;;
     --help|-h)
@@ -82,7 +75,6 @@ case "$output_root/" in
 esac
 
 docker inspect "$ozark_db" >/dev/null 2>&1 || die "Ozark DB container is unavailable"
-docker inspect "$casino_db" >/dev/null 2>&1 || die "Casino DB container is unavailable"
 
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 set_dir="$output_root/backup-set-$stamp"
@@ -97,14 +89,16 @@ cleanup() {
   done
   rmdir -- "$set_dir" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 backup_database() {
   local logical_name=$1
   local container=$2
   local plain encrypted encrypted_tmp plain_hash encrypted_hash
 
-  plain=$(mktemp "$output_root/.${logical_name}.XXXXXX.dump")
+  plain=$(mktemp "$output_root/.${logical_name}.dump.XXXXXX")
   encrypted="$set_dir/${logical_name}.dump.age"
   encrypted_tmp="$set_dir/.${logical_name}.dump.age.partial"
   temporary_files+=(
@@ -120,7 +114,7 @@ backup_database() {
     >"$plain"
   [[ -s "$plain" ]] || die "$logical_name dump is empty"
 
-  docker exec -i "$container" pg_restore --list - <"$plain" >/dev/null
+  docker exec -i "$container" pg_restore --list <"$plain" >/dev/null
   plain_hash=$(sha256sum "$plain" | awk '{print $1}')
 
   age --encrypt --recipients-file "$recipient_file" --output "$encrypted_tmp" "$plain"
@@ -136,19 +130,16 @@ backup_database() {
 }
 
 backup_database "ozark-pay" "$ozark_db"
-backup_database "casino" "$casino_db"
 
 (
   cd "$set_dir"
-  sha256sum --check ozark-pay.dump.age.sha256 >/dev/null
-  sha256sum --check casino.dump.age.sha256 >/dev/null
+  sha256sum -c ozark-pay.dump.age.sha256 >/dev/null
 )
 
 cat >"$set_dir/MANIFEST.txt" <<EOF
 format=age
 created_utc=$stamp
 ozark_container=$ozark_db
-casino_container=$casino_db
 plaintext_retained=no
 restore_verification=pending
 EOF

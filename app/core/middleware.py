@@ -1,9 +1,11 @@
+import asyncio
 import time
 import re
 import logging
 import os
 import uuid
 import secrets
+from tempfile import SpooledTemporaryFile
 from urllib.parse import parse_qs, urlsplit
 
 from starlette.datastructures import MutableHeaders
@@ -184,6 +186,12 @@ class SuspiciousInputMiddleware:
 
 
 class BodySizeLimitMiddleware:
+    """Bound the received body before any handler can perform side effects.
+
+    Small requests stay in memory; larger permitted uploads spool to a temporary
+    file. Replay preserves the exact signed bytes, independently of HTTP framing.
+    """
+
     def __init__(self, app, max_bytes: int):
         self.app = app
         self.max_bytes = max_bytes
@@ -192,19 +200,49 @@ class BodySizeLimitMiddleware:
         if scope.get('type') != 'http':
             await self.app(scope, receive, send)
             return
-        headers = dict(scope.get('headers') or [])
+        headers = {key.lower(): value for key, value in scope.get('headers', [])}
         content_length = headers.get(b'content-length')
-        if content_length:
+        if content_length is not None:
             try:
-                if int(content_length.decode()) > self.max_bytes:
-                    response = JSONResponse({'detail': 'request body too large'}, status_code=413)
-                    await response(scope, receive, send)
-                    return
+                declared = int(content_length)
+                if declared < 0:
+                    raise ValueError()
             except ValueError:
-                response = JSONResponse({'detail': 'bad content-length'}, status_code=400)
-                await response(scope, receive, send)
+                await JSONResponse({'detail': 'bad content-length'}, status_code=400)(scope, receive, send)
                 return
-        await self.app(scope, receive, send)
+            if declared > self.max_bytes:
+                await JSONResponse({'detail': 'request body too large'}, status_code=413)(scope, receive, send)
+                return
+        with SpooledTemporaryFile(max_size=min(self.max_bytes, 1024 * 1024)) as body:
+            size = 0
+            while True:
+                message = await receive()
+                if message['type'] == 'http.disconnect':
+                    return
+                if message['type'] != 'http.request':
+                    continue
+                chunk = message.get('body', b'')
+                size += len(chunk)
+                if size > self.max_bytes:
+                    await JSONResponse({'detail': 'request body too large'}, status_code=413)(scope, receive, send)
+                    return
+                body.write(chunk)
+                if not message.get('more_body', False):
+                    break
+            body.seek(0)
+            remaining = size
+            replay_finished = False
+
+            async def replay_receive():
+                nonlocal remaining, replay_finished
+                if replay_finished:
+                    return await receive()
+                chunk = body.read(min(remaining, 64 * 1024))
+                remaining -= len(chunk)
+                replay_finished = remaining == 0
+                return {'type': 'http.request', 'body': chunk, 'more_body': not replay_finished}
+
+            await self.app(scope, replay_receive, send)
 
 
 class CSRFOriginMiddleware:
@@ -369,7 +407,15 @@ class SimpleRedisRateLimitMiddleware:
         self.app = app
         self.limit = limit
         self.window = window
-        self.redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+        self.redis = None
+        self.redis_loop = None
+
+    def _redis_for_current_loop(self):
+        loop = asyncio.get_running_loop()
+        if self.redis is None or self.redis_loop is not loop:
+            self.redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
+            self.redis_loop = loop
+        return self.redis
 
     async def __call__(self, scope, receive, send):
         if scope.get('type') != 'http':
@@ -378,9 +424,10 @@ class SimpleRedisRateLimitMiddleware:
         ip = client_ip_from_scope(scope)
         key = f'rl:{ip}:{int(time.time()) // self.window}'
         try:
-            count = await self.redis.incr(key)
+            redis = self._redis_for_current_loop()
+            count = await redis.incr(key)
             if count == 1:
-                await self.redis.expire(key, self.window + 5)
+                await redis.expire(key, self.window + 5)
             if count > self.limit:
                 metrics_registry.increment('processing_platform_rate_limited_requests_total', {'path': normalize_path(scope.get('path', '/'))})
                 security_logger.warning(

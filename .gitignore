@@ -28,7 +28,12 @@ run/
 *.sqlite3
 *.bak
 *.backup
+*.dump
+*.sql
+*.zip
 backups/
+private/
+private-discovery/
 
 # IDE and OS
 .vscode/
@@ -40,6 +45,10 @@ Thumbs.db
 dist/
 build/
 *.egg-info/
+.coverage
+htmlcov/
+test-results/
+playwright-report/
 
 # Deployment artifacts
 SHA256SUMS
@@ -49,3 +58,75 @@ GIT_METADATA.txt
 nginx/certs/
 *.pem
 *.key
+
+# Local credentials and authentication artifacts
+ACCESS.txt
+**/ACCESS.txt
+admin-2fa.png
+**/admin-2fa.png
+*cookies*.txt
+tmp_login.txt
+secrets.json
+secrets/
+*.p12
+*.pfx
+id_rsa
+id_dsa
+id_ed25519
+
+# Local project data and evidence (keep application assets and test fixtures)
+uploads/
+media/
+cache/
+runtime/
+.runtime/
+audit-output/
+implementation-output/
+wave-output/
+full-remediation-output/
+country-cabinets-output/
+merchant-ui-output/
+settlement-output/
+ge-requisites-output/
+github-migration-output/
+docker-cleanup-*/
+baseline/
+screenshots/
+qa-output/
+*.vhdx
+*.vhd
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.db-wal
+*.db-shm
+*.sqlite-wal
+*.sqlite-shm
+*.tmp
+*.temp
+*.swp
+coverage.xml
+junit*.xml
+pytest-cache-files-*/
+
+# Owner-requested deployment publication: retain QA locally only
+tests/
+rehearsal/
+docker-compose.test.yml
+.gitleaks.toml
+.github/workflows/release-gates.yml
+scripts/seed.py
+scripts/seed_ui_review.py
+scripts/run_tests_workflow.ps1
+scripts/run_tests_workflow.sh
+scripts/platform1_golden.py
+scripts/platform1_freeze_guard.py
+scripts/recovery_*.py
+scripts/recovery_windows.ps1
+RECOVERY_REPORT.md
+PLATFORM1_BASELINE_REPORT.md
+docs/manual-qa-v2.0.md
+docs/SMOKE_TEST.md
+docs/ci-run-*.md

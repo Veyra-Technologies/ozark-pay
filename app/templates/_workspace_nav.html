@@ -1,0 +1,23 @@
+<aside class="nav" id="workspace-nav" aria-label="Навигация кабинета">
+  <button class="menu-dismiss" type="button" aria-label="Закрыть меню">×</button>
+  <a class="nav-brand" href="{{ cabinet_base }}"><span class="brand-symbol" aria-hidden="true">O</span><span><b>OzarkPay</b><small>Payment workspace</small></span></a>
+  {% set groups = [
+    ('Рабочий стол', ['Обзор','Мои реквизиты','Пополнение','Пополнения','Все пополнения','Выплаты','Все выплаты','Апелляции','Смс хаб','SMS подтверждения','История обращений']),
+    ('Контроль', ['Безопасность','Антискам / Risk Control','Audit log','Интеграция с AI-офисом']),
+    ('Финансы', ['Кошелек','Кошелёк','Баланс','Статистика','Settle — Россия','Settle — Казахстан','Rolling','Доход площадки','Начисления','Начисления мерчантов','Вывод средств','История выплат','Журнал баланса']),
+    ('Команда и партнёры', ['Мои трейдеры','Мои мерчанты','Трейдеры','Мерчанты','TeamLead','Площадки/агрегаторы','Aggregators','Пользователи','Создать кабинет']),
+    ('Развитие и интеграции', ['API ключи','Webhook','Интеграция казино','Трансгран']),
+    ('Операционные настройки', ['Реквизиты'])
+  ] %}
+  <div class="nav-scroll">{% for group, labels in groups %}
+    {% set visible = [] %}{% for label in labels %}{% if label in sections %}{% set _ = visible.append(label) %}{% endif %}{% endfor %}
+    {% if visible %}<details class="nav-section" {% if group in ['Рабочий стол','Контроль'] %}open{% endif %}><summary>{{ group }}</summary>{% endif %}
+    {% for s in visible %}
+      {% set section_id = 'settle-ru' if s == 'Settle — Россия' else ('settle-kz' if s == 'Settle — Казахстан' else ('crossborder' if s == 'Трансгран' else ('wallet' if s == 'Кошелёк' else 'sec' ~ (sections.index(s) + 1)))) %}
+      <{% if profile_kind %}a href="{{ cabinet_base }}#{{ section_id }}"{% else %}button type="button"{% endif %} aria-controls="{{ section_id }}" class="{% if sections.index(s) == 0 %}active{% endif %}" data-target="{{ section_id }}">{{ 'Анти-Скам' if 'Risk' in s else ('Аудит логов' if s == 'Audit log' else ('Площадки' if s == 'Площадки/агрегаторы' else ('Агрегаторы' if s == 'Aggregators' else s))) }}</{% if profile_kind %}a{% else %}button{% endif %}>
+    {% endfor %}
+    {% if visible %}</details>{% endif %}
+  {% endfor %}
+  </div><div class="nav-account"><b>{{ 'Trader' if role in ['operator','trader'] else role|capitalize }}</b>{{ user.email }}<p>2FA · {{ 'Подключена' if user.twofa_enabled else 'Не подключена' }}</p><span class="live-status">OzarkPay · рабочий кабинет</span></div>
+</aside>
+<div class="nav-shade" aria-hidden="true"></div>

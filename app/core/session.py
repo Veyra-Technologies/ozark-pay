@@ -6,7 +6,7 @@ import json
 from base64 import b64decode, b64encode
 from collections.abc import MutableMapping
 
-from itsdangerous import BadSignature, TimestampSigner
+from itsdangerous import BadData, BadSignature, TimestampSigner, URLSafeTimedSerializer
 from starlette.datastructures import MutableHeaders
 from starlette.requests import HTTPConnection, Request
 
@@ -15,6 +15,9 @@ from app.core.config import settings
 
 SESSION_GENERATION_KEY = "session_generation"
 SESSION_REALM_KEY = "auth_realm"
+PREVIEW_ROLE_SESSION_KEY = "preview_role"
+PREVIEW_SUBJECT_SESSION_KEY = "preview_subject_id"
+_PREVIEW_CONTEXT_SALT = "ozark-server-preview-v1"
 
 AUTH_REALMS = ("staff", "merchant", "trader", "aggregator")
 REALM_COOKIE_NAMES = {
@@ -34,6 +37,7 @@ ROLE_REALMS = {
     "superadmin": "staff",
     "admin": "staff",
     "support": "staff",
+    "teamlead": "staff",
     "merchant": "merchant",
     "operator": "trader",
     "trader": "trader",
@@ -110,6 +114,8 @@ def session_view_fingerprint(session: dict) -> str:
             role,
             str(session.get(SESSION_GENERATION_KEY) or "legacy"),
             str(session.get("auth") or ""),
+            str(session.get(PREVIEW_ROLE_SESSION_KEY) or ""),
+            str(session.get(PREVIEW_SUBJECT_SESSION_KEY) or ""),
         )
     )
     return hmac.new(
@@ -122,6 +128,58 @@ def session_view_fingerprint(session: dict) -> str:
 def session_view_matches(session: dict, candidate: str | None) -> bool:
     expected = session_view_fingerprint(session)
     return bool(expected and candidate and hmac.compare_digest(expected, candidate))
+
+
+def issue_preview_context_token(
+    session: dict,
+    *,
+    preview_role: str,
+    subject_id: str,
+) -> str:
+    """Create a viewer- and session-bound token for an existing GET role preview."""
+    payload = {
+        "viewer_id": str(session.get("user_id") or ""),
+        "viewer_role": str(session.get("role") or ""),
+        "session_generation": str(session.get(SESSION_GENERATION_KEY) or ""),
+        "preview_role": str(preview_role),
+        "subject_id": str(subject_id),
+    }
+    if not all(payload.values()):
+        return ""
+    serializer = URLSafeTimedSerializer(settings.SECRET_KEY, salt=_PREVIEW_CONTEXT_SALT)
+    return serializer.dumps(payload)
+
+
+def verify_preview_context_token(
+    session: dict,
+    token: str | None,
+    *,
+    preview_role: str,
+    max_age: int,
+) -> str | None:
+    """Return the signed subject only when it belongs to this viewer session."""
+    if not token:
+        return None
+    serializer = URLSafeTimedSerializer(settings.SECRET_KEY, salt=_PREVIEW_CONTEXT_SALT)
+    try:
+        payload = serializer.loads(token, max_age=max_age)
+    except (BadData, TypeError, ValueError):
+        return None
+    expected = {
+        "viewer_id": str(session.get("user_id") or ""),
+        "viewer_role": str(session.get("role") or ""),
+        "session_generation": str(session.get(SESSION_GENERATION_KEY) or ""),
+        "preview_role": str(preview_role),
+    }
+    if not isinstance(payload, dict):
+        return None
+    if any(
+        not hmac.compare_digest(str(payload.get(key) or ""), value)
+        for key, value in expected.items()
+    ):
+        return None
+    subject_id = str(payload.get("subject_id") or "")
+    return subject_id or None
 
 
 def _route_realm(path: str) -> tuple[str | None, str, str | None]:

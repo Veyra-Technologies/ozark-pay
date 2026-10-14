@@ -8,7 +8,7 @@ usage() {
 Usage: verify_encrypted_backup_restore.sh --backup-set DIR --identity-file FILE
 
 The identity file is read by age and must be stored outside the repository.
-Two temporary PostgreSQL containers are created on an internal Docker network.
+A temporary PostgreSQL container is created on an internal Docker network.
 No ports are published and no application container is connected.
 EOF
 }
@@ -56,9 +56,9 @@ for command_name in docker age sha256sum mktemp awk seq; do
 done
 
 backup_set=$(cd "$backup_set" && pwd -P)
-run_id="stage2-restore-$$"
+run_id="ozark-restore-$(date -u +%Y%m%d%H%M%S)-$$"
 network_name="${run_id}-net"
-containers=("${run_id}-ozark" "${run_id}-casino")
+containers=("${run_id}-ozark")
 plain_files=()
 
 cleanup() {
@@ -67,11 +67,13 @@ cleanup() {
     [[ -n "$path" ]] && rm -f -- "$path"
   done
   for container in "${containers[@]}"; do
-    docker rm -f "$container" >/dev/null 2>&1 || true
+    docker rm -fv "$container" >/dev/null 2>&1 || true
   done
   docker network rm "$network_name" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 docker network create --internal "$network_name" >/dev/null
 
@@ -87,9 +89,9 @@ verify_one() {
   [[ -s "$encrypted_checksum" ]] || die "$logical_name encrypted checksum is missing"
   [[ -s "$plain_checksum" ]] || die "$logical_name plaintext checksum is missing"
 
-  (cd "$backup_set" && sha256sum --check "${logical_name}.dump.age.sha256" >/dev/null)
+  (cd "$backup_set" && sha256sum -c "${logical_name}.dump.age.sha256" >/dev/null)
 
-  plain=$(mktemp "/tmp/${logical_name}.restore.XXXXXX.dump")
+  plain=$(mktemp "/tmp/${logical_name}.restore.dump.XXXXXX")
   plain_files+=("$plain")
   age --decrypt --identity "$identity_file" --output "$plain" "$encrypted"
   [[ -s "$plain" ]] || die "$logical_name decrypted dump is empty"
@@ -112,7 +114,7 @@ verify_one() {
   docker exec "$container" pg_isready -U postgres -d restore_test >/dev/null 2>&1 \
     || die "$logical_name isolated PostgreSQL did not become ready"
 
-  docker exec -i "$container" pg_restore --list - <"$plain" >/dev/null
+  docker exec -i "$container" pg_restore --list <"$plain" >/dev/null
   docker exec -i "$container" pg_restore --exit-on-error --no-owner --no-acl \
     --username=postgres --dbname=restore_test <"$plain" >/dev/null
   table_count=$(docker exec "$container" psql -U postgres -d restore_test -tAc \
@@ -120,10 +122,9 @@ verify_one() {
   [[ "$table_count" =~ ^[1-9][0-9]*$ ]] || die "$logical_name restore contains no application tables"
 
   rm -f -- "$plain"
-  docker rm -f "$container" >/dev/null
+  docker rm -fv "$container" >/dev/null
 }
 
 verify_one "ozark-pay" "${containers[0]}"
-verify_one "casino" "${containers[1]}"
 
-printf 'Isolated restore verification passed for Ozark Pay and Casino.\n'
+printf 'Isolated restore verification passed for Ozark Pay.\n'

@@ -1,0 +1,14 @@
+<details class="panel" open><summary>Назначенные парсеры кабинетов</summary>
+  <div class="table-wrap"><table><tr><th>Кабинет / страна</th><th>Парсер</th><th>Назначение / котировка</th><th>Статус / версия</th><th>Автор / время</th></tr>
+  {% for a in crossborder.assignments %}<tr><td>{{ 'Мерчант' if a.merchant_id else 'Трейдер' }} · {{ a.country }}<br>{{ a.merchant_id or a.trader_id }}</td><td>{{ a.parser_id }}</td><td>{{ 'Финансовый' if a.purpose == 'financial' else 'Информационный' }}<br>{{ a.rate or 'Недоступен' }} {{ a.rate_unit or '' }}<br><small>{{ a.rate_status }} · {{ a.fetched_at or '—' }}</small></td><td>{{ 'Включён' if a.is_active else 'Отключён' }} · назначение v{{ a.version }} · конфигурация v{{ a.configuration_version }}</td><td>{{ a.created_by or 'Миграция' }}<br>{{ a.created_at }}</td></tr>
+  {% else %}<tr><td colspan="5">Назначений пока нет.</td></tr>{% endfor %}</table></div>
+  {% if role in ['admin','superadmin'] %}
+  <form data-live-action="assignment"><label>Кабинет</label><select name="owner" data-assignment-owner required><option value="">Выберите кабинет</option>
+    {% for m in crossborder.merchants if m.working_country %}<option value="merchant:{{ m.id }}" data-country="{{ m.working_country }}">Мерчант · {{ m.name }} · {{ m.working_country }}</option>{% endfor %}
+    {% for t in crossborder.traders %}<option value="trader:{{ t.id }}" data-country="GE">Трейдер · {{ t.email }} · GE</option>{% endfor %}</select>
+    <label>Парсер</label><select name="parser_id" required></select><input type="hidden" name="purpose">
+    <label>Статус назначения</label><select name="is_active"><option value="true">Включён</option><option value="false">Отключён</option></select>
+    <button type="submit" class="primary">Сохранить назначение</button><div data-live-result role="status"></div>
+  </form><form data-live-action="assignment-history"><button type="submit" class="secondary">История назначений</button><div data-live-result role="status"></div></form>
+  {% endif %}
+</details>

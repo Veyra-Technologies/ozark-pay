@@ -1,0 +1,44 @@
+<div class="work-intro"><div><span class="eyebrow">Новые направления</span><h2>Казахстан → Армения и Грузия</h2><p>Клиент платит KZT. Расчёт с мерчантом и обеспечение трейдера — USDT. На банковский реквизит поступают AMD или GEL.</p></div><span class="status-pill status-wait">Банковский маршрут в подготовке</span></div>
+{% if request.query_params.get('crossborder_saved') %}<div class="note ok" role="status">Черновик сохранён. Направления по-прежнему недоступны для платежей.</div>{% endif %}
+{% if request.query_params.get('crossborder_parser_saved') %}<div class="note ok" role="status">Парсер курса мерчанта сохранён для направления Казахстан → Грузия.</div>{% endif %}
+<div class="panel" data-xe-status-url="{{ cabinet_base }}/crossborder/rates"><h3>XE · среднерыночные котировки</h3><p data-xe-status role="status">{{ crossborder.rates.reason }}</p><p class="compact-note">Котировки выражены в местной валюте за <span data-raw-value>1 USDT</span>. USD не приравнивается к USDT.</p><div class="quote-details" data-xe-quotes></div>{% if crossborder.rates.missing %}<p>Нужны серверные настройки: {{ crossborder.rates.missing|join(', ') }}{% if 'XE_MONTHLY_RATE_LIMIT' not in crossborder.rates.missing %}, XE_MONTHLY_RATE_LIMIT по вашему тарифу{% endif %}.</p>{% endif %}</div>
+<div class="panel parser-rate-panel" data-binance-status-url="{{ cabinet_base }}/crossborder/binance-rate">
+  <div class="section-title"><div><span class="eyebrow">Курс стороны мерчанта · KZ-GE</span><h3>Binance P2P · Kaspi Bank</h3></div><span class="status-pill {{ 'status-ok' if crossborder.binance_rates.available else 'status-wait' }}" data-binance-state>{{ 'Актуален' if crossborder.binance_rates.available else ('Устарел' if crossborder.binance_rates.status == 'stale' else 'Недоступен') }}</span></div>
+  <p data-binance-status role="status">{{ crossborder.binance_rates.reason }}</p>
+  <div class="quote-details" data-binance-quote></div>
+  <p class="compact-note">Покупка USDT за KZT со стороны пользователя. Фильтр 100 000 ₸ применяется только к выборке объявлений и не ограничивает сумму операции.</p>
+</div>
+<div class="panel parser-setting-panel">
+  <div class="section-title"><div><span class="eyebrow">Настройка мерчанта</span><h3>Источник курса по направлению</h3></div></div>
+  <form method="post" action="{{ cabinet_base }}/crossborder/rate-settings" data-merchant-parser-setting>
+    {{ csrf_input(request) }}
+    <input type="hidden" name="direction" data-parser-direction value="">
+    <div class="parser-setting-grid">
+      <label>Мерчант<select name="merchant_id" required><option value="">Выберите мерчанта</option>{% for merchant in crossborder.merchants %}<option value="{{ merchant.id }}">{{ merchant.name }}</option>{% endfor %}</select></label>
+      <label>Страна получателя<select name="destination_country" data-parser-country required><option value="">Выберите страну</option><option value="AM">Армения</option><option value="GE">Грузия</option></select></label>
+      <label data-parser-field hidden>Парсер курса<select name="parser_id" data-parser-select disabled required><option value="">Сначала выберите страну</option></select></label>
+    </div>
+    <p class="compact-note" data-parser-help>После выбора страны появятся совместимые с ролью, валютой и направлением источники.</p>
+    <div class="actions"><button class="primary" type="submit" data-parser-submit disabled>Сохранить парсер</button></div>
+  </form>
+  {% if crossborder.rate_settings %}<div class="assigned-parser-list"><h3>Действующие назначения</h3>{% for setting in crossborder.rate_settings %}<div class="assigned-parser-row"><b>{{ setting.merchant_name }}</b><span>{{ setting.direction|upper }}</span><span>{{ setting.parser_label }}</span></div>{% endfor %}</div>{% endif %}
+</div>
+<div class="direction-grid">
+{% for direction in crossborder.directions %}
+<article class="direction-card"><span class="eyebrow">{{ direction.id|upper }} · направление</span><h2>Казахстан → {{ direction.trader_country_label }}</h2>
+<div class="currency-route"><div><b>KZT</b><small>Оплачивает клиент</small></div><span class="route-arrow" aria-hidden="true">→</span><div><b>USDT</b><small>Расчёты и обеспечение</small></div><span class="route-arrow" aria-hidden="true">→</span><div><b>{{ direction.receive_currency }}</b><small>Банковский приём</small></div></div>
+<ul class="readiness"><li><span>Котировка получателя · XE</span><span data-xe-readiness>{{ 'Готова' if crossborder.rates.available else 'Не готова' }}</span></li>{% if direction.id == 'kz-ge' %}<li><span>Котировка мерчанта · Binance</span><span data-binance-readiness>{{ 'Готова' if crossborder.binance_rates.available else 'Не готова' }}</span></li>{% endif %}<li><span>Выдача реквизитов</span><span>Не подключена</span></li><li><span>Резервирование USDT</span><span>Не подключено</span></li><li><span>Подтверждение и webhook</span><span>Не подключены</span></li></ul>
+<form method="post" action="{{ cabinet_base }}/crossborder/quote" data-crossborder-preview>{{ csrf_input(request) }}<input type="hidden" name="direction" value="{{ direction.id }}">
+<label>Сумма оплаты, KZT</label><input name="amount_kzt" type="number" min="0.01" max="999999999999.99" step="0.01" required placeholder="Сумма заказа клиента">
+<label>Мерчант</label><select name="merchant_id" required><option value="">Выберите мерчанта</option>{% for merchant in crossborder.merchants %}<option value="{{ merchant.id }}">{{ merchant.name }}</option>{% endfor %}</select>{% if direction.id == 'kz-ge' %}<p class="compact-note">Используется сохранённый для этого мерчанта парсер Binance P2P. Источник GEL остаётся XE.</p>{% endif %}
+<label>Трейдер · {{ direction.receive_currency }}</label><select name="trader_id" required><option value="">Выберите трейдера</option>{% for trader in crossborder.traders if trader.working_country == direction.trader_country %}<option value="{{ trader.id }}">{{ trader.email }}</option>{% endfor %}</select>
+<p class="compact-note">Применяются назначенные тарифы направления в USDT. Тарифы RUB не переносятся. Предпросмотр фиксирует расчёт, не создавая платёж или резерв.</p>
+<div class="actions"><button class="primary" type="submit">Рассчитать предпросмотр</button></div>
+<div class="quote-result" data-crossborder-result role="status" hidden></div>
+</form>
+<details class="technical-disclosure"><summary>Настройки подготовки</summary><form method="post" action="{{ cabinet_base }}/crossborder/draft">{{ csrf_input(request) }}<input type="hidden" name="direction" value="{{ direction.id }}">
+<label>Планируемый банковский провайдер</label><input name="provider" maxlength="300" value="{{ direction.draft.get('provider','') }}" placeholder="Пока не выбран">
+<label>Заметки по подготовке</label><textarea name="notes" maxlength="300">{{ direction.draft.get('notes','') }}</textarea><input type="hidden" name="rate_source" value="{{ 'Binance P2P KZT/USDT + XE GEL/USDT' if direction.id == 'kz-ge' else 'XE mid-market' }}"><p class="compact-note">Без ключей, паролей и данных клиентов.</p><button class="secondary" type="submit">Сохранить черновик</button></form></details>
+<p class="note">Приём платежей недоступен. Подключение XE само по себе не включает банковский маршрут.</p></article>
+{% endfor %}</div>
+<div class="note">Исторические RUB-балансы сохранены отдельно. Для запуска нужны банковские реквизиты, резервирование и списание обеспечения USDT, подтверждение поступления, возвраты и webhook с отдельными суммами заказа KZT и расчёта USDT.</div>

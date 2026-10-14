@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from app.services.trader_work import trader_account_id
+
 from typing import Any
 
 from sqlalchemy import select
@@ -75,7 +77,9 @@ async def _merchant_can_view_payout(db: AsyncSession, user: User | Any, payout: 
 
 
 async def _trader_can_view_deposit(db: AsyncSession, user: User | Any, appeal: Appeal | Any, deposit: Deposit | Any) -> bool:
-    user_id = str(getattr(user, "id", ""))
+    user_id = str(trader_account_id(user) or "")
+    if not user_id:
+        return False
     metadata = _appeal_metadata(appeal)
     if str(metadata.get("trader_id") or "") == user_id:
         return True

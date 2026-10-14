@@ -1,0 +1,355 @@
+/* Authenticated workspaces only. Login has its own original stylesheet. */
+body.ozark-app{--bg:#061724;--surface:#0b2232;--surface-raised:#102c3e;--line:#234355;--text:#eefcff;--muted:#a9cddd;--cyan:#55dff2;--cyan2:#86f1ff;--border:var(--line);--panel-soft:var(--surface);--panel-muted:#071b2a;--radius-lg:10px;--radius-md:8px;--radius-sm:6px;--gap-md:12px;--sidebar:232px;--anchor-offset:130px;margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+.ozark-app *{box-sizing:border-box}
+.ozark-app [hidden]{display:none!important}
+.ozark-app a{color:var(--cyan2);text-decoration:none}
+.ozark-app a:hover{text-decoration:underline}
+.ozark-app :is(main,section,article,aside,form,fieldset,.grid,.row,.panel,.metric,.card,.detail-grid,.detail-card,.actions,.section-head,.top-brand,.top-actions,.top-rate){min-width:0;max-width:100%}
+.ozark-app :is(button,input,select,textarea,a,summary):focus-visible{outline:2px solid var(--cyan);outline-offset:3px}
+.ozark-app button:disabled{opacity:.45;cursor:not-allowed}
+.ozark-app .skip-link{position:fixed;top:-80px;left:250px;z-index:2000;background:var(--cyan);color:#061724;padding:10px 18px}
+.ozark-app .skip-link:focus{top:12px}
+/* Shell: bounded content, scrollable navigation, natural header height. */
+.ozark-app .top{position:sticky;top:0;z-index:30;margin-left:var(--sidebar);min-height:60px;padding:9px 32px;background:#081d2c;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:14px}
+.ozark-app .top h2{font-size:15px;font-weight:650;margin:0}
+.ozark-app .top-brand{flex:1 1 auto}
+.ozark-app .top-brand>div{font-size:12px;color:var(--muted)}
+.ozark-app .top-rate{flex:0 1 auto;width:max-content;font-size:12px;display:flex;align-items:center;flex-wrap:wrap;gap:4px 10px}
+.ozark-app .top-rate .quote-details{margin:0;gap:4px 10px}
+.ozark-app .quote-details--compact{white-space:nowrap}
+.ozark-app .top-actions{display:flex;align-items:center;gap:12px;font-size:12px}
+.ozark-app .logout-form{margin:0}
+.ozark-app .wrap{max-width:1504px;margin:0 auto 0 var(--sidebar);padding:28px 32px}
+.ozark-app main.card{padding:0;background:none;border:0}
+.ozark-app .nav{position:fixed;inset:0 auto 0 0;width:var(--sidebar);z-index:50;border-right:1px solid var(--line);padding:0 14px 12px;background:#091e2d;display:flex;flex-direction:column;gap:4px}
+.ozark-app .nav-brand{display:flex;flex:none;gap:10px;align-items:center;min-height:88px;padding:12px 8px;margin-bottom:8px;color:var(--text);text-decoration:none}
+.ozark-app .brand-symbol{width:34px;height:34px;border:2px solid var(--cyan);border-radius:10px;display:grid;place-items:center;color:var(--cyan);font-size:21px;font-weight:750;flex:none}
+.ozark-app .nav-brand b{display:block;font-size:19px;letter-spacing:-.5px}
+.ozark-app .nav-brand small{display:block;font-size:10px;letter-spacing:.13em;color:var(--muted);text-transform:uppercase}
+.ozark-app .nav-scroll{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#426276 transparent;padding-right:3px}
+.ozark-app .nav-section{margin-bottom:6px}
+.ozark-app .nav-section summary{font-size:11px;text-transform:uppercase;letter-spacing:.055em;color:#97b2c2;padding:10px 8px}
+.ozark-app .nav button[data-target],.ozark-app .nav-section>a{display:flex;align-items:center;gap:10px;width:100%;min-height:37px;padding:8px 12px;margin:2px 0;background:transparent;border:1px solid transparent;border-radius:6px;text-align:left;font-family:inherit;font-size:13px;font-weight:550;line-height:1.35;color:#bdd5e0;cursor:pointer}
+.ozark-app .nav button[data-target]::before{content:"";width:6px;height:6px;flex:none;border:1px solid #52798e;border-radius:2px}
+.ozark-app .nav button[data-target]:hover,.ozark-app .nav-section>a:hover{background:#122d3e;color:#fff}
+.ozark-app .nav button[data-target].active{background:#153e4f;color:#a8f4ff;border-color:#205165;box-shadow:inset 2px 0 var(--cyan)}
+.ozark-app .nav button.active::before{background:var(--cyan);border-color:var(--cyan)}
+.ozark-app .nav-account{flex:none;margin-top:8px;padding:12px 9px 4px;border-top:1px solid var(--line);font-size:11px;color:var(--muted);overflow-wrap:anywhere}
+.ozark-app .nav-account b{display:block;color:var(--text);font-size:12px}
+.ozark-app .nav-account p{margin:5px 0}
+.ozark-app :is(.menu-toggle,.menu-dismiss,.nav-shade){display:none}
+.ozark-app .release-footer{margin-left:var(--sidebar);padding:16px 32px;color:#88aabc;font-size:11px;border-top:1px solid var(--line)}
+/* Sections and metrics: shrinkable tracks, no global word splitting. */
+.ozark-app .section{display:none;scroll-margin-top:var(--anchor-offset)}
+.ozark-app .section.active{display:block}
+.ozark-app :is(.section-head,.section-title,.modal-title-row){display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin:0 0 20px}
+.ozark-app .section-head h1{font-size:29px;line-height:1.2;font-weight:650;letter-spacing:-.8px;margin:3px 0}
+.ozark-app .eyebrow{display:block;font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:.16em;color:#82afc3;margin-bottom:7px}
+.ozark-app .section-subtitle{margin:7px 0 0;color:var(--muted);font-size:13px}
+.ozark-app h2{font-size:20px;line-height:1.3;letter-spacing:-.3px}
+.ozark-app h3{font-size:15px;line-height:1.4;margin:22px 0 12px;scroll-margin-top:var(--anchor-offset)}
+.ozark-app :is(.grid,.summary-strip,.rolling-metrics){display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:14px;margin-bottom:20px}
+.ozark-app .grid:has(>.metric:nth-child(4):last-child),.ozark-app .summary-strip{grid-template-columns:repeat(4,minmax(0,1fr))}
+.ozark-app :is(.row,.modal-form-grid,.direction-grid){display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;align-items:start}
+.ozark-app :is(.panel,.metric,.detail-card,.attempt-card,.summary-item,.rolling-metric){background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px}
+.ozark-app .panel{margin:16px 0}
+.ozark-app .metric{min-height:108px;display:flex;flex-direction:column;justify-content:space-between}
+.ozark-app :is(.metric>b,.metric>h3,.summary-item>b,.rolling-metric>b){display:block;color:var(--muted);font-weight:500;font-size:12px;margin:0 0 12px}
+.ozark-app :is(.metric p,.metric>strong){font-size:25px;font-weight:600;letter-spacing:-.5px;margin:0;font-variant-numeric:tabular-nums}
+.ozark-app .metric small{font-size:11px;color:var(--muted);margin-top:8px}
+.ozark-app .connection-panel{padding:0}
+.ozark-app .connection-panel-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;padding:17px 20px;border-bottom:1px solid var(--line)}
+.ozark-app .connection-panel-head h2{margin:2px 0 0;font-size:18px}
+.ozark-app .connection-list{margin:0}
+.ozark-app .connection-row{display:grid;grid-template-columns:minmax(120px,160px) minmax(0,1fr) auto;align-items:center;gap:12px 18px;padding:13px 20px}
+.ozark-app .connection-row+.connection-row{border-top:1px solid var(--line)}
+.ozark-app .connection-label{color:var(--muted);font-size:12px;font-weight:550;line-height:1.45}
+.ozark-app .connection-row :is(.connection-value,.connection-status){margin:0;min-width:0;max-width:100%}
+.ozark-app .connection-value{color:var(--text);font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;overflow-wrap:anywhere;word-break:normal;white-space:normal;user-select:text}
+.ozark-app .connection-value:focus{outline:2px solid var(--cyan);outline-offset:3px}
+.ozark-app .connection-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0;flex-wrap:wrap}
+.ozark-app .connection-actions :is(a,button){white-space:nowrap}
+.ozark-app .connection-status{display:flex;align-items:center}
+.ozark-app .detail-card>small{display:block;margin-top:6px;color:var(--muted);line-height:1.45}
+.ozark-app .metric--accent{border-color:#327385;background:#102e3c}
+.ozark-app :is(.metric--accent>strong,.metric--accent>p){color:var(--cyan2)}
+.ozark-app .detail-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(220px,100%),1fr));gap:12px;margin:16px 0}
+.ozark-app .detail-card{padding:13px 15px;font-variant-numeric:tabular-nums}
+.ozark-app .detail-card>b{display:block;color:var(--muted);font-size:11px;font-weight:550;margin-bottom:5px}
+.ozark-app .detail-card>.cell-mono{display:block}
+.ozark-app .detail-card>button{margin-top:8px}
+.ozark-app .work-intro{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:18px;padding:22px 24px;border:1px solid #285367;border-radius:10px;background:#0c2939;margin-bottom:20px}
+.ozark-app .work-intro>div{flex:1 1 280px;min-width:0}
+.ozark-app .work-intro h2{margin:0 0 8px}
+.ozark-app .work-intro p{max-width:660px;margin:0;color:var(--muted)}
+.ozark-app .quick-links{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0 4px}
+.ozark-app :is(.muted,.compact-note,.text-muted,.cell-muted){color:var(--muted)}
+.ozark-app :is(.compact-note,.small,.cell-muted,.cell-label){font-size:12px}
+.ozark-app .ozark-activity{margin-top:24px}
+/* One control contract for buttons, links and nested POST forms. */
+.ozark-app :where(.primary,.secondary,.dangerbtn,.button,.btn,button:not([data-target]):not(.menu-toggle):not(.menu-dismiss)){display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:36px;padding:8px 12px;border-radius:6px;font:600 12px/1.4 system-ui,sans-serif;white-space:normal;word-break:normal;overflow-wrap:normal;max-width:100%;cursor:pointer;vertical-align:middle;text-align:center;text-decoration:none}
+.ozark-app .primary{background:var(--cyan);color:#07212b;border:1px solid transparent}
+.ozark-app .primary:hover{background:var(--cyan2)}
+.ozark-app .secondary{background:#112e40;color:#d9eff7;border:1px solid #355468}
+.ozark-app .secondary:hover{background:#1a3e50}
+.ozark-app .dangerbtn{background:#4c2530;color:#ffc5c9;border:1px solid #87404e}
+.ozark-app :is(.actions,.actions-row,.modal-actions,.rolling-card-actions){display:flex;flex-wrap:wrap;gap:8px;align-items:stretch}
+.ozark-app :is(.actions,.actions-row,.modal-actions,.actions-stack,.rolling-card-actions)>form{display:flex;flex-wrap:wrap;align-items:stretch;gap:8px;margin:0;min-width:0}
+.ozark-app .actions-stack{display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:1fr;gap:8px}
+.ozark-app .actions-stack>form>button{width:100%}
+.ozark-app td :is(.actions,.actions-row):not(:has(input:not([type=hidden]),select,textarea)){display:grid;grid-template-columns:minmax(0,1fr);grid-auto-rows:1fr}
+.ozark-app td :is(.actions,.actions-row)>form>button{width:100%}
+.ozark-app .action-menu>summary{list-style:none;padding:8px 12px}
+.ozark-app .action-menu>summary::-webkit-details-marker{display:none}
+.ozark-app .action-menu .actions-stack{margin-top:8px}
+.ozark-app .text-link{display:inline-flex;min-height:24px;border:0;background:none;color:var(--cyan);font-size:12px;padding:2px 0}
+.ozark-app .icon-copy{flex:none;min-width:32px;padding:6px}
+.ozark-app :is(.copy-line,.requisite-main,.rolling-copy-wrap){display:flex;align-items:center;gap:8px;min-width:0}
+.ozark-app :is(.copy-line,.requisite-main)>.cell-ellipsis{flex:1;min-width:0}
+.ozark-app :is(.requisite-main>.status-pill,.requisite-main>.badge){flex:none}
+.ozark-app label{display:block;margin:12px 0 0;font-size:12px;color:#d2e6ef;font-weight:550;line-height:1.5}
+.ozark-app :is(input,select,textarea){min-width:0;max-width:100%;width:100%;min-height:40px;padding:9px 11px;background:#071b2a;border:1px solid #365366;border-radius:6px;color:var(--text);font-family:inherit;font-size:13px;line-height:1.5;margin-top:5px}
+.ozark-app input[type=hidden]{display:none}
+.ozark-app textarea{resize:vertical;min-height:90px}
+.ozark-app :is(input,select,textarea):focus{border-color:var(--cyan);box-shadow:0 0 0 2px #55dff218}
+.ozark-app :is(input,textarea)::placeholder{color:#81a3b4}
+.ozark-app :is(input[type=checkbox],input[type=radio]){width:17px;height:17px;min-height:0;margin:0;padding:0;accent-color:var(--cyan);vertical-align:middle;flex:none}
+.ozark-app label:has(>input[type=checkbox]),.ozark-app .risk-check{display:flex;align-items:center;gap:8px;min-height:40px}
+.ozark-app form:where(:not(.inline-form)):has(>input:not([type=hidden]),>select,>textarea)>:is(.primary,.secondary,.dangerbtn){margin-top:14px}
+.ozark-app :is(.actions,.actions-row,.modal-actions,.actions-stack,.rolling-card-actions) :is(button,.primary,.secondary,.dangerbtn){margin:0}
+.ozark-app .inline-form{display:flex;flex-wrap:wrap;align-items:end;gap:8px}
+.ozark-app .inline-form :is(input:not([type=hidden]),select){flex:1 1 170px;width:170px;margin:0}
+.ozark-app .inline-form>button{margin:0}
+.ozark-app :is(.filter-bar,.filter-grid){display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px,100%),1fr));gap:12px;align-items:end}
+.ozark-app .filter-bar{margin-bottom:14px;padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:8px}
+.ozark-app :is(.filter-bar,.filter-grid) label{margin:0}
+.ozark-app .filter-meta{display:flex;flex-wrap:wrap;justify-content:space-between;gap:12px;align-items:center;color:var(--muted);font-size:12px;margin:12px 0}
+.ozark-app .compact-filter{display:flex;flex-wrap:wrap;gap:8px;align-items:end;padding:12px}
+.ozark-app .compact-filter .search-field{flex:1 1 280px;min-width:0}
+.ozark-app .compact-filter .search-field label{margin:0}
+.ozark-app .filter-disclosure{width:100%;border-top:1px solid var(--line);padding-top:10px}
+.ozark-app .filter-actions{margin-top:12px}
+/* Native cells on desktop. Content helpers cannot change td/th display. */
+.ozark-app :is(.table-wrap,.table,.table-wrapper){width:100%;max-width:100%;min-width:0;overflow-x:auto;overscroll-behavior-x:contain;border:1px solid var(--line);border-radius:8px;background:var(--surface);margin:14px 0;contain:inline-size}
+.ozark-app table{width:100%;border-collapse:collapse;border-spacing:0;table-layout:auto;font-size:13px}
+.ozark-app .trader-table{width:100%;max-width:100%}
+.ozark-app .trader-requests-table{min-width:860px;table-layout:fixed}
+.ozark-app .trader-requests-table--active :is(th,td):nth-child(1){width:12%}
+.ozark-app .trader-requests-table--active :is(th,td):nth-child(2){width:15%}
+.ozark-app .trader-requests-table--active :is(th,td):nth-child(3){width:18%}
+.ozark-app .trader-requests-table--active :is(th,td):nth-child(4){width:20%}
+.ozark-app .trader-requests-table--active :is(th,td):nth-child(5){width:15%}
+.ozark-app .trader-requests-table--active :is(th,td):nth-child(6){width:20%}
+.ozark-app .trader-requests-table--history :is(th,td):nth-child(1){width:17%}
+.ozark-app .trader-requests-table--history :is(th,td):nth-child(2){width:15%}
+.ozark-app .trader-requests-table--history :is(th,td):nth-child(3){width:19%}
+.ozark-app .trader-requests-table--history :is(th,td):nth-child(4){width:14%}
+.ozark-app .trader-requests-table--history :is(th,td):nth-child(5){width:20%}
+.ozark-app .trader-requests-table--history :is(th,td):nth-child(6){width:15%}
+.ozark-app .trader-requests-table th{padding:8px 10px;line-height:1.35}
+.ozark-app .trader-requests-table td{padding:5px 10px;line-height:1.35}
+.ozark-app .trader-requests-table .cell-stack{gap:2px}
+.ozark-app .trader-requests-table .bank-method-cell>.cell-stack{flex-direction:row;align-items:center;flex-wrap:wrap;gap:6px}
+.ozark-app .trader-requests-table .bank-method-cell .cell-badge{flex:0 0 auto;width:max-content;min-height:22px;padding:2px 7px}
+.ozark-app .trader-requests-table .requisite-recipient-cell>.cell-stack{flex-direction:row;align-items:center;flex-wrap:wrap;gap:5px 8px}
+.ozark-app .trader-requests-table .action-column .actions-row{display:flex;align-items:center;gap:5px}
+.ozark-app .trader-requests-table .action-column .actions-row>form{flex:0 0 auto}
+.ozark-app .trader-requests-table .action-column .actions-row>form>button{width:auto}
+.ozark-app .trader-requests-table :is(.btn-small,.icon-copy){min-height:32px;padding:5px 8px}
+.ozark-app :is(th,td){padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:middle;text-align:left;line-height:1.5;word-break:normal;overflow-wrap:normal}
+.ozark-app th{color:#9fc1d1;background:#102c3e;font-size:12px;font-weight:650;white-space:normal}
+.ozark-app td{color:#e1f0f6}
+.ozark-app tbody tr:last-child td{border-bottom:0}
+.ozark-app tbody tr:hover{background:#133043}
+.ozark-app td.amount-cell,.ozark-app th.amount-cell{text-align:right;font-variant-numeric:tabular-nums}
+.ozark-app td.amount-cell{white-space:nowrap}
+.ozark-app :is(.text-amount,.text-date,.date-cell,.ip-address,.nowrap){font-variant-numeric:tabular-nums;white-space:nowrap}
+.ozark-app :is(.cell-mono,.mono,.text-mono,.mono-cell,code,.secret){font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace}
+.ozark-app :is(.cell-ellipsis,.truncate,.json-preview,.details-preview,.rolling-copy-value):not(td):not(th){display:block;max-width:220px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ozark-app .cell-stack:not(td):not(th){display:flex;flex-direction:column;min-width:0;gap:4px}
+.ozark-app :is(td>b,td>small){display:block}
+.ozark-app td>.compact-note{display:block}
+.ozark-app td>small{color:var(--muted);font-size:12px}
+.ozark-app .cell-main{font-weight:600}
+.ozark-app .cell-label{color:var(--muted)}
+.ozark-app .cell-wrap{max-width:320px;white-space:normal}
+.ozark-app td[colspan]{text-align:center;padding:26px 18px;color:var(--muted)}
+.ozark-app :is(.table-pager,.profile-pager){display:flex;flex-wrap:wrap;align-items:center;justify-content:flex-end;gap:10px;margin:16px 0}
+.ozark-app .table-pager :is(button,span){display:inline-flex;align-items:center;justify-content:center;min-width:36px;min-height:36px;padding:6px;border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--text)}
+.ozark-app .table-pager button.active{color:#07212b;background:var(--cyan)}
+.ozark-app .empty-state{padding:28px;text-align:center;background:var(--surface);border:1px dashed #36576a;border-radius:8px;color:var(--muted)}
+.ozark-app .empty-state b{display:block;color:var(--text);margin-bottom:6px}
+/* Arbitrary token wrapping is limited to full technical values and messages. */
+.ozark-app :is(.badge,.status-pill,.risk-badge,.pill-muted,.rolling-source-pill,.cell-badge){display:inline-flex;align-items:center;gap:5px;padding:3px 8px;min-height:25px;border-radius:5px;background:#16364b;border:1px solid #315268;color:#cbe8f4;font-size:12px;line-height:1.4;font-weight:600;white-space:normal;max-width:100%}
+.ozark-app :is(.status-ok,.risk-normal){background:#103c31;border-color:#27644b;color:#98e7bd}
+.ozark-app :is(.status-wait,.risk-warning,.risk-medium){background:#3b321e;border-color:#665432;color:#f0d398}
+.ozark-app :is(.status-bad,.risk-critical){background:#45242e;border-color:#78414d;color:#ffb8bf}
+.ozark-app .status-neutral{background:#1a3040;border-color:#3b5364;color:#b7cdda}
+.ozark-app .risk-high{background:#4d3024;color:#ffc49d;border-color:#7e5039}
+.ozark-app :is(.note,.ui-message,.modal-note){padding:13px 16px;border:1px solid #36586c;border-left:3px solid #559cb7;border-radius:6px;background:#102e40;color:#d3eaf5;font-size:13px;line-height:1.6;margin:14px 0}
+.ozark-app :is(.ui-message-blocking,.ui-message-security,.note.bad){border-color:#854554;background:#38232e;color:#ffc7ce}
+.ozark-app :is(.ui-message-validation,.note.wait){border-color:#786331;background:#332e20;color:#ffdfa7}
+.ozark-app .note.ok{border-color:#30654f;background:#112f2b;color:#afe7c8}
+.ozark-app .ok{color:#98e7bd}
+.ozark-app :is(.bad,.danger){color:#ffb8bf}
+.ozark-app :is(.wait,.warn){color:#f0d398}
+.ozark-app .rate-stale{display:none;color:#ffd88d;font-size:12px}
+.ozark-app .rate-stale.active{display:inline-flex}
+.ozark-app :is(.secret,.breakable,.platform-wallet-address,.rolling-secondary-id,.technical-message,.modal .mono,.modal .cell-mono,.profile-data .mono,.profile-data .cell-mono,.profile-content details .mono){overflow-wrap:anywhere}
+.ozark-app .modal{display:none;position:fixed;inset:0;z-index:1000;background:#020d18c9;padding:24px;align-items:center;justify-content:center;overflow:auto;overscroll-behavior:contain}
+.ozark-app .modal.active{display:flex}
+.ozark-app .modalbox,.ozark-app .value-dialog{width:min(640px,100%);max-width:100%;max-height:calc(100dvh - 48px);overflow:auto;min-width:0;background:#0c2536;color:var(--text);border:1px solid #35576b;border-radius:12px;padding:24px;box-shadow:0 24px 100px #0008}
+.ozark-app .modalbox-wide{width:min(1000px,100%)}
+.ozark-app .value-dialog{width:min(680px,calc(100% - 32px))}
+.ozark-app .value-dialog::backdrop{background:#020d18b3}
+.ozark-app .modalbox h2{margin-top:0}
+.ozark-app .modal-actions{margin-top:20px;padding-top:16px;border-top:1px solid var(--line);justify-content:flex-end}
+.ozark-app :is(pre,.technical-json,.technical-details-pre){display:block;min-width:0;max-width:100%;max-height:360px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:#b7dce9;background:#061724;border:1px solid #2a4658;border-radius:6px;padding:14px;tab-size:2}
+.ozark-app .modal-section{margin-top:20px}
+.ozark-app .mobile-close{float:right;margin:0 0 12px 12px}
+.ozark-app .live-status{display:inline-flex;align-items:center;gap:6px;font-size:11px;color:#9cbfcf}
+.ozark-app .live-status::before{content:"";height:6px;width:6px;background:#71d8ad;border-radius:50%}
+.ozark-app .toast{position:fixed;right:16px;bottom:16px;z-index:2000;background:#173e4c;border:1px solid #478395;color:#effcff;padding:12px 18px;max-width:calc(100vw - 32px);border-radius:8px}
+.ozark-app summary{cursor:pointer;color:var(--cyan2);font-size:13px;padding:7px 0}
+.ozark-app .qr{max-width:160px;height:auto;background:white;padding:8px;border-radius:8px}
+/* Cabinet-specific components share the spacing and control system above. */
+.ozark-app :is(.operational-toolbar,.rolling-header,.attempt-head,.appeal-message-head){display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
+.ozark-app :is(.operational-tabs,.risk-tabs,.rolling-status,.rolling-source-row,.appeal-file-list){display:flex;flex-wrap:wrap;gap:8px}
+.ozark-app :is(.operational-tabs,.risk-tabs) a{display:inline-flex;align-items:center;min-height:36px;padding:8px 12px;border:1px solid var(--line);border-radius:6px;background:var(--surface);font-size:13px}
+.ozark-app .operational-tabs a.active{background:var(--cyan);color:#07212b}
+.ozark-app .summary-strip{margin:12px 0}
+.ozark-app .summary-item strong{font-size:18px}
+.ozark-app .limit-lines{display:grid;gap:4px;font-size:12px}
+.ozark-app .risk-progress-meter{display:block;width:100%;height:7px;margin-top:6px;border:0;border-radius:8px;overflow:hidden;background:#17384a;accent-color:var(--cyan)}
+.ozark-app .risk-progress-meter::-webkit-progress-bar{background:#17384a}
+.ozark-app .risk-progress-meter::-webkit-progress-value{background:var(--cyan)}
+.ozark-app :is(.risk-settings-grid,.rolling-reconcile,.rolling-actions,.appeal-action-grid){display:grid;grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr));gap:12px;align-items:start}
+.ozark-app .risk-details{border:1px solid var(--line);border-radius:8px;padding:10px}
+.ozark-app .risk-details form{display:grid;gap:8px}
+.ozark-app .platform-wallet-card{display:grid;grid-template-columns:minmax(180px,220px) minmax(0,1fr);gap:18px;align-items:center}
+.ozark-app .platform-wallet-qr{width:220px;max-width:100%;border-radius:12px;padding:10px;background:#fff}
+.ozark-app :is(.rolling-card,.attempt-list){display:grid;gap:14px}
+.ozark-app :is(.rolling-form-card,.rolling-reconcile-item,.appeal-main-card,.appeal-side-card,.appeal-files,.appeal-actions-panel,.appeal-history,.appeal-info,.appeal-action-card){min-width:0;padding:16px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.ozark-app :is(.rolling-reconcile-item>b,.appeal-info>b){display:block;color:var(--muted);font-size:12px;margin-bottom:6px}
+.ozark-app .rolling-form-card h3{margin-top:0}
+.ozark-app .rolling-hidden{display:none}
+.ozark-app .rolling-empty{padding:18px;color:var(--muted);text-align:center}
+.ozark-app :is(.rolling-amount,.appeal-amount){font-size:25px;line-height:1.3;font-variant-numeric:tabular-nums}
+.ozark-app .appeal-row{cursor:pointer}
+.ozark-app .appeal-modalbox{width:min(1040px,100%)}
+.ozark-app .appeal-hero{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:14px}
+.ozark-app .appeal-info-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr));gap:12px;margin:14px 0}
+.ozark-app :is(.appeal-files,.appeal-actions-panel,.appeal-history){margin-top:14px}
+.ozark-app .appeal-message{border-top:1px solid var(--line);padding:12px 0;overflow-wrap:anywhere}
+.ozark-app .appeal-action-card button{width:100%;margin-top:12px}
+.ozark-app .timer{display:inline-flex;align-items:center;justify-content:center;min-height:30px;padding:4px 8px;border-radius:6px;border:1px solid #665432;background:#3b321e;color:#f0d398;font-variant-numeric:tabular-nums;white-space:nowrap}
+.ozark-app .timer-urgent{background:#45242e;border-color:#78414d;color:#ffb8bf}
+.ozark-app .direction-card{border:1px solid #31576b;border-radius:10px;background:var(--surface);padding:22px}
+.ozark-app .currency-route{display:flex;flex-wrap:wrap;align-items:center;gap:16px;margin:16px 0;padding:16px;background:#071b2a;border-radius:8px}
+.ozark-app .currency-route b{font-size:26px}
+.ozark-app .currency-route small{display:block;color:var(--muted);font-size:12px}
+.ozark-app .route-arrow{color:var(--cyan);font-size:24px}
+.ozark-app .readiness{list-style:none;padding:0;margin:18px 0}
+.ozark-app .readiness li{display:flex;flex-wrap:wrap;justify-content:space-between;gap:10px;border-bottom:1px solid var(--line);padding:9px 0;font-size:13px}
+.ozark-app .quote-details{display:flex;gap:8px 20px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin:14px 0}
+.ozark-app .quote-details b{color:var(--text)}
+.ozark-app .parser-rate-panel .section-title,.ozark-app .parser-setting-panel .section-title{margin-bottom:8px}
+.ozark-app .parser-rate-panel h3,.ozark-app .parser-setting-panel h3{margin:0}
+.ozark-app .parser-setting-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:end}
+.ozark-app .parser-setting-grid label{margin:0}
+.ozark-app .assigned-parser-list{margin-top:18px;border-top:1px solid var(--line);padding-top:4px}
+.ozark-app .assigned-parser-row{display:grid;grid-template-columns:minmax(140px,.7fr) auto minmax(240px,1.3fr);gap:12px;align-items:start;padding:10px 0;border-top:1px solid #193849}
+.ozark-app .assigned-parser-row span{min-width:0;overflow-wrap:anywhere;color:var(--muted)}
+.ozark-app .quote-result{padding:16px;background:#0a2834;border:1px solid #306471;border-radius:8px;margin:16px 0}
+.ozark-app .quote-result[aria-busy=true]{opacity:.65}
+.ozark-app .quote-actions{margin-top:10px}
+.ozark-app .split-layout{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,.9fr);gap:20px}
+.ozark-app .technical-disclosure{margin:12px 0}
+.ozark-app.ozark-standalone :is(.top,.wrap){margin-left:0}
+.ozark-app.ozark-standalone .wrap{max-width:1000px;margin:0 auto}
+.ozark-app.ozark-standalone .card{background:var(--surface);padding:28px;border:1px solid var(--line);border-radius:10px}
+.ozark-app .page-load-error{border:1px solid #824653;padding:14px;color:#ffc1c9}
+.ozark-app .external-processor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(460px,100%),1fr));gap:14px;margin:14px 0 22px}
+.ozark-app .external-processor-card{margin:0;display:flex;flex-direction:column;gap:14px}
+.ozark-app .external-processor-card .section-head{align-items:flex-start;margin:0}
+.ozark-app .status-stack{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:6px}
+.ozark-app .external-processor-facts{display:grid;gap:0;margin:0;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.ozark-app .external-processor-facts>div{display:grid;grid-template-columns:minmax(130px,180px) minmax(0,1fr);gap:12px;padding:10px 12px;border-top:1px solid var(--line);align-items:start}
+.ozark-app .external-processor-facts>div:first-child{border-top:0}
+.ozark-app .external-processor-facts dt{color:var(--muted);font-size:12px;font-weight:600}
+.ozark-app .external-processor-facts dd{margin:0;min-width:0;display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:13px}
+.ozark-app .external-processor-facts .cell-wrap{max-width:100%;overflow-wrap:anywhere}
+.ozark-app .external-processor-options{display:grid;grid-template-columns:minmax(0,2fr) minmax(160px,1fr);gap:14px;margin:14px 0}
+.ozark-app .external-processor-options fieldset{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.ozark-app .external-processor-options legend{padding:0 6px;color:var(--muted);font-size:12px}
+.ozark-app .external-processor-options .checkline{margin:0}
+.ozark-app .inbound-aggregator-heading{margin-top:34px;padding-top:24px;border-top:1px solid var(--line)}
+.ozark-app .status-text-bad{display:block;width:100%;color:#ffb8bf;font-size:12px}
+@media(max-width:1280px){
+  .ozark-app .grid:has(>.metric:nth-child(4):last-child),.ozark-app .summary-strip{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media(max-width:1150px){
+  body.ozark-app{--sidebar:208px}
+  .ozark-app .top{padding:12px 20px}
+  .ozark-app .wrap{padding:24px 20px}
+  .ozark-app :is(.direction-grid,.split-layout){grid-template-columns:1fr}
+  .ozark-app .top-actions>a{display:none}
+}
+@media(max-width:900px){
+  body.ozark-app{--sidebar:0px}
+  .ozark-app .nav{width:260px;transform:translateX(-110%);visibility:hidden;transition:transform .2s}
+  .ozark-app.nav-open .nav{transform:translateX(0);visibility:visible}
+  .ozark-app .menu-toggle{display:inline-flex;width:36px;height:36px;align-items:center;justify-content:center;background:#112e40;color:var(--text);border:1px solid #365366;border-radius:6px;flex:none;cursor:pointer;font-size:20px}
+  .ozark-app .menu-dismiss{display:block;position:absolute;top:12px;right:10px;background:transparent;border:0;color:var(--muted);font-size:23px;cursor:pointer}
+  .ozark-app.nav-open .nav-shade{display:block;position:fixed;inset:0;z-index:45;background:#020d18b3}
+  .ozark-app .top{flex-wrap:wrap;gap:10px}
+  .ozark-app .top-rate{flex-basis:100%;order:4}
+  .ozark-app .top-brand{margin-right:auto}
+  .ozark-app .section-head h1{font-size:26px}
+  .ozark-app .skip-link{left:15px}
+}
+/* A whole record becomes a card: no mixture of table-cell and block siblings. */
+@media(max-width:780px){
+  .ozark-app .parser-setting-grid,.ozark-app .assigned-parser-row{grid-template-columns:1fr}
+  .ozark-app .trader-table{width:100%;max-width:100%;overflow:visible}
+  .ozark-app .trader-table .trader-requests-table{min-width:0;table-layout:auto}
+  .ozark-app .compact-table,.ozark-app .compact-table tbody{display:block;width:100%}
+  .ozark-app .compact-table thead{display:none}
+  .ozark-app .compact-table tbody>tr{display:grid;grid-template-columns:minmax(0,1fr);padding:16px;gap:16px;border-bottom:1px solid var(--line)}
+  .ozark-app .compact-table tbody>tr:last-child{border-bottom:0}
+  .ozark-app .compact-table td{display:block;padding:0;border:0;min-width:100%;max-width:100%;width:100%;justify-self:stretch;text-align:left}
+  .ozark-app .compact-table td::before{content:attr(data-label);display:block;font:500 12px/1.5 system-ui,sans-serif;color:var(--muted);margin-bottom:5px;white-space:normal}
+  .ozark-app .compact-table td[colspan],.ozark-app .compact-table td:has(form){grid-column:1/-1;min-width:100%}
+  .ozark-app .compact-table .cell-ellipsis{max-width:100%}
+  .ozark-app .trader-requests-table .bank-method-cell>.cell-stack{flex-direction:column;align-items:flex-start;gap:4px}
+  .ozark-app .trader-requests-table .requisite-recipient-cell>.cell-stack{flex-direction:column;align-items:stretch;gap:4px}
+  .ozark-app .trader-requests-table :is(.btn-small,.icon-copy){min-height:40px;padding:8px 12px}
+  .ozark-app .appeal-hero{grid-template-columns:1fr}
+  .ozark-app .connection-panel-head{align-items:flex-start;flex-direction:column;gap:5px}
+  .ozark-app .connection-row{grid-template-columns:minmax(0,1fr);gap:6px;padding:14px 16px}
+  .ozark-app .connection-actions{justify-content:flex-start;margin-top:2px}
+}
+@media(max-width:560px){
+  .ozark-app .wrap{padding:22px 14px}
+  .ozark-app .top{padding:10px 14px}
+  .ozark-app .quote-details--compact{white-space:normal;line-height:1.35}
+  .ozark-app .top-rate{width:100%}
+  .ozark-app .top-brand h2{font-size:13px}
+  .ozark-app .top-brand>div{font-size:11px}
+  .ozark-app .top-actions{gap:4px}
+  .ozark-app .section-head h1{font-size:25px}
+  .ozark-app :is(.row,.modal-form-grid,.detail-grid,.platform-wallet-card){grid-template-columns:1fr}
+  .ozark-app .external-processor-options{grid-template-columns:1fr}
+  .ozark-app .external-processor-facts>div{grid-template-columns:1fr;gap:5px}
+  .ozark-app .status-stack{justify-content:flex-start}
+  .ozark-app .grid:has(>.metric:nth-child(4):last-child),.ozark-app .summary-strip{grid-template-columns:minmax(0,1fr)}
+  .ozark-app :is(.panel,.metric){padding:16px}
+  .ozark-app :is(.metric p,.metric>strong){font-size:23px}
+  .ozark-app .work-intro{padding:18px}
+  .ozark-app .modal{padding:10px}
+  .ozark-app .modalbox{padding:18px;max-height:calc(100dvh - 20px)}
+  .ozark-app .modal-actions{justify-content:stretch}
+  .ozark-app .modal-actions button{flex:1}
+  .ozark-app .release-footer{padding:16px 14px}
+}
+@media(prefers-reduced-motion:reduce){.ozark-app *{transition:none!important;scroll-behavior:auto!important}}

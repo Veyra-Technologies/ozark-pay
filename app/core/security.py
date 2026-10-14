@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
-from jose import jwt, JWTError
+import jwt
+from jwt import InvalidTokenError
 from cryptography.fernet import Fernet
 from cryptography.fernet import InvalidToken
 from app.core.config import settings
@@ -32,7 +33,7 @@ def create_token(subject: str, token_type: str, expires_delta: timedelta, extra:
 def decode_token(token: str) -> dict[str, Any]:
     try:
         return jwt.decode(token, settings.SECRET_KEY, algorithms=[ALGORITHM])
-    except JWTError as exc:
+    except InvalidTokenError as exc:
         raise ValueError('invalid token') from exc
 
 def sha256_text(value: str) -> str:
@@ -91,10 +92,11 @@ def is_unreadable_encrypted_text(value: str | None) -> bool:
     if value is None:
         return False
     text = str(value).strip()
-    if not _looks_like_fernet_token(text):
+    token = _encrypted_token(text)
+    if token is None:
         return False
     try:
-        decrypt_text(text)
+        decrypt_text(token)
         return False
     except Exception:
         return True

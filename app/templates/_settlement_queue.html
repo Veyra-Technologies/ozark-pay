@@ -1,0 +1,40 @@
+{% set queue_country = 'RU' if s == 'Settle — Россия' else 'KZ' %}
+<p class="compact-note">Выплаты только по заявкам мерчантов. Одобрение сохраняет резерв. Отправка выполняется вручную; TXID и подтверждение исполнения регистрируются отдельными действиями.</p>
+<div class="grid">{% for currency, amount in settlement_fee_income.get(queue_country,{}).items() %}<div class="metric"><b>Учтённые комиссии Settle</b><p>{{ amount|decimal_display }} {{ currency }}</p><small>Отдельно от комиссий депозитов и маржи KZ → GE</small></div>{% endfor %}</div>
+{% for st in settlement_queues.get(queue_country,[]) %}
+<details class="panel" data-settlement-id="{{ st.id }}">
+  <summary>{{ settlement_merchant_names.get(st.merchant_id|string,st.merchant_id) }} · {{ st.amount_usdt|decimal_display }} USDT · {{ settlement_labels.get(st.status,st.status) }} · {{ st.id|short_identifier }}</summary>
+  <div class="detail-grid">
+    <div class="detail-card"><b>Кабинет / страна</b><code class="cell-wrap">{{ st.merchant_id }}</code><small>{{ st.country }} · {{ st.business_id or 'Исторический кабинет без бизнес-аккаунта' }}</small></div>
+    <div class="detail-card"><b>Мерчант получает</b>{{ st.amount_usdt|decimal_display }} USDT</div>
+    <div class="detail-card"><b>Комиссия сверх выплаты</b>{{ st.fee_usdt|decimal_display }} USDT<small>{{ st.fee_balance_amount|decimal_display }} {{ st.balance_currency }}</small></div>
+    <div class="detail-card"><b>Полное списание / резерв</b>{{ st.reserve_amount|decimal_display }} {{ st.balance_currency }}<small>{{ st.balance_id or 'Исторический кошелёк' }}</small></div>
+    {% if st.balance_currency == 'RUB' %}<div class="detail-card"><b>Зафиксированный курс</b>{{ st.rate_rub|decimal_display }} RUB/USDT<small>{{ st.rate_source }} · {{ st.rate_side }} · {{ st.fetched_at|dt_full if st.fetched_at else 'Исторический snapshot' }}</small></div>{% endif %}
+    <div class="detail-card"><b>Создана</b>{{ st.created_at|dt_full }}{% if st.contract_version == 0 %}<small>Историческая комиссия и финансовые условия сохранены</small>{% endif %}</div>
+  </div>
+  <p><b>Получатель · USDT / TRON (TRC20)</b><br><code class="cell-wrap">{{ st.trc20_address }}</code></p>
+  {% if st.tx_hash %}<p><b>TXID</b><br><code class="cell-wrap">{{ st.tx_hash }}</code></p><p class="compact-note">{{ 'Исполнение подтверждено администратором' if st.status == 'completed' else 'Отправка зарегистрирована администратором' }}. Автоматическая проверка сетью не выполнялась.</p>{% endif %}
+  {% set action_base = cabinet_base ~ '/settlements/' ~ queue_country ~ '/' ~ st.id %}
+  {% if st.status == 'pending' %}<form method="post" action="{{ action_base }}/approve" data-settlement-confirm="Одобрить заявку на {{ st.amount_usdt|decimal_display }} USDT? Перевод не выполняется, резерв сохраняется.">{{ csrf_input(request) }}<button class="primary" type="submit">Одобрить</button></form>{% endif %}
+  {% if st.status in ['pending','approved'] %}<form method="post" action="{{ action_base }}/reject" data-settlement-confirm="Отклонить ещё не отправленную заявку и освободить её резерв?">{{ csrf_input(request) }}<label>Причина отказа</label><input name="reject_reason" required maxlength="500"><button class="dangerbtn" type="submit">Отклонить до отправки</button></form>{% endif %}
+  {% if st.status == 'approved' %}
+  <form method="post" action="{{ action_base }}/send" data-settlement-confirm="Зарегистрировать уже выполненную вручную отправку {{ st.amount_usdt|decimal_display }} USDT на {{ st.trc20_address }}?">
+    {{ csrf_input(request) }}<h4>Регистрация выполненной отправки</h4><label>TXID сети TRON</label><input name="tx_hash" minlength="64" maxlength="64" pattern="[a-fA-F0-9]{64}" required placeholder="64 шестнадцатеричных символа">
+    <label class="checkbox-line"><input type="checkbox" name="sent_confirmed" value="true" required>Вручную отправлена именно сумма {{ st.amount_usdt|decimal_display }} USDT на указанный выше адрес. Комиссия сверх выплаты уже входит в резерв.</label><button class="primary" type="submit">Зафиксировать отправку</button>
+  </form>{% endif %}
+  {% if st.status in ['sent','reconciliation'] %}
+  <form method="post" action="{{ action_base }}/complete" data-settlement-confirm="Зафиксировать ручное подтверждение исполнения и окончательно списать резерв {{ st.reserve_amount|decimal_display }} {{ st.balance_currency }}?">
+    {{ csrf_input(request) }}<h4>Ручное подтверждение исполнения</h4><label>Основание проверки выплаты</label><input name="execution_reference" required maxlength="500" placeholder="Результат сверки / банковский или операционный документ">
+    <label class="checkbox-line"><input type="checkbox" name="execution_confirmed" value="true" required>Я проверил фактическое исполнение выплаты {{ st.amount_usdt|decimal_display }} USDT, адрес и TXID. Это подтверждение администратора, автоматической сетевой проверки нет.</label><button class="primary" type="submit">Подтвердить исполнение</button>
+  </form>{% endif %}
+  {% if st.status == 'sent' %}<form method="post" action="{{ action_base }}/reconcile">{{ csrf_input(request) }}<label>Причина неопределённого результата</label><input name="reason" required maxlength="500"><button class="secondary" type="submit">Отправить на сверку</button><p class="compact-note">Резерв сохранится. Обычный отказ после регистрации отправки запрещён.</p></form>{% endif %}
+  {% if st.status == 'reconciliation' %}
+  <p class="note">Результат отправки требует сверки: {{ st.reconciliation_reason }}. Резерв не освобождается автоматически.</p>
+  <form method="post" action="{{ action_base }}/resolve-not-sent" data-settlement-confirm="Сверка установила, что внешняя выплата не состоялась? Освободить резерв по указанному основанию?">
+    {{ csrf_input(request) }}<h4>Урегулирование отсутствующей выплаты</h4><label>Причина</label><input name="reason" required maxlength="500"><label>Основание сверки, подтверждающее отсутствие выплаты</label><input name="execution_reference" required maxlength="500"><label class="checkbox-line"><input type="checkbox" name="not_sent_confirmed" value="true" required>Сверка завершена: внешний перевод не состоялся, освобождение резерва обосновано.</label><button class="dangerbtn" type="submit">Завершить сверку и освободить резерв</button>
+  </form>{% endif %}
+  {% if st.reject_reason %}<p>Причина отказа: {{ st.reject_reason }}</p>{% endif %}
+  {% if st.execution_reference %}<p>Основание завершения: {{ st.execution_reference }}</p>{% endif %}
+  <h4>Журнал заявки</h4><div class="table-wrap"><table><tr><th>Время</th><th>Кто</th><th>Переход</th><th>Основание / проводка</th></tr>{% for event in settlement_events.get(st.id|string,[]) %}<tr><td>{{ event.created_at|dt_compact }}</td><td>{{ settlement_actor_names.get(event.actor_id|string,event.actor_id) }}</td><td>{{ settlement_labels.get(event.details.get('previous_status'),'Создание') }} → {{ settlement_labels.get(event.details.get('new_status'),event.details.get('new_status')) }}</td><td>{{ event.details.get('reason') or event.details.get('execution_reference') or event.details.get('ledger_key') or 'Одобрение / регистрация' }}</td></tr>{% else %}<tr><td colspan="4">Историческая запись без нового журнала действий</td></tr>{% endfor %}</table></div>
+</details>{% else %}<div class="panel">Заявок этой страны пока нет</div>{% endfor %}
+{% set page = settlement_queue_pages.get(queue_country,1) %}{% if settlement_queues.get(queue_country,[])|length == 100 or page > 1 %}<div class="actions">{% if page > 1 %}<a class="secondary" href="{{ cabinet_base }}?section=settle-{{ queue_country|lower }}&settle_{{ queue_country|lower }}_page={{ page-1 }}">Предыдущие</a>{% endif %}<span>Страница {{ page }}</span>{% if settlement_queues.get(queue_country,[])|length == 100 %}<a class="secondary" href="{{ cabinet_base }}?section=settle-{{ queue_country|lower }}&settle_{{ queue_country|lower }}_page={{ page+1 }}">Следующие</a>{% endif %}</div>{% endif %}
