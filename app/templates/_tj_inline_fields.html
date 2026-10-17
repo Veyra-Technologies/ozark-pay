@@ -1,0 +1,16 @@
+<div data-tj-inline hidden>
+  <p class="note">TJ → TJ · TJS / USDT · C2C. Финансовый приём закрыт.</p>
+  <label><input type="checkbox" name="tj_parser_confirmed" data-optional> Подтверждаю назначение Bybit P2P Green USDT/TJS (подготовлен, реальный курс пока недоступен)</label>
+  <h3>Индивидуальные условия кабинета</h3>
+  <p class="compact-note">Проценты не заданы. Можно сохранить кабинет без тарифа — финансовая работа останется недоступной. Диапазоны [от, до), без разрывов; пустая верхняя граница — без предела.</p>
+  <input type="hidden" name="tj_tiers" value="[]" data-optional>
+  <input type="hidden" name="tj_effective_from" data-optional>
+  <div data-inline-tiers><div class="row" data-inline-tier>
+    <div><label>От, TJS</label><input type="number" data-tier-min min="10" step="0.01" value="10" data-optional></div>
+    <div><label>До, TJS</label><input type="number" data-tier-max min="10" step="0.01" data-optional></div>
+    <div><label>Комиссия, %</label><input type="number" data-tier-percent min="0" max="100" step="0.0001" data-optional></div>
+    <button type="button" class="secondary" data-inline-remove>Удалить</button>
+  </div></div>
+  <button type="button" class="secondary" data-inline-add>Добавить диапазон</button>
+  <label>Начало действия индивидуального тарифа</label><input type="datetime-local" data-inline-date data-optional>
+</div>

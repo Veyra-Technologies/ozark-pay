@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     # Zero keeps network requests disabled until the account limit is configured.
     XE_MONTHLY_RATE_LIMIT: int = Field(default=0, ge=0)
     XE_MAX_AGE_SECONDS: int = Field(default=120, ge=30, le=3600)
+    # Read-only documented P2P ads endpoint. No anonymous/private endpoint fallback.
+    BYBIT_P2P_ENABLED: bool = False
+    BYBIT_P2P_API_KEY: SecretStr = SecretStr('')
+    BYBIT_P2P_API_SECRET: SecretStr = SecretStr('')
+    BYBIT_P2P_GREEN_REQUEST_SIDE: str = ''
+    BYBIT_P2P_GREEN_AD_SIDE: str = ''
+    BYBIT_P2P_GREEN_CONTRACT_REFERENCE: str = ''
+    BYBIT_P2P_TIMEOUT_SECONDS: float = Field(default=8, ge=1, le=30)
     BINANCE_P2P_ENABLED: bool = True
     CROSSBORDER_WEBHOOK_SECRET: str = ''
     CROSSBORDER_WEBHOOK_ACTOR_ID: str = ''

@@ -37,8 +37,8 @@ class User(Base, TimestampMixin):
     trader_balance: Mapped[Decimal]=mapped_column(Numeric(18,2), default=Decimal('0.00'))
     working_country: Mapped[str|None]=mapped_column(String(2), nullable=True)
     working_currency: Mapped[str|None]=mapped_column(String(3), nullable=True)
-    working_rate_source: Mapped[str|None]=mapped_column(String(16), nullable=True,
-        default=lambda context: {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe', 'TJ': 'rapira_green_tjs'}.get(context.get_current_parameters().get('working_country')))
+    working_rate_source: Mapped[str|None]=mapped_column(String(64), nullable=True,
+        default=lambda context: {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe'}.get(context.get_current_parameters().get('working_country')))
     trader_account_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True, index=True)
     trader_hold: Mapped[Decimal]=mapped_column(Numeric(18,2), default=Decimal('0.00'))
     trader_traffic_priority: Mapped[int]=mapped_column(Integer, default=50)
@@ -60,7 +60,7 @@ class Merchant(Base, TimestampMixin):
     __tablename__='merchants'
     __table_args__ = (
         UniqueConstraint('business_id', 'working_country', name='uq_merchant_business_country'),
-        CheckConstraint("(working_country IS NULL AND rate_parser_id IS NULL) OR (working_country IS NOT NULL AND rate_parser_id IS NOT NULL AND business_id IS NOT NULL AND ((working_country='RU' AND rate_parser_id='rapira') OR (working_country='KZ' AND rate_parser_id='binance_p2p_kaspi_buy_100000_avg10') OR (working_country='GE' AND rate_parser_id='xe'))) OR COALESCE(working_country='TJ' AND rate_parser_id='rapira_green_tjs' AND business_id IS NOT NULL,false)", name='ck_merchant_country_parser'),
+        CheckConstraint("(working_country IS NULL AND rate_parser_id IS NULL) OR (working_country IS NOT NULL AND rate_parser_id IS NOT NULL AND business_id IS NOT NULL AND ((working_country='RU' AND rate_parser_id='rapira') OR (working_country='KZ' AND rate_parser_id='binance_p2p_kaspi_buy_100000_avg10') OR (working_country='GE' AND rate_parser_id='xe'))) OR COALESCE(working_country='TJ' AND rate_parser_id='bybit_p2p_tjs_green_avg3' AND business_id IS NOT NULL,false)", name='ck_merchant_country_parser'),
     )
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id: Mapped[uuid.UUID|None] = mapped_column(UUID(as_uuid=True), ForeignKey('business_accounts.id', ondelete='RESTRICT'), nullable=True)

@@ -4,13 +4,15 @@ from sqlalchemy import select
 from app.models import User, Requisite, Deposit, TraderLedgerEntry, TraderWallet
 
 COUNTRIES = {'RU': ('Россия', 'RUB'), 'AM': ('Армения', 'AMD'), 'GE': ('Грузия', 'GEL'), 'TJ': ('Таджикистан', 'TJS')}
-RATE_SOURCES = {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe', 'TJ': 'rapira_green_tjs'}
+RATE_SOURCES = {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe', 'TJ': 'bybit_p2p_tjs_green_avg3'}
 
 
 def validate_profile(country, currency=None, source=None):
     if country not in COUNTRIES:
         raise HTTPException(422, 'Выберите страну работы')
     expected_currency, expected_source = COUNTRIES[country][1], RATE_SOURCES[country]
+    if country == 'TJ' and source != expected_source:
+        raise HTTPException(422, 'Явно выберите Bybit P2P Green USDT/TJS для TJ')
     if currency and currency != expected_currency:
         raise HTTPException(422, 'Валюта приёма не соответствует стране')
     if source and source != expected_source:

@@ -1,6 +1,6 @@
 """Provider-independent validation only; no unconfirmed endpoint or RUB fallback.
 
-This does not fetch a live Rapira quote. A transport/market contract must be
+This utility does not fetch any provider quote. A transport/market contract must be
 confirmed separately before these normalized values may enter financial routing.
 """
 from dataclasses import dataclass
@@ -35,7 +35,7 @@ class GreenObservation:
     def require_fresh(self, at=None):
         at = at or datetime.now(timezone.utc)
         if not at.tzinfo or not self.fetched_at <= at < self.expires_at:
-            raise ValueError('Котировка Rapira Green отсутствует, устарела или имеет будущее время.')
+            raise ValueError('Котировка Bybit P2P Green отсутствует, устарела или имеет будущее время.')
         return self
 
 
@@ -45,7 +45,7 @@ def normalize_observation(*, values, positions, unit, observation_id, configurat
     """Validate three already-normalized comparable quotes, preserving their order.
 
     market_side and source_reference are mandatory provenance, not defaults or
-    a claim that an arbitrary feed is Rapira Green. There is no runtime endpoint
+    a claim that an arbitrary feed is Bybit P2P Green. There is no runtime endpoint
     accepting manual quotes; this function is used for contract QA only today.
     """
     if len(values) != 3 or tuple(positions) != (1, 2, 3) or unit != 'TJS per 1 USDT':

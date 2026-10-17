@@ -32,7 +32,9 @@ class RefreshIn(BaseModel):
 
 class MerchantCreate(BaseModel):
     currency: str
-    tariff_plan_id: UUID
+    tariff_plan_id: UUID | None = None
+    tariff_tiers: list[dict] | None = None
+    tariff_effective_from: datetime | None = None
     payment_methods: list[str] = Field(min_length=1)
     model_config = ConfigDict(extra='forbid')
     country: Literal['RU', 'KZ', 'GE', 'TJ']
@@ -44,6 +46,15 @@ class MerchantCreate(BaseModel):
     webhook_url: str | None = None
     ip_whitelist: list[str] = []
     sandbox_mode: bool = True
+
+    @model_validator(mode='after')
+    def individual_tj_tariff(self):
+        if self.country == 'TJ':
+            if self.tariff_plan_id or bool(self.tariff_tiers) != bool(self.tariff_effective_from):
+                raise ValueError('TJ: индивидуальные диапазоны и дата; общий тариф не назначается')
+        elif not self.tariff_plan_id:
+            raise ValueError('Выберите тариф страны')
+        return self
 
     @field_validator('email')
     @classmethod
@@ -66,6 +77,11 @@ class MerchantCreate(BaseModel):
 class AggregatorCreate(BaseModel):
     country: Literal['RU','TJ'] = 'RU'
     tariff_plan_id: UUID | None = None
+    parser_id: str | None = None
+    login_email: str | None = None
+    login_password: str | None = Field(default=None, min_length=12)
+    tariff_tiers: list[dict] | None = None
+    tariff_effective_from: datetime | None = None
     name: str = Field(min_length=2, max_length=160)
     callback_url: str | None = None
     success_url: str | None = None
@@ -78,8 +94,14 @@ class AggregatorCreate(BaseModel):
 
     @model_validator(mode='after')
     def tj_configuration(self):
-        if self.country == 'TJ' and (not self.tariff_plan_id or not {'min_payment_amount','max_payment_amount','commission_percent'} <= self.model_fields_set or self.min_payment_amount < 10):
-            raise ValueError('Для TJ нужны явные лимиты от 10 TJS, комиссия и тариф TJ.')
+        if self.country == 'TJ':
+            if (self.parser_id != 'bybit_p2p_tjs_green_avg3' or self.tariff_plan_id
+                    or not {'min_payment_amount','max_payment_amount'} <= self.model_fields_set or self.min_payment_amount < 10):
+                raise ValueError('Для TJ подтвердите Bybit и явные лимиты от 10 TJS; общий тариф не назначается.')
+            if 'commission_percent' in self.model_fields_set:
+                raise ValueError('Комиссия TJ задаётся только индивидуальными диапазонами.')
+            if bool(self.tariff_tiers) != bool(self.tariff_effective_from):
+                raise ValueError('Для индивидуальной сетки укажите дату действия.')
         return self
 
     @field_validator('callback_url', 'success_url', 'fail_url')
@@ -389,6 +411,8 @@ class RiskEventOut(BaseModel):
     details: dict
 
 class UserCreateIn(BaseModel):
+    tariff_tiers: list[dict] | None = None
+    tariff_effective_from: datetime | None = None
     merchant_currency: str | None = None
     merchant_tariff_plan_id: UUID | None = None
     merchant_payment_methods: list[str] | None = None
@@ -399,12 +423,22 @@ class UserCreateIn(BaseModel):
     business_id: UUID | None = None
     working_country: str | None = Field(default=None, pattern='^(RU|AM|GE|TJ)$')
     working_currency: str | None = None
-    working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe)$')
+    working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe|bybit_p2p_tjs_green_avg3)$')
     trader_account_id: UUID | None = None
     email: str = Field(min_length=5, max_length=255)
     password: str = Field(min_length=12, max_length=128)
     role: Role
     merchant_name: str | None = Field(default=None, max_length=160)
+
+    @model_validator(mode='after')
+    def personal_tariff_date(self):
+        if self.role == Role.trader and self.working_country == 'TJ' and self.working_rate_source != 'bybit_p2p_tjs_green_avg3':
+            raise ValueError('TJ требует явного назначения Bybit P2P Green USDT/TJS')
+        if bool(self.tariff_tiers) != bool(self.tariff_effective_from):
+            raise ValueError('Для индивидуального тарифа нужны диапазоны и дата действия')
+        if self.tariff_tiers and self.working_country != 'TJ' and self.merchant_country != 'TJ':
+            raise ValueError('Индивидуальная сетка TJ доступна только кабинету TJ')
+        return self
 
     @field_validator('email')
     @classmethod
@@ -418,7 +452,7 @@ class WorkingCountryIn(BaseModel):
     model_config = ConfigDict(extra='forbid')
     working_country: str = Field(pattern='^(RU|AM|GE|TJ)$')
     working_currency: str | None = None
-    working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe)$')
+    working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe|bybit_p2p_tjs_green_avg3)$')
 
 
 class FeeRuleIn(BaseModel):

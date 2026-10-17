@@ -15,13 +15,13 @@ from sqlalchemy.dialects.postgresql import insert
 
 from app.core.config import settings
 from app.models import ParserConfiguration, RateObservation
-from app.services import binance_p2p, rapira
+from app.services import binance_p2p, bybit_p2p, rapira
 from app.services.audit import audit
 from app.services.country_tariffs import require_admin, scope_lock
 from app.services.crossborder_money import CrossBorderError
 
 PARSER_POLICY = {
-    'rapira_green_tjs': {'source': 'RAPIRA_GREEN_UNCONFIRMED', 'pair': 'USDT/TJS',
+    'bybit_p2p_tjs_green_avg3': {'source': 'BYBIT_P2P', 'pair': 'USDT/TJS',
         'positions': [1, 2, 3], 'unit': 'TJS per 1 USDT', 'contract_confirmed': False},
     'rapira': {'source': 'RAPIRA', 'pair': 'USDT/RUB', 'side': 'ask',
                'provider_field': 'askPrice', 'unit': 'RUB per 1 USDT'},
@@ -46,15 +46,19 @@ async def configuration(db, parser_id):
 def public_config(row):
     return {'id': str(row.id), 'parser_id': row.parser_id, 'version': row.version,
             'country': row.country, 'direction': row.direction, 'active': row.is_active,
-            'parameters': {**PARSER_POLICY[row.parser_id], **row.parameters},
+            'parameters': {**PARSER_POLICY.get(row.parser_id, {'deprecated': True}), **row.parameters},
             'created_by': str(row.created_by) if row.created_by else None,
             'created_at': row.created_at.isoformat() if row.created_at else None}
 
 
 async def configure(db, *, actor, parser_id, refresh_seconds, ttl_seconds, is_active):
     require_admin(actor)
-    if parser_id == 'rapira_green_tjs' and is_active:
-        raise CrossBorderError('Rapira Green 1–3: источник и сторона рынка не подтверждены; включение запрещено')
+    if parser_id == 'rapira_green_tjs':
+        raise CrossBorderError('Прежний профиль TJ выведен из использования; выберите Bybit')
+    if parser_id == 'bybit_p2p_tjs_green_avg3' and is_active and not (
+            bybit_p2p.verified_contract() and settings.BYBIT_P2P_ENABLED
+            and settings.BYBIT_P2P_API_KEY.get_secret_value() and settings.BYBIT_P2P_API_SECRET.get_secret_value()):
+        raise CrossBorderError('Bybit P2P Green 1–3: источник и сторона рынка не подтверждены; включение запрещено')
     if not 15 <= refresh_seconds <= ttl_seconds <= 120:
         raise CrossBorderError('Интервал: от 15 секунд; TTL не меньше интервала и не больше 120 секунд')
     if parser_id == 'xe':
@@ -111,10 +115,14 @@ async def _rapira_state(config, refresh):
 
 
 async def parser_state(db, parser_id, *, refresh=False, persist=True):
+    if parser_id == 'bybit_p2p_tjs_green_avg3' and (not settings.BYBIT_P2P_ENABLED or not bybit_p2p.verified_contract()):
+        return {'configuration': {'parser_id': parser_id, 'country': 'TJ', 'active': False,
+                'parameters': PARSER_POLICY[parser_id]}, 'available': False, 'status': 'blocked',
+                'last_error': 'bybit_disabled' if not settings.BYBIT_P2P_ENABLED else 'bybit_green_contract_unconfirmed', 'quote': None}
     if parser_id == 'rapira_green_tjs':
         # Never fall through to Rapira RUB, XE or Binance, even when a DB row is active.
         return {'configuration': {'parser_id': parser_id, 'country': 'TJ', 'active': False,
-                'parameters': PARSER_POLICY[parser_id]}, 'available': False, 'status': 'blocked',
+                'parameters': {'deprecated': True}}, 'available': False, 'status': 'blocked',
                 'last_error': 'tj_contract_unconfirmed', 'quote': None}
     try:
         config = await configuration(db, parser_id)
@@ -125,7 +133,9 @@ async def parser_state(db, parser_id, *, refresh=False, persist=True):
              'last_error': None, 'quote': None}
     if not config.is_active:
         return {**state, 'last_error': 'parser_disabled'}
-    if parser_id in binance_p2p.PROFILES:
+    if parser_id == 'bybit_p2p_tjs_green_avg3':
+        provider = await bybit_p2p.cached_state(config, refresh=refresh)
+    elif parser_id in binance_p2p.PROFILES:
         provider = await binance_p2p.get_state(refresh=refresh, profile=binance_p2p.PROFILES[parser_id],
             refresh_seconds=config.parameters['refresh_seconds'], max_age=config.parameters['ttl_seconds'])
     elif parser_id == 'rapira':
@@ -143,7 +153,20 @@ async def parser_state(db, parser_id, *, refresh=False, persist=True):
         if quote.get('provider_timestamp'):
             expires = min(expires, binance_p2p.timestamp(quote['provider_timestamp']) + timedelta(seconds=config.parameters['ttl_seconds']))
         fresh = fetched <= now < expires
-        if parser_id in binance_p2p.PROFILES:
+        if parser_id == 'bybit_p2p_tjs_green_avg3':
+            fresh = fresh and settings.BYBIT_P2P_ENABLED and bybit_p2p.verified_contract()
+            checked = bybit_p2p.normalize_ads({'ret_code': 0, 'result': {'items': [
+                {'id': ad_id, 'price': price, 'tokenId': 'USDT', 'currencyId': 'TJS', 'side': quote['side']}
+                for ad_id, price in zip(quote['ad_ids'], quote['raw_values'], strict=True)]}},
+                request_side=quote['request_side'], ad_side=quote['side'], contract_reference=quote['contract_reference'],
+                fetched_at=fetched, ttl_seconds=config.parameters['ttl_seconds'], now=fetched)
+            fresh = (fresh and len(quote['ad_ids']) == 3 and quote['positions'] == [1, 2, 3]
+                and quote['rate'] == checked['rate'] and quote['unit'] == 'TJS per 1 USDT'
+                and quote['request_side'] == settings.BYBIT_P2P_GREEN_REQUEST_SIDE
+                and quote['side'] == settings.BYBIT_P2P_GREEN_AD_SIDE
+                and quote['contract_reference'] == settings.BYBIT_P2P_GREEN_CONTRACT_REFERENCE
+                and binance_p2p.timestamp(quote['expires_at']) == expires)
+        elif parser_id in binance_p2p.PROFILES:
             fresh = fresh and provider.get('available', False) and binance_p2p.quote_is_fresh(quote, at=now, profile=binance_p2p.PROFILES[parser_id], max_age=config.parameters['ttl_seconds'])
         else:
             fresh = fresh and settings.RAPIRA_RATES_ENABLED and quote.get('provider_field') == 'askPrice' and quote.get('pair') == 'USDT/RUB' and quote.get('side') == 'ask'

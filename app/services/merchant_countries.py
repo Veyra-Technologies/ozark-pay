@@ -9,7 +9,7 @@ from app.services.binance_p2p import PARSER_ID
 from app.services.country_tariffs import require_admin, scope_lock
 from app.services.crossborder_money import CrossBorderError
 
-COUNTRY_PARSERS = {'RU': ('rapira',), 'KZ': (PARSER_ID,), 'GE': ('xe',), 'TJ': ('rapira_green_tjs',)}
+COUNTRY_PARSERS = {'RU': ('rapira',), 'KZ': (PARSER_ID,), 'GE': ('xe',), 'TJ': ('bybit_p2p_tjs_green_avg3',)}
 COUNTRY_CURRENCIES = {'RU': 'RUB', 'KZ': 'KZT', 'GE': 'GEL', 'TJ': 'TJS'}
 
 

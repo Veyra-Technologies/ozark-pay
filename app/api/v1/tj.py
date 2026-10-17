@@ -5,7 +5,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select,or_
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import require_roles
@@ -19,7 +19,7 @@ from app.services.crossborder_money import CrossBorderError
 
 router = APIRouter(prefix='/tj', tags=['tajikistan-local'])
 administrator = require_roles(Role.admin, Role.superadmin)
-participant = require_roles(Role.admin, Role.superadmin, Role.merchant, Role.trader)
+participant = require_roles(Role.admin, Role.superadmin, Role.merchant, Role.trader, Role.aggregator)
 
 
 class TariffIn(BaseModel):
@@ -37,12 +37,20 @@ class AssignIn(BaseModel):
 
 @router.get('/status')
 async def status(actor=Depends(participant), db: AsyncSession=Depends(get_db)):
-    if actor.role == 'merchant':
+    subject_id = None
+    party = 'merchant'
+    if actor.role in ('merchant', 'aggregator'):
         merchant = await db.scalar(select(Merchant).where(Merchant.owner_id == actor.id))
         if not merchant or merchant.working_country != 'TJ':
             raise HTTPException(403, 'Недоступно для страны кабинета')
+        subject_id = merchant.id
     elif actor.role == 'trader' and actor.working_country != 'TJ':
         raise HTTPException(403, 'Недоступно для страны кабинета')
+    elif actor.role == 'trader':
+        subject_id, party = actor.id, 'trader'
+    if subject_id:
+        plan = await tj_cabinets.personal_plan(db, party=party, entity_id=subject_id)
+        return {**admission_status(), 'tariff_ready':bool(plan), 'cabinet_id':str(subject_id)}
     return admission_status()
 
 
@@ -60,15 +68,15 @@ async def create_tariff(data: TariffIn, actor=Depends(administrator), db: AsyncS
 @router.get('/tariffs')
 async def tariffs(actor=Depends(participant), db: AsyncSession=Depends(get_db)):
     query = select(TariffPlan).where(TariffPlan.country == 'TJ')
-    if actor.role == 'merchant':
+    if actor.role in ('merchant', 'aggregator'):
         merchant = await db.scalar(select(Merchant).where(Merchant.owner_id == actor.id))
         if not merchant or merchant.working_country != 'TJ':
             raise HTTPException(403, 'Недоступно для страны кабинета')
-        query = query.where(TariffPlan.party == 'merchant', or_(TariffPlan.entity_id == merchant.id,TariffPlan.entity_id.is_(None)))
+        query = query.where(TariffPlan.party == 'merchant', TariffPlan.entity_id == merchant.id)
     elif actor.role == 'trader':
         if actor.working_country != 'TJ':
             raise HTTPException(403, 'Недоступно для страны кабинета')
-        query = query.where(TariffPlan.party == 'trader', or_(TariffPlan.entity_id == actor.id,TariffPlan.entity_id.is_(None)))
+        query = query.where(TariffPlan.party == 'trader', TariffPlan.entity_id == actor.id)
     return [public_plan(p) for p in (await db.execute(query.order_by(TariffPlan.created_at.desc()))).scalars()]
 
 

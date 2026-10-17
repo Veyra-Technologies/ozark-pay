@@ -287,6 +287,11 @@ async def create_aggregator_account(
     country: str = 'RU',
     actor=None,
     tariff_plan_id=None,
+    login_email: str | None = None,
+    login_password: str | None = None,
+    parser_id: str | None = None,
+    tariff_tiers: list[dict] | None = None,
+    tariff_effective_from: datetime | None = None,
     callback_url: str | None = None,
     success_url: str | None = None,
     fail_url: str | None = None,
@@ -301,19 +306,24 @@ async def create_aggregator_account(
     if country == 'TJ':
         from app.services.country_tariffs import require_admin
         require_admin(actor)
-        if not tariff_plan_id or min_payment_amount < 10:
-            raise AggregatorError('TJ aggregator requires a TJ tariff and limits from 10 TJS')
+        if min_payment_amount < 10 or max_payment_amount < min_payment_amount:
+            raise AggregatorError('TJ aggregator requires explicit limits from 10 TJS')
+        if parser_id != 'bybit_p2p_tjs_green_avg3':
+            raise AggregatorError('Confirm the compatible Bybit TJ parser')
     existing = (await db.execute(select(AggregatorAccount).where(AggregatorAccount.name == name))).scalar_one_or_none()
     if existing:
         raise AggregatorError('aggregator name already exists')
 
     api_key = generate_api_key()
     secret = generate_secret()
+    from app.core.security import hash_password
+    if bool(login_email) != bool(login_password) or login_password and len(login_password) < 12:
+        raise AggregatorError('Email and a password of at least 12 characters are required together')
     user = User(
-        email=f'{api_key}@aggregator.local',
-        password_hash='disabled-aggregator-account',
+        email=login_email.strip().lower() if login_email else f'{api_key}@aggregator.local',
+        password_hash=hash_password(login_password) if login_password else 'disabled-aggregator-account',
         role=Role.aggregator.value,
-        is_active=False,
+        is_active=bool(login_email),
     )
     db.add(user)
     await db.flush()
@@ -331,13 +341,14 @@ async def create_aggregator_account(
     if country == 'TJ':
         from app.services.merchant_countries import assign_country
         from app.services.merchant_cabinets import validate_plan,apply_ru_plan
-        await assign_country(db, actor=actor, merchant=platform_merchant, country='TJ', parser_id='rapira_green_tjs')
-        # This is an internal platform merchant, whose disabled aggregator user
-        # must stay unable to log in. Staff creation sets its initial config;
-        # public merchant access checks remain unchanged.
-        plan = await validate_plan(db,platform_merchant,tariff_plan_id)
-        await apply_ru_plan(db,actor,platform_merchant,plan,['c2c'])
-        platform_merchant.tariff_plan_id=plan.id
+        await assign_country(db, actor=actor, merchant=platform_merchant, country='TJ', parser_id='bybit_p2p_tjs_green_avg3')
+        # Keep the existing inbound-partner/internal-merchant semantics. Legacy
+        # technical users stay disabled; only an explicitly supplied new login
+        # enables this independently authenticated aggregator role.
+        if tariff_plan_id:
+            plan = await validate_plan(db,platform_merchant,tariff_plan_id)
+            await apply_ru_plan(db,actor,platform_merchant,plan,['c2c'])
+            platform_merchant.tariff_plan_id=plan.id
         platform_merchant.payment_methods=['c2c']
     else:
         db.add(Balance(merchant_id=platform_merchant.id, available=Decimal('0.00')))
@@ -353,7 +364,8 @@ async def create_aggregator_account(
         callback_url=callback_url,
         success_url=success_url,
         fail_url=fail_url,
-        commission_percent=percent(commission_percent),
+        # Legacy scalar is never a TJ tariff. Only an individual TariffPlan is used.
+        commission_percent=Decimal('0') if country == 'TJ' else percent(commission_percent),
         min_payment_amount=money(min_payment_amount),
         max_payment_amount=money(max_payment_amount),
         daily_limit=money(daily_limit) if daily_limit is not None else None,
@@ -361,6 +373,12 @@ async def create_aggregator_account(
     )
     db.add(account)
     await db.flush()
+    if country == 'TJ' and tariff_tiers:
+        from app.services.tj_cabinets import save_personal_plan
+        if tariff_effective_from is None:
+            raise AggregatorError('Individual tariff requires an effective date')
+        await save_personal_plan(db, actor=actor, party='merchant', entity_id=platform_merchant.id,
+                                 tiers=tariff_tiers, effective_from=tariff_effective_from)
     return account, secret
 
 

@@ -10,7 +10,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 
-from app.models import Balance, FeeRule, Merchant, TariffPlan, TraderWallet, User
+from app.models import AggregatorAccount, Balance, FeeRule, Merchant, TariffPlan, TraderWallet, User
 from app.services.audit import audit
 from app.services.country_tariffs import require_admin, scope_lock, validate_tiers, public_plan
 from app.services.crossborder_money import CrossBorderError
@@ -33,17 +33,23 @@ async def create_plan(db, *, actor, party, tiers, effective_from, entity_id=None
     require_admin(actor)
     if party not in ('merchant', 'trader'):
         raise CrossBorderError('Нужна сторона merchant или trader')
-    if effective_from.tzinfo is None:
+    if not isinstance(effective_from, datetime) or effective_from.tzinfo is None:
         raise CrossBorderError('Время действия должно содержать часовой пояс')
     tiers = validate_tiers(tiers, basis='local_amount')
-    if Decimal(tiers[0]['min']) < 10:
-        raise CrossBorderError('Границы тарифов TJ начинаются не ниже 10 TJS')
+    if Decimal(tiers[0]['min']) != 10:
+        raise CrossBorderError('Индивидуальный тариф должен начинаться с 10 TJS без разрывов')
     entity_id = UUID(str(entity_id)) if entity_id else None
+    if not entity_id:
+        raise CrossBorderError('Для TJ нужен индивидуальный кабинет; общий тариф не назначается')
     if entity_id:
         entity = await db.get(Merchant if party == 'merchant' else User, entity_id)
         if (not entity or entity.working_country != 'TJ' or entity.is_archived
                 or (party == 'trader' and (entity.role != 'trader' or not entity.is_active or entity.is_locked))):
             raise CrossBorderError('Тариф принадлежит только кабинету TJ соответствующей роли')
+        if party == 'merchant':
+            aggregator = await db.scalar(select(AggregatorAccount).where(AggregatorAccount.platform_merchant_id == entity.id))
+            if aggregator and tiers[-1]['max'] is not None and Decimal(tiers[-1]['max']) <= aggregator.max_payment_amount:
+                raise CrossBorderError('Сетка агрегатора должна покрывать максимальный чек включительно')
     key = f'tj-tj:{party}:{entity_id or "default"}'
     await scope_lock(db, key)
     previous = await db.scalar(select(TariffPlan).where(TariffPlan.scope_key == key)
@@ -69,7 +75,7 @@ async def assign_trader_plan(db, *, actor, trader, plan_id):
             or trader.is_archived or not trader.is_active or trader.is_locked
             or not plan or plan.party != 'trader' or plan.country != 'TJ'
             or plan.currency != 'TJS' or plan.basis != 'local_amount' or plan.direction != 'tj-tj'
-            or plan.entity_id not in (None, trader.id) or not plan.is_active or plan.effective_from > now):
+            or plan.entity_id != trader.id or not plan.is_active or plan.effective_from > now):
         raise CrossBorderError('Несовместимый тариф или кабинет TJ')
     from app.services.fee_tiers import create_fee_rule
     old = (await db.execute(select(FeeRule).where(FeeRule.entity_type == 'trader',
@@ -89,3 +95,51 @@ async def assign_trader_plan(db, *, actor, trader, plan_id):
     await audit(db, 'tj_trader_tariff_assigned', 'user', actor.id, trader.id,
                 details={'plan_id': str(plan.id), 'plan_version': plan.version, 'fee_version': version})
     return plan
+
+
+async def personal_plan(db, *, party, entity_id, at=None):
+    """Resolve this cabinet's effective version, with no country/default fallback."""
+    at = at or datetime.now(timezone.utc)
+    return await db.scalar(select(TariffPlan).where(
+        TariffPlan.country == 'TJ', TariffPlan.currency == 'TJS', TariffPlan.direction == 'tj-tj',
+        TariffPlan.basis == 'local_amount', TariffPlan.party == party,
+        TariffPlan.entity_id == entity_id, TariffPlan.is_active.is_(True),
+        TariffPlan.effective_from <= at,
+    ).order_by(TariffPlan.effective_from.desc(), TariffPlan.version.desc()).limit(1))
+
+
+async def save_personal_plan(db, *, actor, party, entity_id, tiers, effective_from):
+    plan = await create_plan(db, actor=actor, party=party, entity_id=entity_id,
+                             tiers=tiers, effective_from=effective_from)
+    if effective_from <= datetime.now(timezone.utc):
+        if party == 'trader':
+            await assign_trader_plan(db, actor=actor, trader=await db.get(User, entity_id), plan_id=plan.id)
+        else:
+            from app.services.merchant_cabinets import apply_ru_plan
+            merchant = await db.get(Merchant, entity_id)
+            await scope_lock(db, f'merchant-cabinet:{merchant.id}')
+            await apply_ru_plan(db, actor, merchant, plan, ['c2c'])
+            merchant.tariff_plan_id = plan.id
+            merchant.payment_methods = ['c2c']
+            await db.flush()
+    return plan
+
+
+async def inline_tariff(db, *, actor, party, entity_id, form):
+    """One transaction with cabinet creation; blank grids create an unready cabinet."""
+    import json
+    raw = str(form.get('tj_tiers') or '').strip()
+    if not raw or raw == '[]':
+        return None
+    try:
+        tiers = json.loads(raw)
+        effective_from = datetime.fromisoformat(str(form.get('tj_effective_from') or '').replace('Z', '+00:00'))
+    except (ValueError, TypeError) as exc:
+        raise CrossBorderError('Проверьте индивидуальные диапазоны и дату действия') from exc
+    return await save_personal_plan(db, actor=actor, party=party, entity_id=entity_id,
+                                   tiers=tiers, effective_from=effective_from)
+
+
+def confirm_parser(form):
+    if str(form.get('tj_parser_confirmed') or '') not in ('on', '1', 'true'):
+        raise CrossBorderError('Подтвердите назначение Bybit P2P Green USDT/TJS')

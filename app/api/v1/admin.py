@@ -98,14 +98,14 @@ def _aggregator_public(account: AggregatorAccount) -> dict:
         'callback_url': account.callback_url,
         'success_url': account.success_url,
         'fail_url': account.fail_url,
-        'commission_percent': account.commission_percent,
+        'commission_percent': None if account.working_country == 'TJ' else account.commission_percent,
         'min_payment_amount': account.min_payment_amount,
         'max_payment_amount': account.max_payment_amount,
         'daily_limit': account.daily_limit,
         'monthly_limit': account.monthly_limit,
-        'balance': account.balance,
-        'hold_balance': account.hold_balance,
-        'total_turnover': account.total_turnover,
+        'balance': None if account.working_country == 'TJ' else account.balance,
+        'hold_balance': None if account.working_country == 'TJ' else account.hold_balance,
+        'total_turnover': None if account.working_country == 'TJ' else account.total_turnover,
         'created_at': account.created_at,
         'updated_at': account.updated_at,
     }
@@ -149,6 +149,8 @@ def _aggregator_callback_public(log: AggregatorCallbackLog) -> dict:
 
 def _apply_aggregator_update(account: AggregatorAccount, data: AggregatorUpdate) -> None:
     fields = data.model_fields_set
+    if account.working_country == 'TJ' and 'commission_percent' in fields and data.commission_percent is not None:
+        raise ValueError('Комиссия TJ задаётся только индивидуальными версиями тарифов')
     if 'name' in fields and data.name is not None:
         account.name = data.name
     if 'callback_url' in fields:
@@ -217,8 +219,17 @@ async def create_merchant(data: MerchantCreate, request: Request, db: AsyncSessi
         await assign_merchant_country(db, actor=actor, merchant=merchant, country=data.country,
                                       parser_id=data.parser_id, business_id=data.business_id)
         from app.services.merchant_cabinets import configure
-        await configure(db, actor=actor, merchant=merchant, currency=data.currency, parser_id=data.parser_id,
-            tariff_plan_id=data.tariff_plan_id, methods=data.payment_methods)
+        if merchant.working_country == 'TJ':
+            from app.services.merchant_cabinets import validate_dimensions
+            from app.services.tj_cabinets import save_personal_plan
+            validate_dimensions('TJ', data.currency, data.parser_id, data.payment_methods)
+            merchant.payment_methods = ['c2c']
+            if data.tariff_tiers:
+                await save_personal_plan(db, actor=actor, party='merchant', entity_id=merchant.id,
+                    tiers=data.tariff_tiers, effective_from=data.tariff_effective_from)
+        else:
+            await configure(db, actor=actor, merchant=merchant, currency=data.currency, parser_id=data.parser_id,
+                tariff_plan_id=data.tariff_plan_id, methods=data.payment_methods)
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(422, str(exc)) from exc
@@ -245,6 +256,8 @@ async def create_aggregator(data: AggregatorCreate, request: Request, db: AsyncS
             db,
             name=data.name,
             country=data.country, actor=actor, tariff_plan_id=data.tariff_plan_id,
+            parser_id=data.parser_id, login_email=data.login_email, login_password=data.login_password,
+            tariff_tiers=data.tariff_tiers, tariff_effective_from=data.tariff_effective_from,
             callback_url=data.callback_url,
             success_url=data.success_url,
             fail_url=data.fail_url,
@@ -333,6 +346,8 @@ async def list_aggregator_callbacks(aggregator_id: UUID, db: AsyncSession=Depend
 
 @router.post('/users')
 async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin, Role.admin))):
+    if data.role == Role.aggregator:
+        raise HTTPException(422, 'Создайте связанный кабинет через /admin/aggregators или единую административную форму')
     if actor.role == Role.admin.value and data.role == Role.admin:
         raise HTTPException(403, 'admin cannot create another admin')
     if data.role == Role.superadmin:
@@ -347,6 +362,10 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
         from app.services.trader_finance import ensure_usdt_wallet
         await ensure_usdt_wallet(db, user.id)
     result={'user_id':user.id,'email':user.email,'role':user.role,'twofa_setup_required':needs_2fa}
+    if user.role == 'trader' and user.working_country == 'TJ' and data.tariff_tiers:
+        from app.services.tj_cabinets import save_personal_plan
+        await save_personal_plan(db, actor=actor, party='trader', entity_id=user.id,
+            tiers=data.tariff_tiers, effective_from=data.tariff_effective_from)
     if data.role == Role.merchant:
         merchant=Merchant(owner_id=user.id, name=data.merchant_name or data.email, webhook_url=None, ip_whitelist=[], sandbox_mode=True)
         db.add(merchant); await db.flush()
@@ -355,9 +374,20 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
             await assign_merchant_country(db, actor=actor, merchant=merchant, country=data.merchant_country,
                 parser_id=data.merchant_parser_id, business_id=data.business_id)
             from app.services.merchant_cabinets import configure
-            await configure(db, actor=actor, merchant=merchant, currency=data.merchant_currency,
-                parser_id=data.merchant_parser_id, tariff_plan_id=data.merchant_tariff_plan_id,
-                methods=data.merchant_payment_methods)
+            if merchant.working_country == 'TJ':
+                from app.services.merchant_cabinets import validate_dimensions
+                from app.services.tj_cabinets import save_personal_plan
+                validate_dimensions('TJ', data.merchant_currency, data.merchant_parser_id, data.merchant_payment_methods)
+                if data.merchant_tariff_plan_id:
+                    raise ValueError('Для нового TJ задайте индивидуальные диапазоны вместо общего тарифа')
+                merchant.payment_methods = ['c2c']
+                if data.tariff_tiers:
+                    await save_personal_plan(db, actor=actor, party='merchant', entity_id=merchant.id,
+                        tiers=data.tariff_tiers, effective_from=data.tariff_effective_from)
+            else:
+                await configure(db, actor=actor, merchant=merchant, currency=data.merchant_currency,
+                    parser_id=data.merchant_parser_id, tariff_plan_id=data.merchant_tariff_plan_id,
+                    methods=data.merchant_payment_methods)
         except ValueError as exc:
             await db.rollback()
             raise HTTPException(422, str(exc)) from exc

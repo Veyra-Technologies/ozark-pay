@@ -1373,15 +1373,31 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
         return _twofa_redirect()
     allowed = []
     if actor.role == Role.superadmin.value:
-        allowed = [Role.admin.value, Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value]
+        allowed = [Role.admin.value, Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value, Role.aggregator.value]
     elif actor.role == Role.admin.value:
-        allowed = [Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value]
+        allowed = [Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value, Role.aggregator.value]
     if role not in allowed:
         return _redirect('permission_denied', 'create')
     email = email.strip().lower()
     exists = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if exists:
         return _redirect('email_exists', 'create')
+    submitted = await request.form()
+    if role == Role.aggregator.value:
+        from app.web.tj_create import create_aggregator_from_form
+        try:
+            return await create_aggregator_from_form(request, db, actor, email, password, submitted)
+        except ValueError as exc:
+            await db.rollback()
+            raise HTTPException(422, str(exc)) from exc
+    if (role == 'merchant' and merchant_country == 'TJ') or (role == 'trader' and working_country == 'TJ'):
+        from app.services.tj_cabinets import confirm_parser
+        try:
+            confirm_parser(submitted)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if len(password) < 12:
+            raise HTTPException(422, 'Пароль должен содержать не менее 12 символов')
     user = User(email=email, password_hash=hash_password(password), role=role, twofa_enabled=False, twofa_secret=None)
     try:
         parent_id = UUID(trader_account_id_value) if trader_account_id_value else None
@@ -1404,8 +1420,17 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
             await assign_merchant_country(db, actor=actor, merchant=m, country=merchant_country,
                 parser_id=merchant_parser_id, business_id=UUID(business_id) if business_id else None)
             from app.services.merchant_cabinets import configure
-            await configure(db, actor=actor, merchant=m, currency=merchant_currency, parser_id=merchant_parser_id,
-                tariff_plan_id=merchant_tariff_plan_id, methods=merchant_payment_methods)
+            if m.working_country == 'TJ':
+                from app.services.merchant_cabinets import validate_dimensions
+                from app.services.tj_cabinets import inline_tariff
+                validate_dimensions('TJ', merchant_currency, merchant_parser_id, merchant_payment_methods)
+                if merchant_tariff_plan_id:
+                    raise ValueError('Введите индивидуальную сетку нового кабинета вместо общего тарифа')
+                m.payment_methods = ['c2c']
+                await inline_tariff(db, actor=actor, party='merchant', entity_id=m.id, form=submitted)
+            else:
+                await configure(db, actor=actor, merchant=m, currency=merchant_currency, parser_id=merchant_parser_id,
+                    tariff_plan_id=merchant_tariff_plan_id, methods=merchant_payment_methods)
         except ValueError as exc:
             await db.rollback()
             return _redirect(str(exc), 'create')
@@ -1414,6 +1439,13 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
         db.add(ApiKey(merchant_id=m.id, api_key=api_key, secret_hash=encrypt_secret(secret_key), mode='sandbox'))
         if m.working_country != 'TJ':
             db.add(Balance(merchant_id=m.id, available=Decimal('0.00'), frozen=Decimal('0.00')))
+    if role == 'trader' and user.working_country == 'TJ':
+        from app.services.tj_cabinets import inline_tariff
+        try:
+            await inline_tariff(db, actor=actor, party='trader', entity_id=user.id, form=submitted)
+        except ValueError as exc:
+            await db.rollback()
+            raise HTTPException(422, str(exc)) from exc
     await audit(db, 'cabinet_user_created', 'user', actor.id, user.id, client_ip(request), {'role': role, 'merchant_api_key_created': bool(api_key)})
     await db.commit()
     if api_key:
@@ -2003,6 +2035,8 @@ async def cabinet_update_aggregator(
         account.success_url = _optional_url(success_url)
         account.fail_url = _optional_url(fail_url)
         if commission_percent.strip():
+            if account.working_country == 'TJ':
+                raise ValueError('Комиссия TJ задаётся индивидуальными версиями тарифов')
             account.commission_percent = percent(safe_decimal(commission_percent, '0'))
         account.min_payment_amount = money(safe_decimal(min_payment_amount, '100'))
         account.max_payment_amount = money(safe_decimal(max_payment_amount, '150000'))
@@ -6348,12 +6382,29 @@ async def role_cabinet(
     from app.web.tj import cabinet_context as tj_context
     tj_merchant = context.get('profile_merchant') or merchant
     tj_trader = context.get('profile_working_account') or trader_subject
+    if role == 'aggregator':
+        tj_merchant = await db.scalar(select(Merchant).where(Merchant.owner_id == user.id, Merchant.working_country == 'TJ'))
     context['tj_cabinet'] = await tj_context(db, merchant=tj_merchant) if tj_merchant and tj_merchant.working_country == 'TJ' else await tj_context(db, trader=tj_trader)
     context['is_tj_cabinet'] = bool(context['tj_cabinet'])
+    if context['is_tj_cabinet'] and role == 'merchant':
+        context['merchant_local_docker_api_base_url'] = (
+            f'http://host.docker.internal:{request.url.port or 80}/api/v1/merchant'
+            if request.url.hostname in ('127.0.0.1', 'localhost') and request.url.scheme == 'http'
+            else context['merchant_api_base_url'])
+    if context['is_tj_cabinet'] and role == 'aggregator':
+        context['sections'] = ['Обзор', 'Операции', 'Кошелёк', 'Статистика', 'Тарифы', 'API-интеграция', 'Безопасность']
+        account = await db.scalar(select(AggregatorAccount).where(AggregatorAccount.platform_merchant_id == tj_merchant.id))
+        context['tj_aggregator'] = account
     if context['is_tj_cabinet'] and role in ('merchant','trader','operator'):
         context['sections'] = [s for s in sections if s not in ('Трансгран','Rolling','Settle — Россия','Settle — Казахстан','Выплаты','Вывод средств')]
         if 'Тарифы' not in context['sections']:
             context['sections'].append('Тарифы')
+    if role in ('admin', 'superadmin'):
+        context['aggregator_tj_tariffs'] = {}
+        for account in aggregator_accounts:
+            if account.working_country == 'TJ':
+                subject = await db.get(Merchant, account.platform_merchant_id)
+                context['aggregator_tj_tariffs'][str(account.id)] = await tj_context(db, merchant=subject)
     return templates.TemplateResponse(request=request, name='cabinet.html', context=context)
 
 

@@ -114,7 +114,7 @@
     document.querySelectorAll(`#${id} tr[data-list-state]`).forEach(row=>{row.hidden=!row.textContent.toLowerCase().includes(query)||(status && status!==row.dataset.listState);});
   }));
   const role=document.querySelector('form[action$="/users/create"] select[name=role]');
-  function roleFields(){document.querySelectorAll('[data-role-fields]').forEach(group=>{const shown=group.dataset.roleFields===role.value;group.hidden=!shown;group.querySelectorAll('input,select').forEach(field=>{field.disabled=!shown;field.required=shown&&!field.hasAttribute('data-optional');});});}
+  function roleFields(){document.querySelectorAll('[data-role-fields]').forEach(group=>{const shown=group.dataset.roleFields.split(' ').includes(role.value);group.hidden=!shown;group.querySelectorAll('input,select').forEach(field=>{field.disabled=!shown;field.required=shown&&!field.hasAttribute('data-optional');});});}
   if(role){role.addEventListener('change',roleFields);roleFields();}
   const revealActive=()=>document.querySelectorAll('.nav-section').forEach(group=>{if(group.querySelector('.active')) group.open=true;});
   revealActive();window.addEventListener('hashchange',revealActive);

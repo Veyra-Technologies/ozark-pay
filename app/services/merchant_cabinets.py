@@ -26,7 +26,7 @@ async def validate_plan(db, merchant, plan_id):
             or plan.effective_from > datetime.now(timezone.utc)
             or (plan.country == 'KZ' and (plan.basis != 'base_usdt' or plan.direction != 'kz-ge'))
             or (plan.country == 'RU' and (plan.basis != 'local_amount' or plan.direction != 'ru'))
-            or (plan.country == 'TJ' and (plan.basis != 'local_amount' or plan.direction != 'tj-tj' or plan.currency != 'TJS'))):
+            or (plan.country == 'TJ' and (plan.entity_id != merchant.id or plan.basis != 'local_amount' or plan.direction != 'tj-tj' or plan.currency != 'TJS'))):
         raise CrossBorderError('Тариф не принадлежит стране и кабинету либо ещё не действует')
     return plan
 

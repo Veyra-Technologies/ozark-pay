@@ -116,7 +116,7 @@ async def create_aggregator_payment(
             idempotency_key=idem,
         )
     except AggregatorError as exc:
-        status_code = 503 if str(exc) == 'rolling_rate_unavailable' else 409
+        status_code = 503 if str(exc) in ('rolling_rate_unavailable', 'tj_contract_unconfirmed') else 409
         await log_aggregator_request(db, account, request, status_code)
         await db.commit()
         raise HTTPException(status_code, str(exc))

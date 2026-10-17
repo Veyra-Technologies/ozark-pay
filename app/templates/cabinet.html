@@ -15,12 +15,12 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{{ title }}</title>
 <link rel="stylesheet" href="/static/workspace.css?v=20261011-binance">
-<script src="/static/presentation.js?v=20261003-layout" defer></script>
+<script src="/static/presentation.js?v=20261017-wave2" defer></script>
 <script src="/static/workspace.js?v=1" defer></script>
-<script src="/static/crossborder.js?v=20261012-remediation1" defer></script>
+<script src="/static/crossborder.js?v=20261017-wave2" defer></script>
 <script src="/static/crossborder-live.js?v=20261012-ge-banks1" defer></script>
-<script src="/static/merchant-cabinets.js?v=20261017-tj" defer></script>
-<script src="/static/tj.js?v=20261017-final1" defer></script>
+<script src="/static/merchant-cabinets.js?v=20261017-wave2" defer></script>
+<script src="/static/tj.js?v=20261017-wave2" defer></script>
 <script src="/static/merchant-settlement.js?v=20261012-settle3" defer></script>
 <link rel="stylesheet" href="/static/profiles.css?v=20261012-cabinets1">
 </head>
@@ -78,8 +78,7 @@
   <div class="section-head"><div><span class="eyebrow">OzarkPay / {{ 'Trader' if role in ['operator','trader'] else role|capitalize }}</span><h1>{{ 'Контроль рисков' if 'Risk' in s else ('Журнал действий' if s == 'Audit log' else ('Обзор операций' if s == 'Обзор' else ('Агрегаторы' if s == 'Aggregators' else s))) }}</h1></div><span class="live-status">{{ 'Только просмотр' if role == 'support' else 'Рабочий кабинет' }}</span></div>
   {{ render_ui_message([ui_scope, s]) }}
 
-  {% if s == 'Создать кабинет' and role in ['admin','superadmin'] %}{% include '_tj_tariff_editor.html' %}{% endif %}
-  {% if is_tj_cabinet and s in ['Обзор','Кошелёк','Кошелек','Баланс','Статистика','Тарифы','Журнал баланса','Интеграция казино'] %}
+  {% if is_tj_cabinet and s in ['Обзор','Кошелёк','Кошелек','Баланс','Статистика','Тарифы','Журнал баланса','API-интеграция'] or (is_tj_cabinet and role == 'aggregator' and s == 'Операции') %}
   {% include '_tj_summary.html' %}
   {% elif s == 'Обзор' %}
   {% if role == 'merchant' and merchant %}{% include '_merchant_summary.html' %}{% endif %}
@@ -116,16 +115,18 @@
     <div class="note">2FA по умолчанию включена только у Superadmin. Остальные роли подключают 2FA в разделе «Безопасность».</div>
     <label>Email</label><input name="email" type="email" required placeholder="new@example.com">
     <label>Пароль</label><input name="password" type="password" required minlength="12" placeholder="Введите новый пароль">
-    <label>Роль</label><select name="role">{% if user.role=='superadmin' %}<option value="admin">Admin</option>{% endif %}<option value="support">Support</option><option value="teamlead">TeamLead</option><option value="merchant">Merchant</option><option value="trader">Трейдер</option><option value="operator">Оператор трейдера</option></select>
+    <label>Роль</label><select name="role">{% if user.role=='superadmin' %}<option value="admin">Admin</option>{% endif %}<option value="support">Support</option><option value="teamlead">TeamLead</option><option value="merchant">Merchant</option><option value="aggregator">Aggregator</option><option value="trader">Трейдер</option><option value="operator">Оператор трейдера</option></select>
     <div data-role-fields="trader">{% set creating_trader = true %}{% include '_working_profile_fields.html' %}{% set creating_trader = false %}</div>
     <div data-role-fields="operator"><label>Кабинет трейдера</label><select name="trader_account_id"><option value="">Выберите трейдера</option>{% for trader in trader_users if trader.role == 'trader' or trader.trader_account_id == trader.id %}<option value="{{ trader.id }}">{{ trader.email }} · {{ trader.working_currency or 'Страна не назначена' }}</option>{% endfor %}</select><p class="compact-note">Оператор получает доступ к реквизитам и операциям выбранного трейдера.</p></div>
-    <div data-role-fields="merchant">
+    <div data-role-fields="merchant aggregator">
       {% set country_catalog = crossborder.get('merchant_catalog', {}) %}{% set country_merchant = none %}{% set field_prefix = 'merchant_' %}
       {% include '_merchant_country_fields.html' %}
-      <label>Бизнес-аккаунт</label><select name="business_id" data-optional><option value="">Создать новый бизнес</option>{% for business in crossborder.get('businesses',[]) %}<option value="{{ business.id }}">{{ business.name }}</option>{% endfor %}</select>
-      <p class="compact-note">Для другой страны создаётся отдельный кабинет с отдельным входом, ключами и балансом. Приём новых операций GE вне маршрута KZ → GE пока недоступен.</p>
+      <div data-merchant-business><label>Бизнес-аккаунт</label><select name="business_id" data-optional><option value="">Создать новый бизнес</option>{% for business in crossborder.get('businesses',[]) %}<option value="{{ business.id }}">{{ business.name }}</option>{% endfor %}</select>
+      <p class="compact-note">Для другой страны создаётся отдельный кабинет с отдельным входом, ключами и балансом. Приём новых операций GE вне маршрута KZ → GE пока недоступен.</p></div>
     </div>
-    <label>Название мерчанта/казино, только для Merchant</label><input name="merchant_name" placeholder="Casino Brand">
+    <div data-role-fields="aggregator"><label>Минимальный чек</label><input name="agg_min" type="number" min="10" step="0.01" placeholder="TJS"><label>Максимальный чек</label><input name="agg_max" type="number" min="10" step="0.01" placeholder="TJS"><p>Для TJ укажите пределы явно. Агрегатор сохраняет собственную роль и API.</p></div>
+    {% include '_tj_inline_fields.html' %}
+    <label>Название Merchant / Aggregator</label><input name="merchant_name" placeholder="Casino Brand">
     <button class="primary" type="submit">Создать кабинет</button>
   </form>
   {% else %}<p class="muted">Нет доступа.</p>{% endif %}
@@ -578,6 +579,7 @@
   </table></div>
   {% elif s == 'Интеграция казино' %}
   {% if merchant %}
+  {% if merchant.working_country == 'TJ' %}<div class="panel"><h2>API кабинета TJ · TJS / USDT</h2><p>Метод C2C, минимум 10 TJS. Приём закрыт: Bybit Green и финансовый цикл ещё не приняты. Создание платежа возвращает 503 tj_contract_unconfirmed без заявки и резерва.</p></div>{% endif %}
   <div class="panel connection-panel" data-connection-panel>
     <div class="connection-panel-head">
       <div><span class="eyebrow">Merchant API</span><h2>Данные подключения</h2></div>
@@ -707,7 +709,7 @@
   <div class="panel">
     <h3>Create aggregator</h3>
     <form method="post" action="{{ cabinet_base }}/aggregators/create" data-confirm="Create aggregator account?">{{ csrf_input(request) }}
-      <label>Name</label><input name="name" required placeholder="Aggregator name"><label>Страна кабинета</label><select name="country" data-aggregator-country><option value="RU">Россия · RUB</option><option value="TJ">Таджикистан · TJS</option></select>
+      <label>Name</label><input name="name" required placeholder="Aggregator name"><label>Страна кабинета</label><select name="country" data-aggregator-country><option value="RU">Россия · RUB</option></select>
 <div data-agg-tariff hidden><label>Тариф мерчанта TJ</label><select name="tariff_plan_id"><option value="">Выберите тариф TJ</option>{% for plan in crossborder.get('merchant_catalog', {}).get('TJ',{}).get('plans',[]) if not plan.entity_id %}<option value="{{ plan.id }}">TJ · v{{ plan.version }}</option>{% endfor %}</select><p>Приём TJ остаётся закрытым до финансовой приёмки.</p></div>
 <label>Комиссия агрегатора, %</label><input name="commission_percent" type="number" min="0" max="100" step="0.0001" value="0" required>
       <div class="row"><div><label>Min payment, <span data-agg-currency>RUB</span></label><input name="min_payment_amount" type="number" min="0" step="0.01" value="100"></div><div><label>Max payment, <span data-agg-currency>RUB</span></label><input name="max_payment_amount" type="number" min="1" step="0.01" value="150000"></div></div>
@@ -724,8 +726,8 @@
     <td><b class="cell-ellipsis" title="{{ agg.name }}">{{ agg.name }}</b><div class="cell-mono cell-ellipsis" title="{{ agg.id }}">{{ agg.id }}</div></td>
     <td><span class="cell-mono cell-ellipsis" title="{{ agg.api_key }}">{{ agg.api_key }}</span></td>
     <td>{% if agg.status == 'active' %}<span class="status-pill status-ok">Активен</span>{% elif agg.status == 'blocked' %}<span class="status-pill status-bad">blocked</span>{% else %}<span class="status-pill status-neutral">{{ agg.status|status_label }}</span>{% endif %}</td>
-    <td>{{ (agg.min_payment_amount)|decimal_display }}-{{ (agg.max_payment_amount)|decimal_display }} RUB<div class="compact-note">day {{ (agg.daily_limit or 'none')|decimal_display }} · month {{ (agg.monthly_limit or 'none')|decimal_display }}</div></td>
-    <td>{{ (agg.balance)|decimal_display }} RUB<div class="compact-note">turnover {{ (agg.total_turnover)|decimal_display }} RUB</div></td>
+    <td>{{ (agg.min_payment_amount)|decimal_display }}-{{ (agg.max_payment_amount)|decimal_display }} {{ agg.working_currency or 'RUB' }}<div class="compact-note">day {{ (agg.daily_limit or 'none')|decimal_display }} · month {{ (agg.monthly_limit or 'none')|decimal_display }}</div></td>
+    <td>{% if agg.working_country == 'TJ' %}Отдельный кошелёк TJS / USDT{% else %}{{ (agg.balance)|decimal_display }} RUB{% endif %}<div class="compact-note">{% if agg.working_country == 'TJ' %}Приём закрыт{% else %}turnover {{ (agg.total_turnover)|decimal_display }} RUB{% endif %}</div></td>
     <td><span class="cell-mono cell-ellipsis" title="{{ agg.callback_url or '—' }}">{{ agg.callback_url or '—' }}</span></td>
     <td>
       {% if user.role in ['superadmin','admin'] %}
@@ -749,7 +751,7 @@
       <div class="row"><div><label>Success URL</label><input name="success_url" value="{{ agg.success_url or '' }}"></div><div><label>Fail URL</label><input name="fail_url" value="{{ agg.fail_url or '' }}"></div></div>
       <div class="modal-actions"><button class="secondary" type="button" data-modal-close="aggModal{{ agg.id }}">Отменить</button><button class="primary" type="submit">Сохранить настройки</button></div>
     </form>
-    {% if user.role in ['superadmin','admin'] and agg.status == 'active' and agg.working_country != 'TJ' %}{{ commission_tier_form('Комиссия агрегатора по чекам', 'aggregator', agg.id, cabinet_base ~ '/aggregators/' ~ agg.id ~ '/commission-tiers', commission_tiers_by_entity.get('aggregator:' ~ agg.id, {})) }}{% elif user.role in ['superadmin','admin'] %}<div class="note">Комиссии доступны только для активного агрегатора.</div>{% endif %}
+    {% if user.role in ['superadmin','admin'] and agg.status == 'active' and agg.working_country != 'TJ' %}{{ commission_tier_form('Комиссия агрегатора по чекам', 'aggregator', agg.id, cabinet_base ~ '/aggregators/' ~ agg.id ~ '/commission-tiers', commission_tiers_by_entity.get('aggregator:' ~ agg.id, {})) }}{% elif user.role in ['superadmin','admin'] and agg.working_country == 'TJ' %}{% set tj_tariff_party='merchant' %}{% set tj_tariff_entity=agg.platform_merchant_id %}{% set tj_cabinet=aggregator_tj_tariffs.get(agg.id|string) %}{% include '_tj_tariffs.html' %}{% include '_tj_tariff_editor.html' %}{% elif user.role in ['superadmin','admin'] %}<div class="note">Комиссии доступны только для активного агрегатора.</div>{% endif %}
   </div></div>
   <div id="aggStatusModal{{ agg.id }}" class="modal"><div class="modalbox"><h2>Aggregator status</h2>
     <form method="post" action="{{ cabinet_base }}/aggregators/{{ agg.id }}/status" data-confirm="Change aggregator status?">{{ csrf_input(request) }}
