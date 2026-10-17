@@ -106,6 +106,7 @@ _WEBHOOK_STATUS_LABELS = {
     "dead": "Исчерпан лимит попыток",
 }
 _DEPOSIT_STATUS_LABELS = {
+    'refunded': 'Бухгалтерский возврат',
     "created": "Создано",
     "pending": "Ожидает обработки",
     "appeal_opened": "Открыта апелляция",
@@ -145,6 +146,16 @@ def decimal_display(value: object) -> str:
         return "—"
     amount = abs(amount) if amount == 0 else amount
     return f"{amount:,.2f}".replace(",", " ").replace(".", ",")
+
+
+def usdt_display(value: object) -> str:
+    try:
+        amount = Decimal(str(value or '0')).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)
+        if not amount.is_finite():
+            return '—'
+    except (InvalidOperation, ValueError):
+        return '—'
+    return format(abs(amount) if amount == 0 else amount, ',.8f').replace(',', ' ').replace('.', ',')
 
 
 def money_rub(value: object) -> str:

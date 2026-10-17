@@ -526,6 +526,7 @@ async def create_operation_fee_snapshot(
     executor_rule: FeeRule,
     executor_type: str,
     executor_id: UUID | str,
+    financial_context: dict | None = None,
 ) -> OperationFeeSnapshot:
     existing = (await db.execute(
         select(OperationFeeSnapshot).where(OperationFeeSnapshot.deposit_id == deposit.id)
@@ -571,6 +572,7 @@ async def create_operation_fee_snapshot(
         currency=normalize_currency(deposit.currency),
         payment_method=normalize_method(deposit.method),
         rate_snapshot_at=utcnow(),
+        financial_context=financial_context,
     )
     db.add(snapshot)
     await db.flush()

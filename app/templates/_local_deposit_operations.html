@@ -1,0 +1,29 @@
+<h3>Операции TJ · TJS / USDT</h3>
+{% for op in tj_cabinet.operations %}{% set own = tj_cabinet.operation_finance.get(op.id|string,{}) %}
+<details class="panel" data-local-operation="{{ op.id }}"><summary>{{ op.external_id }} · {{ op.amount|decimal_display }} TJS · {{ op.status|status_label }}</summary>
+<p>ID: {{ op.id }} · {{ op.created_at|dt_compact }}</p>
+<p data-raw-value>База: {{ own.get('base_usdt',0)|usdt_display }} USDT. {{ 'Комиссия' if role == 'merchant' else 'Вознаграждение' }}: {{ own.get('fee_tjs',0)|decimal_display }} TJS / {{ own.get('fee_usdt',0)|usdt_display }} USDT.</p>
+<p data-raw-value>{{ 'К зачислению' if role == 'merchant' else 'Окончательное списание обеспечения' }}: {{ own.get('net_usdt',0)|usdt_display }} USDT.</p>
+<p>Банк / платёжная система: {{ own.get('bank_name') or '—' }}. Статус обеспечения: {{ op.metadata_json.get('trader_hold_status','—') }}.</p>
+{% if role == 'trader' and tj_cabinet.qa_financial and op.status in ['created','pending'] %}
+<form method="post" action="{{ cabinet_base }}/deposits/{{ op.id }}/confirm" data-local-confirmation>
+{{ csrf_input(request) }}{% include '_local_confirmation_fields.html' %}<button type="submit">Подтвердить банковское поступление</button></form>
+{% endif %}
+{% if role == 'trader' and tj_cabinet.qa_financial and op.status in ['created','pending','appeal_opened'] %}
+<details><summary>Проверено отсутствие поступления</summary><form method="post" action="{{ cabinet_base }}/deposits/{{ op.id }}/decline">
+{{ csrf_input(request) }}<label>Основание<input name="reason" minlength="4" maxlength="400" required></label>
+<label>Номер / ссылка на сверку<input name="reference" minlength="4" maxlength="200" required></label>
+<label><input type="checkbox" name="no_credit_confirmed" required> Проверил выписку: поступления нет</label><button type="submit">Завершить без оплаты и освободить резерв</button></form></details>
+{% endif %}
+{% if role == 'merchant' and tj_cabinet.qa_financial and op.status in ['created','pending','cancelled','failed','expired','appeal_opened'] %}
+<details><summary>Апелляция с банковским чеком</summary><form method="post" enctype="multipart/form-data" action="{{ cabinet_base }}/appeals/create" data-local-evidence>
+{{ csrf_input(request) }}<input type="hidden" name="operation_lookup" value="{{ op.id }}"><input type="hidden" name="trader_id" value="{{ own.trader_id }}">
+<input type="hidden" name="recipient_bank" value="{{ own.bank_id }}"><input type="hidden" name="requisite" value="{{ own.requisite }}">
+<label>Сумма по чеку, TJS<input type="number" name="amount" min="0.01" step="0.01" value="{{ op.amount }}" required></label>
+<label>Дата / время операции<input type="datetime-local" step="1" data-local-time required></label>
+<input type="hidden" name="operation_date" data-local-time-iso>
+<label>Банковский чек<input type="file" name="receipt_file" accept=".png,.jpg,.jpeg,.pdf,.webp" required></label>
+<label>Комментарий<input name="message" maxlength="2000"></label><button type="submit">Передать на разбирательство</button></form></details>
+{% endif %}
+</details>{% else %}<p>Операций пока нет.</p>{% endfor %}
+{% if role == 'merchant' %}<p>Создание и запрос отмены — через подписанный Merchant API. При неизвестном банковском результате резерв сохраняется до разбирательства.</p>{% endif %}

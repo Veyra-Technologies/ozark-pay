@@ -820,6 +820,12 @@ async def review_kyc(
 @router.post('/deposits/{deposit_id}/confirm')
 async def confirm_deposit(deposit_id: str, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin))):
     try:
+        try:
+            bank_confirmation = await request.json()
+        except ValueError:
+            bank_confirmation = None
+        if not isinstance(bank_confirmation, dict):
+            bank_confirmation = None
         result = await confirm_deposit_payment(
             db,
             deposit_id,
@@ -827,6 +833,7 @@ async def confirm_deposit(deposit_id: str, request: Request, db: AsyncSession=De
             actor_ip=client_ip(request),
             audit_action='deposit_confirmed',
             description='manual deposit confirmation',
+            bank_confirmation=bank_confirmation,
         )
     except DepositConfirmationError as exc:
         raise HTTPException(exc.status_code, exc.api_detail) from exc

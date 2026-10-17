@@ -96,6 +96,10 @@ async def resolve_deposit_trader(db: AsyncSession, dep: Deposit, trader_id: str 
 
 
 async def settle_trader_for_approved_appeal(db: AsyncSession, dep: Deposit, trader_id: str | UUID | None = None) -> User | None:
+    if dep.currency == 'TJS':
+        from app.services.local_deposit_policy import trader_movement
+        released = (dep.metadata_json or {}).get('trader_hold_status') == 'released'
+        return await trader_movement(db, dep, 'debit', available=released)
     req, trader = await resolve_deposit_trader(db, dep, trader_id)
     if not trader:
         return None
@@ -190,6 +194,13 @@ async def approve_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id=N
     if appeal.operation_type != 'deposit':
         raise ValueError('only deposit appeals can be approved from cabinet')
     dep, appeal = await _lock_deposit_then_appeal(db, appeal)
+    if dep.currency == 'TJS' and automatic:
+        raise ValueError('TJ нельзя подтверждать по таймеру')
+    if dep.currency == 'TJS':
+        from app.models import User
+        actor = await db.get(User, actor_id) if actor_id else None
+        if not actor or actor.role not in ('admin','superadmin') or not actor.is_active or actor.is_locked or actor.is_archived:
+            raise ValueError('Финансовое решение апелляции TJ требует Admin/SuperAdmin')
     if appeal.status not in {
         AppealStatus.opened.value,
         AppealStatus.in_review.value,
@@ -209,12 +220,8 @@ async def approve_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id=N
         raise ValueError('appeal finance has already been applied')
     trader_id = meta.get('trader_id')
     await settle_trader_for_approved_appeal(db, dep, trader_id)
-    await reopen_released_allocation(
-        db,
-        dep,
-        reason='appeal approved',
-        idempotency_suffix=str(appeal.id),
-    )
+    if dep.currency != 'TJS':
+        await reopen_released_allocation(db, dep, reason='appeal approved', idempotency_suffix=str(appeal.id))
     dep.status = DepositStatus.paid.value
     settlement = await settle_deposit_credit(
         db,
@@ -271,6 +278,7 @@ async def reject_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id, d
 async def approve_expired_appeals(db: AsyncSession) -> list:
     rows = (await db.execute(
         select(Appeal)
+        .where(Appeal.operation_id.not_in(select(Deposit.id).where(Deposit.currency == 'TJS')))
         .where(Appeal.status == AppealStatus.opened.value, Appeal.evidence_validated.is_(True))
         .order_by(Appeal.created_at.asc())
         .limit(200)

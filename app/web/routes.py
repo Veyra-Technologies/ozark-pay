@@ -64,6 +64,7 @@ from app.core.payment_methods import PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_REQU
 from app.core.requisite_providers import get_requisite_provider_display, get_requisite_provider_label, get_requisite_provider_type, requisite_provider_display, requisite_provider_label, resolve_requisite_provider
 from app.core.russian_banks import RF_BANKS, get_bank_display_name, get_enabled_banks, normalize_bank_name
 from app.api.deps import STAFF_2FA_ROLES
+from app.web.view_models import decimal_display, status_label, usdt_display
 from app.services.audit import audit
 from app.services.appeals import APPEAL_REVIEW_TTL, TRADER_REJECTION_REASONS, appeal_deadline, appeal_remaining_seconds, approve_deposit_appeal, approve_expired_appeals, default_deadline, metadata as appeal_metadata, reject_deposit_appeal, set_metadata as set_appeal_metadata
 from app.services.antiscam import (
@@ -337,8 +338,8 @@ templates.env.filters['provider_label'] = requisite_provider_label
 templates.env.filters['dt_compact'] = dt_compact
 templates.env.filters['dt_full'] = dt_full
 templates.env.filters['money_rub'] = money_rub
-from app.web.view_models import decimal_display, status_label
 templates.env.filters['decimal_display'] = decimal_display
+templates.env.filters['usdt_display'] = usdt_display
 templates.env.filters['status_label'] = status_label
 templates.env.filters['short_identifier'] = short_identifier
 templates.env.filters['deposit_status_label'] = deposit_status_label
@@ -2475,7 +2476,9 @@ async def can_confirm_deposit(db: AsyncSession, user: User, deposit: Deposit) ->
 
 
 @router.post('/cabinet/deposits/{deposit_id}/confirm')
-async def cabinet_confirm_deposit(deposit_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+async def cabinet_confirm_deposit(deposit_id: str, request: Request,
+    actual_amount: str = Form(''), received_at: str = Form(''), requisite_id: str = Form(''),
+    reference: str = Form(''), bank_credit_confirmed: str = Form(''), db: AsyncSession = Depends(get_db)):
     user = await get_current_web_user(request, db)
     if not user:
         return RedirectResponse('/login', status_code=303)
@@ -2498,6 +2501,8 @@ async def cabinet_confirm_deposit(deposit_id: str, request: Request, db: AsyncSe
             actor_ip=client_ip(request),
             audit_action='deposit_confirmed_from_cabinet',
             description='cabinet deposit confirmation',
+            bank_confirmation={'amount':actual_amount,'received_at':received_at,'requisite_id':requisite_id,
+                'reference':reference,'bank_credit_confirmed':bank_credit_confirmed=='on'} if dep.currency=='TJS' else None,
         )
     except DepositConfirmationSystemError as exc:
         return _redirect('deposit_action_failed', 'deposits')
@@ -2519,6 +2524,7 @@ async def cabinet_decline_deposit(
     deposit_id: str,
     request: Request,
     reason: str = Form(''),
+    no_credit_confirmed: str = Form(''), reference: str = Form(''),
     db: AsyncSession = Depends(get_db),
 ):
     user = await get_current_web_user(request, db)
@@ -2526,11 +2532,12 @@ async def cabinet_decline_deposit(
         return RedirectResponse('/login', status_code=303)
     if staff_2fa_setup_required(user):
         return _twofa_redirect()
-    if user.role not in [Role.superadmin.value, Role.admin.value]:
+    if user.role not in [Role.superadmin.value, Role.admin.value, Role.trader.value]:
         raise HTTPException(403, 'Only admin or superadmin may decline a deposit')
     reason = reason.strip()
     if user.role == Role.superadmin.value and not reason:
         raise HTTPException(422, 'Decline reason is required')
+    submitted_reason = reason
     reason = reason or 'admin_decline'
     try:
         deposit_uuid = uuid.UUID(deposit_id)
@@ -2541,17 +2548,31 @@ async def cabinet_decline_deposit(
     )).scalar_one_or_none()
     if not dep:
         return _redirect('deposit_not_found', 'deposits')
-    result = await finalize_unsuccessful_deposit(
-        db,
-        dep,
-        reason=f'manual_decline:{reason[:400]}',
-        target_status=DepositStatus.failed.value,
-        actor_id=user.id,
-        actor_role=user.role,
-        actor_ip=client_ip(request),
-        request_id=request.headers.get('X-Request-ID'),
-        audit_action='deposit_declined_from_cabinet',
-    )
+    if user.role == Role.trader.value and (dep.currency != 'TJS' or not await can_confirm_deposit(db,user,dep)):
+        raise HTTPException(403,'Нет доступа к этой операции')
+    if dep.currency == 'TJS':
+        if (no_credit_confirmed != 'on' or not 4 <= len(reference.strip()) <= 200
+                or not 4 <= len(submitted_reason) <= 400):
+            raise HTTPException(422,'Нужны проверка отсутствия поступления, основание и ссылка на сверку')
+        dep.metadata_json = {**(dep.metadata_json or {}), 'local_no_credit': {
+            'confirmed':True,'reference':reference.strip(),'actor_id':str(user.id)}}
+    try:
+        result = await finalize_unsuccessful_deposit(
+            db,
+            dep,
+            reason=f'manual_decline:{reason[:400]}',
+            target_status=DepositStatus.failed.value,
+            actor_id=user.id,
+            actor_role=user.role,
+            actor_ip=client_ip(request),
+            request_id=request.headers.get('X-Request-ID'),
+            audit_action='deposit_declined_from_cabinet',
+        )
+    except ValueError as exc:
+        if dep.currency != 'TJS':
+            raise
+        await db.rollback()
+        raise HTTPException(409,str(exc)) from exc
     await db.commit()
     webhook_enqueued = bool(
         result.webhook_event_id
@@ -5958,7 +5979,7 @@ async def role_cabinet(
             'statement_name': (meta.get('statement_file') or {}).get('original_name', 'выписка'),
             'deadline_iso': appeal_deadline(appeal).isoformat(),
             'remaining_seconds': remaining,
-            'is_timer_active': remaining > 0 and appeal.status == AppealStatus.opened.value and not meta.get('trader_decision'),
+            'is_timer_active': (not dep or dep.currency != 'TJS') and remaining > 0 and appeal.status == AppealStatus.opened.value and not meta.get('trader_decision'),
             'trader_rejection_reason_label': meta.get('trader_rejection_reason_label', ''),
             'corrected_amount': meta.get('corrected_amount', ''),
             'previous_deposit_status': meta.get('previous_deposit_status', ''),

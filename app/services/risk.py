@@ -67,6 +67,7 @@ async def assess_operation(
     method: str,
     ip: str | None = None,
     destination: str | None = None,
+    currency: str = 'RUB',
 ) -> RiskResult:
     score = 0
     reasons: list[str] = []
@@ -83,12 +84,15 @@ async def assess_operation(
     if destination_hit:
         return RiskResult(100, RiskDecision.deny, f'blacklist hit: {destination_hit.kind}', {'blacklist_id': str(destination_hit.id), 'reason': destination_hit.reason})
 
-    rules = (await db.execute(
-        select(LimitRule).where(
+    rule_query = select(LimitRule).where(
             or_(LimitRule.merchant_id == merchant_id, LimitRule.merchant_id.is_(None)),
             or_(LimitRule.method == method, LimitRule.method.is_(None)),
         )
-    )).scalars().all()
+    if currency == 'TJS':
+        # Legacy global monetary rules have RUB semantics and no currency column.
+        # Cabinet-specific limits have the immutable cabinet's currency.
+        rule_query = rule_query.where(LimitRule.merchant_id == merchant_id)
+    rules = (await db.execute(rule_query)).scalars().all()
     for rule in rules:
         if amount < rule.min_amount or amount > rule.max_amount:
             return RiskResult(90, RiskDecision.deny, 'amount outside configured limits', {'limit_rule_id': str(rule.id)})
@@ -106,7 +110,7 @@ async def assess_operation(
             if Decimal(total) + amount > rule.daily_amount:
                 return RiskResult(95, RiskDecision.deny, 'daily merchant limit exceeded', {'limit_rule_id': str(rule.id), 'daily_used': str(total)})
 
-    if amount >= Decimal('500000.00'):
+    if currency == 'RUB' and amount >= Decimal('500000.00'):
         score += 50
         reasons.append('large amount')
     if ip is None:
@@ -153,7 +157,7 @@ async def assess_operation(
                 if destination_count >= 10:
                     score += 15
                     reasons.append('high destination velocity')
-    if amount == amount.quantize(Decimal('1')) and str(amount).endswith('000.00') and amount >= Decimal('10000.00'):
+    if currency == 'RUB' and amount == amount.quantize(Decimal('1')) and str(amount).endswith('000.00') and amount >= Decimal('10000.00'):
         score += 5
         reasons.append('round amount pattern')
     appeals_count = (await db.execute(

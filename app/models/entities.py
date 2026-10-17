@@ -1832,6 +1832,7 @@ class FeeRule(Base, TimestampMixin):
     version: Mapped[int]=mapped_column(Integer, default=1)
     created_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
     updated_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
+    country_tariff_plan_id: Mapped[uuid.UUID|None]=mapped_column(ForeignKey('country_tariff_plans.id', ondelete='RESTRICT'), nullable=True)
     __table_args__=(
         CheckConstraint(
             "entity_type IN ('merchant','trader','aggregator','external_processor')",
@@ -1899,6 +1900,7 @@ class OperationFeeSnapshot(Base, TimestampMixin):
     settlement_status: Mapped[str]=mapped_column(String(32), default='pending', index=True)
     settled_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     ledger_reference: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
+    financial_context: Mapped[dict|None]=mapped_column(JSON(none_as_null=True), nullable=True)
     __table_args__=(
         UniqueConstraint(
             'deposit_id',

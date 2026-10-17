@@ -561,6 +561,9 @@ async def _finalize_unsuccessful_deposit(
     reason = (reason or '').strip()
     if not reason:
         raise ValueError('deposit finalization reason is required')
+    if deposit.currency == 'TJS':
+        from app.services.local_deposit_policy import require_execution
+        await require_execution(db)
     old_status = deposit.status
     if old_status not in ACTIVE_DEPOSIT_STATUSES:
         return DepositFinalizationResult(
@@ -569,6 +572,28 @@ async def _finalize_unsuccessful_deposit(
             status=old_status,
             reason=reason,
         )
+
+    if deposit.currency == 'TJS':
+        from app.services.local_deposit_policy import snapshot
+        fixed = await snapshot(db, deposit)
+        proof = (deposit.metadata_json or {}).get('local_no_credit') or {}
+        actor = await db.get(User, actor_id) if actor_id else None
+        negative_review = (actor and actor.is_active and not actor.is_locked and not actor.is_archived
+            and (actor.role in ('admin', 'superadmin') or (actor.role == 'trader' and actor.id == fixed.executor_id))
+            and proof.get('actor_id') == str(actor.id) and proof.get('confirmed') is True
+            and len(str(proof.get('reference') or '').strip()) >= 4
+            and not (deposit.metadata_json or {}).get('local_confirmation'))
+        if negative_review and await db.scalar(select(Appeal.id).where(
+                Appeal.operation_id == deposit.id, Appeal.status.in_(('opened', 'in_review'))).limit(1)):
+            raise ValueError('Сначала завершите активную апелляцию')
+        if not negative_review:
+            deposit.status = DepositStatus.appeal_opened.value
+            deposit.metadata_json = {**(deposit.metadata_json or {}), 'local_bank_result_unknown': True,
+                'local_review_reason': reason, 'local_review_requested_at': utcnow().isoformat()}
+            await audit(db, 'local_deposit_bank_result_unknown', 'deposit', actor_id, deposit.id,
+                        actor_ip, {'reason':reason, 'reserve_released':False})
+            return DepositFinalizationResult(deposit_id=deposit.id, changed=old_status != deposit.status,
+                status=deposit.status, reason='bank_result_unknown')
 
     deposit.status = target_status
     finalized_at = utcnow()
@@ -585,7 +610,8 @@ async def _finalize_unsuccessful_deposit(
     # Global lock order: Deposit -> Requisite/Trader -> Rolling account/allocation.
     if release_trader_hold:
         await release_trader_deposit_hold(db, deposit)
-    await release_pending_allocation(db, deposit, reason=reason)
+    if deposit.currency != 'TJS':
+        await release_pending_allocation(db, deposit, reason=reason)
     await check_payment_result_for_risk(db, deposit)
     # PostgreSQL server_onupdate expires updated_at after autoflush. Refresh it
     # explicitly so the synchronous webhook snapshot builder never triggers
@@ -663,6 +689,26 @@ async def finalize_unsuccessful_deposit(
         audit_action=audit_action,
         release_trader_hold=True,
     )
+
+
+async def refund_deposit(db, deposit_id, *, actor, reason, reference):
+    """Use the Deposit lock/outbox/audit for a reviewed local accounting inverse."""
+    from app.services.local_deposit_policy import reverse_credit
+    deposit = await db.scalar(select(Deposit).where(Deposit.id == deposit_id)
+        .with_for_update().execution_options(populate_existing=True))
+    if not deposit or deposit.currency != 'TJS':
+        raise ValueError('Локальная операция TJ не найдена')
+    changed = await reverse_credit(db, deposit, actor=actor, reason=reason, reference=reference)
+    event = None
+    if changed:
+        await audit(db, 'local_deposit_accounting_refund', 'deposit', actor.id, deposit.id,
+                    details={'reason':reason, 'reference':reference, 'bank_transfer_executed':False})
+        await db.flush()
+        await db.refresh(deposit, attribute_names=['updated_at'])
+        event = await queue_webhook(db, deposit.merchant_id, 'deposit.refunded',
+            build_deposit_webhook_payload(deposit, 'deposit.refunded', {'accounting_refund':True}))
+    return DepositFinalizationResult(deposit_id=deposit.id, changed=changed, status=deposit.status,
+        reason=reason, webhook_event_id=event.id if event else None)
 
 
 async def repair_legacy_pending_without_hold(

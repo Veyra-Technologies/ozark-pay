@@ -64,18 +64,20 @@ def validate_receipt(receipt, *, root=None):
             raise ValueError('Неверный формат чека')
 
 
-def validated_fields(*, amount, requisite, recipient_bank, operation_date, receipt, root=None):
+def validated_fields(*, amount, requisite, recipient_bank, operation_date, receipt, root=None, country='RU'):
     amount = local_amount(amount)
     if not 4 <= len(requisite.strip()) <= 300:
         raise ValueError('Укажите реквизиты получателя')
-    bank = normalize_bank_name(recipient_bank)
+    bank = (recipient_bank if recipient_bank in ('tj-dushanbe-city','tj-korti-milli') else '') if country == 'TJ' else normalize_bank_name(recipient_bank)
     if not bank:
         raise ValueError('Выберите банк из справочника')
     try:
         paid_at = datetime.fromisoformat(operation_date)
     except (ValueError, TypeError) as exc:
         raise ValueError('Укажите корректную дату операции') from exc
-    if paid_at.date() > datetime.now(timezone.utc).date():
+    if country == 'TJ' and (not paid_at.tzinfo or paid_at > datetime.now(timezone.utc)):
+        raise ValueError('Укажите время поступления с часовым поясом, не в будущем')
+    if country != 'TJ' and paid_at.date() > datetime.now(timezone.utc).date():
         raise ValueError('Дата операции не может быть в будущем')
     validate_receipt(receipt, root=root)
     return {'amount_claimed': str(amount), 'requisite': requisite.strip(), 'recipient_bank': bank,
@@ -93,17 +95,26 @@ async def create_deposit_appeal(db, *, user, deposit_id, trader_id, amount, requ
     merchant = await db.get(Merchant, dep.merchant_id) if dep else None
     if not merchant or merchant.owner_id != user.id:
         raise ValueError('Операция не найдена')
-    if dep.currency != 'RUB':
+    if dep.currency == 'TJS':
+        from app.services.local_deposit_policy import require_execution
+        await require_execution(db)
+        if dep.status in ('paid','refunded'):
+            raise ValueError('Оплаченная или возвращённая операция не является неоплаченным пополнением')
+    elif dep.currency != 'RUB':
         raise ValueError('Для валютной операции требуется ручное разбирательство без автоматического расчёта RUB')
     req = await db.get(Requisite, dep.requisites_id) if dep.requisites_id else None
     if not req or not req.trader_id or str(req.trader_id) != str(trader_id):
         raise ValueError('Трейдер должен совпадать с назначенным исполнителем сделки')
+    if dep.currency == 'TJS':
+        await require_tj_receipt_match(db,dep,amount=amount,requisite=requisite,
+            recipient_bank=recipient_bank,operation_date=operation_date)
     duplicate = (await db.execute(select(Appeal.id).where(Appeal.operation_type == 'deposit',
         Appeal.operation_id == dep.id, Appeal.status.in_(('opened', 'in_review'))).limit(1))).scalar_one_or_none()
     if duplicate:
         raise ValueError('По этой сделке уже есть активная апелляция')
     fields = validated_fields(amount=amount, requisite=requisite, recipient_bank=recipient_bank,
-                              operation_date=operation_date, receipt=receipt, root=root)
+                              operation_date=operation_date, receipt=receipt, root=root,
+                              country='TJ' if dep.currency == 'TJS' else 'RU')
     previous = dep.status
     if dep.status != 'paid':
         dep.status = 'appeal_opened'
@@ -122,10 +133,28 @@ async def create_deposit_appeal(db, *, user, deposit_id, trader_id, amount, requ
 
 async def require_approval_evidence(db, appeal, dep):
     meta = appeal.metadata_json or {}
-    if not appeal.evidence_validated or meta.get('validation_version') != 1 or dep.currency != 'RUB':
+    if not appeal.evidence_validated or meta.get('validation_version') != 1 or dep.currency not in ('RUB','TJS'):
         raise ValueError('Апелляция требует проверки доказательств; финансовое одобрение заблокировано')
     validated_fields(amount=meta.get('amount_claimed'), requisite=meta.get('requisite') or '',
-        recipient_bank=meta.get('recipient_bank'), operation_date=meta.get('operation_date'), receipt=meta.get('receipt_file'))
+        recipient_bank=meta.get('recipient_bank'), operation_date=meta.get('operation_date'), receipt=meta.get('receipt_file'),
+        country='TJ' if dep.currency == 'TJS' else 'RU')
     req = await db.get(Requisite, dep.requisites_id) if dep.requisites_id else None
     if not req or not req.trader_id or str(req.trader_id) != meta.get('trader_id'):
         raise ValueError('Исполнитель апелляции не совпадает с исполнителем сделки')
+    if dep.currency == 'TJS':
+        from app.services.local_deposit_policy import require_execution
+        await require_execution(db)
+        await require_tj_receipt_match(db,dep,amount=meta['amount_claimed'],requisite=meta['requisite'],
+            recipient_bank=meta['recipient_bank'],operation_date=meta['operation_date'])
+
+
+async def require_tj_receipt_match(db,dep,*,amount,requisite,recipient_bank,operation_date):
+    from app.core.security import reveal_text
+    from app.services.local_deposit_policy import snapshot
+    fixed=(await snapshot(db,dep)).financial_context['requisite']
+    paid_at=datetime.fromisoformat(operation_date)
+    created_at=dep.created_at if dep.created_at.tzinfo else dep.created_at.replace(tzinfo=timezone.utc)
+    if (not paid_at.tzinfo or not created_at <= paid_at <= datetime.now(timezone.utc)
+            or local_amount(amount) != dep.amount or recipient_bank != fixed['bank_id']
+            or ''.join(str(requisite).split()) != ''.join(reveal_text(fixed['value_encrypted']).split())):
+        raise ValueError('Сумма, время и банковские реквизиты TJ должны совпадать с принятой заявкой')

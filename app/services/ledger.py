@@ -9,9 +9,9 @@ class LedgerError(Exception): pass
 TWOPLACES = Decimal('0.01')
 
 
-def _money(value, *, allow_zero: bool = False) -> Decimal:
+def _money(value, *, allow_zero: bool = False, currency='RUB') -> Decimal:
     try:
-        amount = Decimal(value if value is not None else '0.00').quantize(TWOPLACES, rounding=ROUND_HALF_UP)
+        amount = Decimal(value if value is not None else '0.00').quantize(Decimal('.00000001') if currency == 'USDT' else TWOPLACES, rounding=ROUND_HALF_UP)
     except (InvalidOperation, ValueError, TypeError) as exc:
         raise LedgerError('invalid amount') from exc
     if allow_zero:
@@ -37,7 +37,7 @@ def _assert_merchant_entry(existing: LedgerEntry, *, merchant_id, amount: Decima
         raise LedgerError('ledger idempotency type mismatch')
     if existing.currency != currency:
         raise LedgerError('ledger idempotency currency mismatch')
-    if _money(existing.amount) != amount:
+    if _money(existing.amount, currency=currency) != amount:
         raise LedgerError('ledger idempotency amount mismatch')
     if operation_id is not None and not _same_id(existing.operation_id, operation_id):
         raise LedgerError('ledger idempotency operation mismatch')
@@ -54,12 +54,14 @@ def _assert_trader_entry(existing: TraderLedgerEntry, *, trader: User, amount: D
         raise LedgerError('trader ledger idempotency operation mismatch')
 
 
-def _assert_platform_entry(existing: PlatformLedgerEntry, *, merchant_id, amount: Decimal, entry_type: str, operation_id=None) -> None:
+def _assert_platform_entry(existing: PlatformLedgerEntry, *, merchant_id, amount: Decimal, entry_type: str, operation_id=None, currency='RUB') -> None:
+    if existing.currency != currency:
+        raise LedgerError('platform ledger currency mismatch')
     if merchant_id is not None and not _same_id(existing.merchant_id, merchant_id):
         raise LedgerError('platform ledger idempotency target mismatch')
     if existing.entry_type != entry_type:
         raise LedgerError('platform ledger idempotency type mismatch')
-    if _money(existing.amount) != amount:
+    if _money(existing.amount, currency=currency) != amount:
         raise LedgerError('platform ledger idempotency amount mismatch')
     if operation_id is not None and not _same_id(existing.operation_id, operation_id):
         raise LedgerError('platform ledger idempotency operation mismatch')
@@ -90,20 +92,20 @@ async def get_or_create_balance(db: AsyncSession, merchant_id, currency='RUB') -
         db.add(bal); await db.flush()
     return bal
 
-async def credit(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description=''):
-    amount = _money(amount)
+async def credit(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB'):
+    amount = _money(amount, currency=currency)
     existing = await _find_merchant_entry(db, idempotency_key)
     if existing:
-        _assert_merchant_entry(existing, merchant_id=merchant_id, amount=amount, entry_type=LedgerType.credit.value, operation_id=operation_id)
+        _assert_merchant_entry(existing, merchant_id=merchant_id, amount=amount, currency=currency, entry_type=LedgerType.credit.value, operation_id=operation_id)
         return existing
-    bal = await get_or_create_balance(db, merchant_id)
+    bal = await get_or_create_balance(db, merchant_id, currency)
     bal.available += amount
-    entry = LedgerEntry(merchant_id=merchant_id, operation_id=operation_id, entry_type=LedgerType.credit.value, amount=amount, idempotency_key=idempotency_key, description=description)
+    entry = LedgerEntry(merchant_id=merchant_id, currency=currency, operation_id=operation_id, entry_type=LedgerType.credit.value, amount=amount, idempotency_key=idempotency_key, description=description)
     db.add(entry)
     return entry
 
 async def hold(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB'):
-    amount = _money(amount)
+    amount = _money(amount, currency=currency)
     existing = await _find_merchant_entry(db, idempotency_key)
     if existing:
         if existing.currency != currency:
@@ -119,7 +121,7 @@ async def hold(db, merchant_id, amount: Decimal, operation_id=None, idempotency_
     return entry
 
 async def release_hold(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB'):
-    amount = _money(amount)
+    amount = _money(amount, currency=currency)
     existing = await _find_merchant_entry(db, idempotency_key)
     if existing:
         if existing.currency != currency:
@@ -135,7 +137,7 @@ async def release_hold(db, merchant_id, amount: Decimal, operation_id=None, idem
     return entry
 
 async def debit_frozen(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB'):
-    amount = _money(amount)
+    amount = _money(amount, currency=currency)
     existing = await _find_merchant_entry(db, idempotency_key)
     if existing:
         if existing.currency != currency:
@@ -151,29 +153,30 @@ async def debit_frozen(db, merchant_id, amount: Decimal, operation_id=None, idem
     return entry
 
 
-async def debit_available(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description=''):
-    amount = _money(amount)
+async def debit_available(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB', entry_type=LedgerType.debit.value):
+    amount = _money(amount, currency=currency)
     existing = await _find_merchant_entry(db, idempotency_key)
     if existing:
-        _assert_merchant_entry(existing, merchant_id=merchant_id, amount=amount, entry_type=LedgerType.debit.value, operation_id=operation_id)
+        _assert_merchant_entry(existing, merchant_id=merchant_id, amount=amount, currency=currency, entry_type=entry_type, operation_id=operation_id)
         return existing
-    bal = await get_or_create_balance(db, merchant_id)
+    bal = await get_or_create_balance(db, merchant_id, currency)
     if bal.available < amount:
         raise LedgerError('insufficient funds')
     bal.available -= amount
-    entry = LedgerEntry(merchant_id=merchant_id, operation_id=operation_id, entry_type=LedgerType.debit.value, amount=amount, idempotency_key=idempotency_key, description=description)
+    entry = LedgerEntry(merchant_id=merchant_id, currency=currency, operation_id=operation_id, entry_type=entry_type, amount=amount, idempotency_key=idempotency_key, description=description)
     db.add(entry)
     return entry
-async def record_fee(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description=''):
-    amount = _money(amount, allow_zero=True)
+async def record_fee(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB'):
+    amount = _money(amount, allow_zero=True, currency=currency)
     if amount == 0:
         return None
     existing = await _find_merchant_entry(db, idempotency_key)
     if existing:
-        _assert_merchant_entry(existing, merchant_id=merchant_id, amount=amount, entry_type=LedgerType.fee.value, operation_id=operation_id)
+        _assert_merchant_entry(existing, merchant_id=merchant_id, amount=amount, currency=currency, entry_type=LedgerType.fee.value, operation_id=operation_id)
         return existing
     entry = LedgerEntry(
         merchant_id=merchant_id,
+        currency=currency,
         operation_id=operation_id,
         entry_type=LedgerType.fee.value,
         amount=amount,
@@ -184,16 +187,17 @@ async def record_fee(db, merchant_id, amount: Decimal, operation_id=None, idempo
     return entry
 
 
-async def record_platform_income(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description=''):
-    amount = _money(amount, allow_zero=True)
+async def record_platform_income(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB'):
+    amount = _money(amount, allow_zero=True, currency=currency)
     if amount == 0:
         return None
     existing = await _find_platform_entry(db, idempotency_key)
     if existing:
-        _assert_platform_entry(existing, merchant_id=merchant_id, amount=amount, entry_type='platform_income', operation_id=operation_id)
+        _assert_platform_entry(existing, merchant_id=merchant_id, amount=amount, currency=currency, entry_type='platform_income', operation_id=operation_id)
         return existing
     entry = PlatformLedgerEntry(
         merchant_id=merchant_id,
+        currency=currency,
         operation_id=operation_id,
         entry_type='platform_income',
         amount=amount,
@@ -270,8 +274,8 @@ async def record_platform_teamlead_expense_reversal(
     return entry
 
 
-async def record_platform_executor_fee(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description=''):
-    amount = _money(amount, allow_zero=True)
+async def record_platform_executor_fee(db, merchant_id, amount: Decimal, operation_id=None, idempotency_key=None, description='', *, currency='RUB'):
+    amount = _money(amount, allow_zero=True, currency=currency)
     if amount == 0:
         return None
     existing = await _find_platform_entry(db, idempotency_key)
@@ -279,6 +283,7 @@ async def record_platform_executor_fee(db, merchant_id, amount: Decimal, operati
         _assert_platform_entry(
             existing,
             merchant_id=merchant_id,
+            currency=currency,
             amount=amount,
             entry_type='executor_fee',
             operation_id=operation_id,
@@ -286,6 +291,7 @@ async def record_platform_executor_fee(db, merchant_id, amount: Decimal, operati
         return existing
     entry = PlatformLedgerEntry(
         merchant_id=merchant_id,
+        currency=currency,
         operation_id=operation_id,
         entry_type='executor_fee',
         amount=amount,

@@ -81,6 +81,7 @@ async def confirm_deposit_payment(
     audit_action: str,
     description: str,
     commit: bool = True,
+    bank_confirmation: dict | None = None,
 ) -> DepositConfirmationResult:
     """Apply one locked, atomic deposit settlement and persist delivery outbox rows."""
     try:
@@ -94,6 +95,9 @@ async def confirm_deposit_payment(
         )).scalar_one_or_none()
         if not deposit:
             raise DepositConfirmationNotFound('Заявка не найдена', api_detail='not found')
+        if deposit.currency == 'TJS':
+            from app.services.local_deposit_policy import validate_confirmation
+            await validate_confirmation(db, deposit, actor_id, bank_confirmation)
         if deposit.status == DepositStatus.paid.value:
             raise DepositConfirmationConflict('Заявка уже подтверждена', api_detail='already paid')
         if deposit.status not in CONFIRMABLE_DEPOSIT_STATUSES:

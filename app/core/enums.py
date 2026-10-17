@@ -21,6 +21,7 @@ class DepositStatus(StrEnum):
     expired = 'expired'
     cancelled = 'cancelled'
     appeal_opened = 'appeal_opened'
+    refunded = 'refunded'
 
 
 class RollingAccountStatus(StrEnum):

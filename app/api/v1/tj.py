@@ -35,6 +35,28 @@ class AssignIn(BaseModel):
     plan_id: UUID
 
 
+class RefundIn(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    reason: str = Field(min_length=4, max_length=400)
+    reference: str = Field(min_length=4, max_length=200)
+
+
+@router.post('/deposits/{deposit_id}/refund')
+async def refund_local_deposit(deposit_id: UUID, data: RefundIn,
+        actor=Depends(administrator), db: AsyncSession=Depends(get_db)):
+    from app.services.deposit_lifecycle import refund_deposit
+    from app.services.webhook_enqueue import enqueue_webhook_delivery
+    try:
+        result = await refund_deposit(db,deposit_id,actor=actor,**data.model_dump())
+        await db.commit()
+    except ValueError as exc:
+        await db.rollback()
+        raise HTTPException(409,str(exc)) from exc
+    if result.webhook_event_id:
+        enqueue_webhook_delivery(result.webhook_event_id)
+    return {'id':str(result.deposit_id),'status':result.status,'changed':result.changed}
+
+
 @router.get('/status')
 async def status(actor=Depends(participant), db: AsyncSession=Depends(get_db)):
     subject_id = None

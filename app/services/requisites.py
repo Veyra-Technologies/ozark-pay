@@ -49,6 +49,7 @@ class SelectedPaymentRequisite:
     executor_rate_rule: FeeRule | None = None
     executor_type: str = 'trader'
     executor_id: str | None = None
+    financial_context: dict | None = None
 
     def payment_details(self) -> dict:
         method = normalize_payment_method(self.requisite.method, canonical_mobile=True) or self.requisite.method
@@ -58,6 +59,9 @@ class SelectedPaymentRequisite:
             self.requisite.operator_code,
             self.requisite.bank_name,
         )
+        if self.requisite.country == 'TJ':
+            provider = {'bank': self.requisite.bank_name or '', 'bank_id': self.requisite.bank_id,
+                        'provider_type': (self.financial_context or {}).get('requisite',{}).get('institution_type','bank'), 'country': 'TJ'}
         return {
             'receiver_name': self.requisite.full_name or self.requisite.owner_name,
             'requisite': self.value,
@@ -78,10 +82,12 @@ class SelectedPaymentRequisite:
         }
 
     def settlement_metadata(self) -> dict:
+        from app.services.crossborder_money import usdt
         return {
             'trader_id': self.trader_id,
             'trader_commission_percent': str(_percent(self.trader_commission_percent)),
-            'trader_hold_amount': str(_money(self.trader_hold_amount)),
+            'trader_hold_amount': str(usdt(self.trader_hold_amount) if self.financial_context else _money(self.trader_hold_amount)),
+            **({'trader_hold_currency': 'USDT'} if self.financial_context else {}),
             'trader_profit_amount': str(_money(self.trader_profit_amount)),
             'trader_hold_status': 'active',
             'trader_settled': False,
@@ -205,6 +211,9 @@ def success_delay_elapsed(req: Requisite, now: datetime | None = None) -> bool:
 
 
 async def settle_trader_deposit_balance(db: AsyncSession, deposit: Deposit) -> User | None:
+    if deposit.currency == 'TJS':
+        from app.services.local_deposit_policy import trader_movement
+        return await trader_movement(db, deposit, 'debit')
     if deposit.status not in ACTIVE_DEPOSIT_STATUSES:
         raise ValueError(f'deposit status {deposit.status} cannot be settled')
     if not deposit.requisites_id:
@@ -273,6 +282,9 @@ async def release_trader_deposit_hold(db: AsyncSession, deposit: Deposit) -> Use
     metadata = dict(deposit.metadata_json or {})
     if metadata.get('trader_hold_status') in {'released', 'settled'} or metadata.get('trader_hold_released') is True:
         return None
+    if deposit.currency == 'TJS':
+        from app.services.local_deposit_policy import trader_movement
+        return await trader_movement(db, deposit, 'release')
     if not deposit.requisites_id:
         return None
     req = (await db.execute(
@@ -318,7 +330,13 @@ async def select_deposit_requisite(
     executor_type: str = 'trader',
     executor_rule: FeeRule | None = None,
     executor_id: UUID | None = None,
+    local_context: dict | None = None,
 ) -> SelectedPaymentRequisite:
+    local = local_context is not None
+    country, currency = ('TJ', 'TJS') if local else ('RU', 'RUB')
+    if local:
+        from app.services.local_deposit_policy import require_execution
+        await require_execution(db)
     method_candidates = deposit_method_candidates(method)
     if not method_candidates:
         raise ValueError('payment method is not supported for player deposits')
@@ -328,8 +346,8 @@ async def select_deposit_requisite(
         select(Requisite)
         .where(
             Requisite.method.in_(method_candidates),
-            Requisite.country == 'RU',
-            Requisite.currency == 'RUB',
+            Requisite.country == country,
+            Requisite.currency == currency,
             Requisite.enabled == True,
             Requisite.status == 'active',
             Requisite.is_archived == False,
@@ -372,7 +390,12 @@ async def select_deposit_requisite(
     amount = _money(amount)
     last_fee_error: FeeConfigurationError | None = None
     for req in candidates:
-        if not resolve_requisite_provider(req.method, bank_code=req.bank_code, operator_code=req.operator_code, bank_name=req.bank_name, allow_legacy=True):
+        if local:
+            from app.models import BankDirectory
+            bank = await db.get(BankDirectory, req.bank_id) if req.bank_id else None
+            if not bank or bank.country != 'TJ' or bank.status != 'active' or req.method != 'c2c':
+                continue
+        elif not resolve_requisite_provider(req.method, bank_code=req.bank_code, operator_code=req.operator_code, bank_name=req.bank_name, allow_legacy=True):
             continue
 
         trader = traders.get(str(req.trader_id)) if req.trader_id else None
@@ -380,16 +403,15 @@ async def select_deposit_requisite(
         selected_executor_id = executor_id
         if executor_type == 'trader':
             try:
-                selected_executor_rule = await resolve_fee_rule(
-                    db,
-                    entity_type='trader',
-                    entity_id=trader.id if trader else '',
-                    fee_side='executor_fee',
-                    payment_method=method,
-                    currency='RUB',
-                    amount=amount,
-                    at=now,
-                )
+                if local:
+                    from app.services.local_deposit_policy import personal_rule
+                    if not trader or trader.role != 'trader' or trader.working_country != 'TJ':
+                        continue
+                    selected_executor_rule, trader_plan = await personal_rule(db, party='trader', entity_id=trader.id, amount=amount)
+                else:
+                    selected_executor_rule = await resolve_fee_rule(
+                        db, entity_type='trader', entity_id=trader.id if trader else '',
+                        fee_side='executor_fee', payment_method=method, currency='RUB', amount=amount, at=now)
                 validate_margin(merchant_rate_rule, selected_executor_rule)
             except FeeConfigurationError as exc:
                 last_fee_error = exc
@@ -402,7 +424,10 @@ async def select_deposit_requisite(
         else:
             raise FeeConfigurationError('invalid or missing executor fee rule')
 
-        if not _can_use_trader(trader, merchant_id, amount, commission_percent):
+        if local and (not _assigned_to_merchant(trader, merchant_id) or trader.is_archived
+                      or not trader.is_active or trader.is_locked):
+            continue
+        if not local and not _can_use_trader(trader, merchant_id, amount, commission_percent):
             continue
 
         if not await can_route_payment_to_trader(db, trader, amount):
@@ -463,10 +488,30 @@ async def select_deposit_requisite(
 
         profit_amount = trader_profit_amount(amount, commission_percent)
         hold_amount = trader_settlement_amount(amount, commission_percent)
+        context = None
         try:
-            await trader_hold(db, trader, hold_amount, req.id, f'trader-deposit-hold:{trader.id}:{req.id}:{(req.usage_count or 0) + 1}', 'deposit requisite reserved')
+            if local:
+                from app.services.local_deposit_policy import financial_context
+                from app.services.trader_finance import move_usdt_wallet
+                context = financial_context(amount=amount, merchant_rule=merchant_rate_rule,
+                    trader_rule=selected_executor_rule, merchant_plan=local_context['merchant_plan'],
+                    trader_plan=trader_plan, fixed_quote=local_context['quote'])
+                context['requisite'] = {'id':str(req.id),'trader_id':str(trader.id),
+                    'bank_id':req.bank_id,'bank_name':bank.name,'country':'TJ','currency':'TJS',
+                    'institution_type':bank.institution_type,
+                    'receiver_name':req.full_name or req.owner_name,'value_encrypted':req.value_encrypted}
+                hold_amount = Decimal(context['reserve_usdt'])
+                await move_usdt_wallet(db, trader.id, kind='hold', amount=hold_amount,
+                    operation_id=local_context['operation_id'], key=f"local-deposit:{local_context['operation_id']}:hold",
+                    description='TJ deposit collateral reserve')
+            else:
+                await trader_hold(db, trader, hold_amount, req.id, f'trader-deposit-hold:{trader.id}:{req.id}:{(req.usage_count or 0) + 1}', 'deposit requisite reserved')
         except LedgerError:
             continue
+        except ValueError:
+            if local:
+                continue
+            raise
         req.usage_count += 1
         return SelectedPaymentRequisite(
             req,
@@ -479,6 +524,7 @@ async def select_deposit_requisite(
             executor_rate_rule=selected_executor_rule,
             executor_type=executor_type,
             executor_id=str(selected_executor_id),
+            financial_context=context,
         )
 
     if last_fee_error is not None:
