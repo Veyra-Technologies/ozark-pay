@@ -28,7 +28,7 @@ class RequisiteJurisdiction:
 
 
 async def list_country_banks(db, country: str | None) -> list[BankDirectory]:
-    if country not in {'AM', 'GE'}:
+    if country not in {'AM', 'GE', 'TJ'}:
         return []
     return (await db.execute(
         select(BankDirectory).where(
@@ -84,7 +84,7 @@ async def resolve_requisite_jurisdiction(
             status='active',
             provider_type=provider.provider_type,
         )
-    if country not in {'AM', 'GE'} or currency not in {'AMD', 'GEL'}:
+    if country not in {'AM', 'GE', 'TJ'} or currency != {'AM': 'AMD', 'GE': 'GEL', 'TJ': 'TJS'}[country]:
         raise HTTPException(409, 'Рабочий профиль не назначен')
     allowed = GE_REQUISITE_METHODS if country == 'GE' else (PaymentMethod.c2c.value,)
     if normalized not in allowed:
@@ -104,7 +104,7 @@ async def resolve_requisite_jurisdiction(
         bank_name=bank.name,
         country=country,
         currency=currency,
-        enabled=country == 'GE',
-        status='active' if country == 'GE' else 'review',
+        enabled=country in ('GE', 'TJ'),
+        status='active' if country in ('GE', 'TJ') else 'review',
         provider_type=bank.institution_type,
     )

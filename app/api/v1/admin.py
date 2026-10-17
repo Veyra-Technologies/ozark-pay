@@ -88,6 +88,8 @@ def _risk_public(event: RiskEvent) -> dict:
 
 def _aggregator_public(account: AggregatorAccount) -> dict:
     return {
+        'country': account.working_country,
+        'currency': account.working_currency or 'RUB',
         'id': account.id,
         'platform_merchant_id': account.platform_merchant_id,
         'name': account.name,
@@ -222,7 +224,8 @@ async def create_merchant(data: MerchantCreate, request: Request, db: AsyncSessi
         raise HTTPException(422, str(exc)) from exc
     secret=secrets.token_urlsafe(32); api_key='pk_'+secrets.token_urlsafe(24)
     db.add(ApiKey(merchant_id=merchant.id, api_key=api_key, secret_hash=encrypt_secret(secret), mode='sandbox' if data.sandbox_mode else 'production'))
-    db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
+    if merchant.working_country != 'TJ':
+        db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
     db.add(KycProfile(merchant_id=merchant.id, status='not_started', risk_level='standard'))
     await audit(db,'merchant_created','merchant',actor.id,merchant.id,client_ip(request))
     await db.commit()
@@ -241,6 +244,7 @@ async def create_aggregator(data: AggregatorCreate, request: Request, db: AsyncS
         account, secret = await create_aggregator_account(
             db,
             name=data.name,
+            country=data.country, actor=actor, tariff_plan_id=data.tariff_plan_id,
             callback_url=data.callback_url,
             success_url=data.success_url,
             fail_url=data.fail_url,
@@ -359,7 +363,8 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
             raise HTTPException(422, str(exc)) from exc
         secret=secrets.token_urlsafe(32); api_key='pk_'+secrets.token_urlsafe(24)
         db.add(ApiKey(merchant_id=merchant.id, api_key=api_key, secret_hash=encrypt_secret(secret), mode='sandbox'))
-        db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
+        if merchant.working_country != 'TJ':
+            db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
         db.add(KycProfile(merchant_id=merchant.id, status='not_started', risk_level='standard'))
         result.update({'merchant_id':merchant.id,'api_key':api_key,'secret_key':secret})
     await audit(db,'user_created','user',actor.id,user.id,client_ip(request),{'role':user.role})
@@ -407,6 +412,10 @@ async def add_requisite(data: RequisiteIn, request: Request, db: AsyncSession=De
         requested_country=data.country,
         requested_currency=data.currency,
     )
+    from app.services.bank_requisites import validate_requisite_limits
+    if jurisdiction.country == 'TJ' and not {'min_check','max_check'} <= data.model_fields_set:
+        raise HTTPException(422, 'Для TJ задайте min_check и max_check явно в TJS')
+    validate_requisite_limits(jurisdiction, data.min_check, data.max_check)
     clean_value, suffix = validated_requisite_value(jurisdiction, data.value, data.last4)
     req=Requisite(
         trader_id=account.id,
@@ -476,6 +485,10 @@ async def update_requisite(requisite_id: UUID, data: RequisiteIn, request: Reque
         db, account, method=data.method.value, bank_id=data.bank_id or '', bank_code=data.bank_code or '',
         operator_code=data.operator_code or '', bank_name=data.bank_name or '',
         requested_country=data.country, requested_currency=data.currency)
+    from app.services.bank_requisites import validate_requisite_limits
+    validate_requisite_limits(jurisdiction,
+        data.min_check if 'min_check' in data.model_fields_set else req.min_check,
+        data.max_check if 'max_check' in data.model_fields_set else req.max_check)
     value, suffix = validated_requisite_value(jurisdiction, data.value, data.last4)
     await check_requisite_identity_edit(db, req, jurisdiction, value)
     for field in ('method', 'bank_id', 'bank_code', 'operator_code', 'bank_name', 'country', 'currency'):
@@ -502,8 +515,8 @@ async def bank_directory(country: str = Query(..., min_length=2, max_length=2), 
         account = await require_working_account(db, trader_account_id(actor))
         if normalized != account.working_country:
             raise HTTPException(403, 'bank directory is limited to the assigned country')
-    if normalized not in {'AM', 'GE'}:
-        raise HTTPException(422, 'country must be AM or GE')
+    if normalized not in {'AM', 'GE', 'TJ'}:
+        raise HTTPException(422, 'country must be AM, GE or TJ')
     rows = (await db.execute(select(BankDirectory).where(
         BankDirectory.country == normalized,
         BankDirectory.status == 'active',
@@ -524,10 +537,10 @@ async def bank_directory(country: str = Query(..., min_length=2, max_length=2), 
 async def list_requisites(request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin,Role.support,Role.merchant,Role.operator,Role.trader))):
     if actor.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
         rows = (await db.execute(select(Requisite).order_by(Requisite.created_at.desc()).limit(500))).scalars().all()
-        payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
+        payload = [_requisite_public(req, include_value=req.country not in ('GE','TJ')) for req in rows]
     elif actor.role in [Role.operator.value, Role.trader.value]:
         rows = (await db.execute(select(Requisite).where(Requisite.trader_id == trader_account_id(actor)).order_by(Requisite.created_at.desc()).limit(500))).scalars().all()
-        payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
+        payload = [_requisite_public(req, include_value=req.country not in ('GE','TJ')) for req in rows]
     else:
         merchant = (await db.execute(select(Merchant).where(Merchant.owner_id == actor.id))).scalar_one_or_none()
         if not merchant:
@@ -542,7 +555,7 @@ async def list_requisites(request: Request, db: AsyncSession=Depends(get_db), ac
                 payload = []
             else:
                 rows = (await db.execute(select(Requisite).where(Requisite.id.in_(req_ids)).order_by(Requisite.created_at.desc()))).scalars().all()
-                payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
+                payload = [_requisite_public(req, include_value=req.country not in ('GE','TJ')) for req in rows]
     await audit(db, 'requisites_viewed', 'requisite', actor.id, None, client_ip(request), {'count': len(payload), 'role': actor.role})
     await db.commit()
     return payload

@@ -5,4 +5,7 @@ MERCHANT_COUNTRIES = {
     'KZ': {'label': 'Казахстан', 'currency': 'KZT',
            'parsers': {'binance_p2p_kaspi_buy_100000_avg10': 'Binance · KZT/USDT · Kaspi · 100 000 KZT · среднее 10'},
            'methods': {'kz-ge': 'KZ → GE · Kaspi'}},
+    'TJ': {'label': 'Таджикистан', 'currency': 'TJS',
+           'parsers': {'rapira_green_tjs': 'Rapira Green 1–3 · источник требует подтверждения'},
+           'methods': {'c2c': 'Таджикистан — Локальный (TJ → TJ) · C2C'}},
 }

@@ -5,6 +5,7 @@ from app.core.payment_methods import PAYMENT_METHOD_LABELS
 
 KZ_GE_METHOD = 'kz-ge'
 TRADER_TARIFF_METHODS = {
+    'TJ': [{'value': 'c2c', 'label': 'Таджикистан — Локальный (TJ → TJ) · C2C'}],
     'RU': [{'value': method, 'label': PAYMENT_METHOD_LABELS[method]}
            for method in ('sbp', 'c2c', 'mobile_commerce', 'sbp_qr')],
     'GE': [{'value': KZ_GE_METHOD, 'label': 'Трансгран KZ → GE'}],

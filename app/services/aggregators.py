@@ -284,6 +284,9 @@ async def create_aggregator_account(
     db: AsyncSession,
     *,
     name: str,
+    country: str = 'RU',
+    actor=None,
+    tariff_plan_id=None,
     callback_url: str | None = None,
     success_url: str | None = None,
     fail_url: str | None = None,
@@ -293,6 +296,13 @@ async def create_aggregator_account(
     daily_limit: Decimal | None = None,
     monthly_limit: Decimal | None = None,
 ) -> tuple[AggregatorAccount, str]:
+    if country not in ('RU','TJ'):
+        raise AggregatorError('Unsupported aggregator country')
+    if country == 'TJ':
+        from app.services.country_tariffs import require_admin
+        require_admin(actor)
+        if not tariff_plan_id or min_payment_amount < 10:
+            raise AggregatorError('TJ aggregator requires a TJ tariff and limits from 10 TJS')
     existing = (await db.execute(select(AggregatorAccount).where(AggregatorAccount.name == name))).scalar_one_or_none()
     if existing:
         raise AggregatorError('aggregator name already exists')
@@ -318,10 +328,24 @@ async def create_aggregator_account(
     )
     db.add(platform_merchant)
     await db.flush()
-    db.add(Balance(merchant_id=platform_merchant.id, available=Decimal('0.00')))
+    if country == 'TJ':
+        from app.services.merchant_countries import assign_country
+        from app.services.merchant_cabinets import validate_plan,apply_ru_plan
+        await assign_country(db, actor=actor, merchant=platform_merchant, country='TJ', parser_id='rapira_green_tjs')
+        # This is an internal platform merchant, whose disabled aggregator user
+        # must stay unable to log in. Staff creation sets its initial config;
+        # public merchant access checks remain unchanged.
+        plan = await validate_plan(db,platform_merchant,tariff_plan_id)
+        await apply_ru_plan(db,actor,platform_merchant,plan,['c2c'])
+        platform_merchant.tariff_plan_id=plan.id
+        platform_merchant.payment_methods=['c2c']
+    else:
+        db.add(Balance(merchant_id=platform_merchant.id, available=Decimal('0.00')))
     db.add(KycProfile(merchant_id=platform_merchant.id, status='not_started', risk_level='standard'))
 
     account = AggregatorAccount(
+        working_country='TJ' if country == 'TJ' else None,
+        working_currency='TJS' if country == 'TJ' else None,
         platform_merchant_id=platform_merchant.id,
         name=name,
         api_key=api_key,
@@ -429,6 +453,9 @@ async def create_payment(
     fail_url: str | None,
     idempotency_key: str,
 ) -> AggregatorPaymentResult:
+    if getattr(aggregator, 'working_country', None) == 'TJ' or currency == 'TJS':
+        from app.core.tajikistan import BLOCK_REASON
+        raise AggregatorError(BLOCK_REASON)
     amount = money(amount)
     callback_url = callback_url or aggregator.callback_url
     if callback_url:

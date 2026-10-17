@@ -129,7 +129,7 @@ async def manual_usdt_wallet_adjustment(
     return entries
 
 
-def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict | None = None) -> dict:
+def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict | None = None, *, local_wallet=None) -> dict:
     if not account:
         return {'country': None, 'local_currency': None, 'accounting_currency': None}
     country = account.working_country
@@ -139,7 +139,7 @@ def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict |
     result = {
         'country': country,
         'local_currency': local_currency,
-        'accounting_currency': 'USDT' if country in {'AM', 'GE'} else 'RUB',
+        'accounting_currency': 'USDT' if country in {'AM', 'GE', 'TJ'} else 'RUB',
         'usdt_balance': usdt_balance,
         'usdt_hold': usdt_hold,
         'usdt_available': usdt_balance - usdt_hold,
@@ -151,6 +151,12 @@ def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict |
         'local_hold': None,
         'local_available': None,
     }
+    if country == 'TJ':
+        if local_wallet and (local_wallet.trader_id != account.id or local_wallet.currency != 'TJS'):
+            raise TraderFinanceError('local wallet owner/currency mismatch')
+        balance = _decimal(local_wallet.balance if local_wallet else 0, LOCAL_QUANTUM)
+        hold = _decimal(local_wallet.hold if local_wallet else 0, LOCAL_QUANTUM)
+        result.update(local_balance=balance, local_hold=hold, local_available=balance-hold)
     if country in {'AM', 'GE'} and quote and quote.get('available') and quote.get('rate'):
         rate = _decimal(quote['rate'], Decimal('0.000000000001'))
         result.update(

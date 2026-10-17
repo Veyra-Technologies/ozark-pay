@@ -10,11 +10,12 @@
 <section class="panel merchant-summary"><div class="merchant-summary-heading"><h2>{{ mc.name }}</h2><span class="status-pill {{ 'status-wait' if mc.sandbox_mode else 'status-ok' }}">{{ 'Sandbox' if mc.sandbox_mode else 'Production' }}</span></div>
 <dl class="merchant-summary-grid"><div><dt>Email кабинета</dt><dd>{{ u.email }}</dd></div><div><dt>Страна · валюта</dt><dd>{{ mc.working_country or 'Требует назначения' }} · {{ mc.working_currency or '—' }}</dd></div>
 <div class="merchant-id"><dt>Merchant ID</dt><dd><code>{{ mc.merchant_id }}</code><button type="button" class="secondary btn-small" data-copy-value="{{ mc.merchant_id }}">Копировать ID</button></dd></div></dl></section>
-{% if mc.working_country in ['RU','KZ'] %}{% include '_merchant_country_settings.html' %}{% endif %}
+{% if mc.working_country in ['RU','KZ','TJ'] %}{% include '_merchant_country_settings.html' %}{% endif %}
+{% elif profile_tab == 'finance' and mc.working_country == 'TJ' %}{% include '_tj_summary.html' %}
 {% elif profile_tab == 'finance' and mc.working_country == 'KZ' %}<div class="panel"><h2>Финансы · KZ</h2><p>Номинал операций — KZT; расчёты и баланс — USDT. История доступна в административном списке операций KZ → GE.</p></div>
 {% elif profile_tab == 'finance' %}<div class="panel"><h2>Финансы</h2><p>Расчётный баланс ведётся в RUB. Переводы Rolling учитываются отдельно в USDT.</p>{% if finance.balance %}<dl class="profile-data"><dt>Доступно</dt><dd>{{ (finance.balance.available if finance.balance else 0)|money_rub }}</dd><dt>Заморожено</dt><dd>{{ (finance.balance.frozen if finance.balance else 0)|money_rub }}</dd></dl><a class="secondary" href="?tab=rolling">Переводы и погашения Rolling</a>{% else %}<p class="note">Финансовый обзор доступен Superadmin.</p>{% endif %}</div>
 {% elif profile_tab == 'tariffs' %}
-{% if mc.working_country in ['RU','KZ'] %}{% include '_merchant_tariff_editor.html' %}{% else %}<p>Для редактирования тарифов необходимо назначить поддерживаемую страну кабинета.</p>{% endif %}
+{% if mc.working_country in ['RU','KZ','TJ'] %}{% if mc.working_country == 'TJ' %}{% set tj_tariff_party='merchant' %}{% set tj_tariff_entity=mc.merchant_id %}{% include '_tj_tariffs.html' %}{% include '_tj_tariff_editor.html' %}{% else %}{% include '_merchant_tariff_editor.html' %}{% endif %}{% else %}<p>Для редактирования тарифов необходимо назначить поддерживаемую страну кабинета.</p>{% endif %}
 
 {% elif profile_tab == 'rolling' and mc.working_country in [none,'RU'] %}    {% if mc and merchant_finance_rows.get(mc.merchant_id) %}
     {% set finance = merchant_finance_rows.get(mc.merchant_id) %}

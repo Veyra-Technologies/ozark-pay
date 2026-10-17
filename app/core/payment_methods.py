@@ -4,6 +4,7 @@ from app.core.enums import PaymentMethod
 
 
 PAYMENT_METHOD_LABELS: dict[str, str] = {
+    'tj_qr': 'QR · Таджикистан (недоступен)',
     PaymentMethod.sbp.value: 'СБП',
     PaymentMethod.sbp_qr.value: 'QR НСПК',
     PaymentMethod.c2c.value: 'Карта',
@@ -26,6 +27,7 @@ PAYMENT_METHOD_REQUISITE_PLACEHOLDERS: dict[str, str] = {
 }
 
 PAYMENT_METHOD_ALIASES: dict[str, str] = {
+    'tj_qr': 'tj_qr',
     'card': PaymentMethod.c2c.value,
     'card_number': PaymentMethod.c2c.value,
     'bank_transfer': PaymentMethod.c2c.value,
@@ -58,6 +60,8 @@ def payment_method_label(value: str | None, country: str | None = None) -> str:
 
 def requisite_method_options(country: str | None) -> tuple[dict[str, str], ...]:
     """Bank identifier types; independent of parser, tariff and payment direction."""
+    if country == 'TJ':
+        return ({'value': 'c2c', 'label': 'Номер карты'},)
     if country == 'GE':
         return ({'value': 'c2c', 'label': 'Номер карты'},
                 {'value': 'bank_account', 'label': 'Номер счёта'})

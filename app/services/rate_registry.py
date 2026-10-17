@@ -21,6 +21,8 @@ from app.services.country_tariffs import require_admin, scope_lock
 from app.services.crossborder_money import CrossBorderError
 
 PARSER_POLICY = {
+    'rapira_green_tjs': {'source': 'RAPIRA_GREEN_UNCONFIRMED', 'pair': 'USDT/TJS',
+        'positions': [1, 2, 3], 'unit': 'TJS per 1 USDT', 'contract_confirmed': False},
     'rapira': {'source': 'RAPIRA', 'pair': 'USDT/RUB', 'side': 'ask',
                'provider_field': 'askPrice', 'unit': 'RUB per 1 USDT'},
     binance_p2p.PARSER_ID: {'source': 'BINANCE_P2P', 'pair': 'USDT/KZT', 'side': 'BUY',
@@ -51,6 +53,8 @@ def public_config(row):
 
 async def configure(db, *, actor, parser_id, refresh_seconds, ttl_seconds, is_active):
     require_admin(actor)
+    if parser_id == 'rapira_green_tjs' and is_active:
+        raise CrossBorderError('Rapira Green 1–3: источник и сторона рынка не подтверждены; включение запрещено')
     if not 15 <= refresh_seconds <= ttl_seconds <= 120:
         raise CrossBorderError('Интервал: от 15 секунд; TTL не меньше интервала и не больше 120 секунд')
     if parser_id == 'xe':
@@ -107,6 +111,11 @@ async def _rapira_state(config, refresh):
 
 
 async def parser_state(db, parser_id, *, refresh=False, persist=True):
+    if parser_id == 'rapira_green_tjs':
+        # Never fall through to Rapira RUB, XE or Binance, even when a DB row is active.
+        return {'configuration': {'parser_id': parser_id, 'country': 'TJ', 'active': False,
+                'parameters': PARSER_POLICY[parser_id]}, 'available': False, 'status': 'blocked',
+                'last_error': 'tj_contract_unconfirmed', 'quote': None}
     try:
         config = await configuration(db, parser_id)
     except CrossBorderError:

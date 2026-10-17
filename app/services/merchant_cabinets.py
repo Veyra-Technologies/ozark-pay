@@ -25,7 +25,8 @@ async def validate_plan(db, merchant, plan_id):
             or plan.entity_id not in (None, merchant.id) or not plan.is_active
             or plan.effective_from > datetime.now(timezone.utc)
             or (plan.country == 'KZ' and (plan.basis != 'base_usdt' or plan.direction != 'kz-ge'))
-            or (plan.country == 'RU' and (plan.basis != 'local_amount' or plan.direction != 'ru'))):
+            or (plan.country == 'RU' and (plan.basis != 'local_amount' or plan.direction != 'ru'))
+            or (plan.country == 'TJ' and (plan.basis != 'local_amount' or plan.direction != 'tj-tj' or plan.currency != 'TJS'))):
         raise CrossBorderError('Тариф не принадлежит стране и кабинету либо ещё не действует')
     return plan
 
@@ -34,7 +35,7 @@ async def apply_ru_plan(db, actor, merchant, plan, methods):
     from app.services.fee_tiers import create_fee_rule
     now = datetime.now(timezone.utc)
     old = (await db.execute(select(FeeRule).where(FeeRule.entity_type == 'merchant',
-        FeeRule.entity_id == merchant.id, FeeRule.currency == 'RUB', FeeRule.is_active.is_(True))
+        FeeRule.entity_id == merchant.id, FeeRule.currency == plan.currency, FeeRule.is_active.is_(True))
         .with_for_update())).scalars().all()
     for rule in old:
         rule.is_active = False
@@ -45,7 +46,7 @@ async def apply_ru_plan(db, actor, merchant, plan, methods):
     for method in methods:
         for tier in plan.tiers:
             await create_fee_rule(db, actor_id=actor.id, entity_type='merchant', entity_id=merchant.id,
-                fee_side='merchant_fee', payment_method=method, currency='RUB',
+                fee_side='merchant_fee', payment_method=method, currency=plan.currency,
                 min_amount=Decimal(tier['min']), max_amount=Decimal(tier['max']) if tier['max'] else None,
                 rate_percent=Decimal(tier['percent']), effective_from=now, effective_to=None,
                 version=max((r.version for r in old), default=0) + 1)
@@ -66,7 +67,7 @@ async def configure(db, *, actor, merchant, currency, parser_id, tariff_plan_id,
     if merchant.rate_parser_id != parser_id:
         await change_parser(db, actor=actor, merchant=merchant, parser_id=parser_id)
     previous = {'tariff_plan_id': str(merchant.tariff_plan_id), 'methods': merchant.payment_methods}
-    if merchant.working_country == 'RU':
+    if merchant.working_country in ('RU', 'TJ'):
         await apply_ru_plan(db, actor, merchant, plan, methods)
     merchant.working_currency = currency
     merchant.tariff_plan_id = plan.id
@@ -85,7 +86,8 @@ async def catalog(db, merchant_id=None):
         TariffPlan.effective_from <= now).order_by(TariffPlan.created_at.desc()))).scalars().all()
     return {country: {**policy, 'plans': [public_plan(p) for p in rows
         if p.country == country and p.entity_id in (None, merchant_id)
-        and ((country == 'KZ' and p.basis == 'base_usdt') or (country == 'RU' and p.direction == 'ru'))]}
+        and ((country == 'KZ' and p.basis == 'base_usdt') or (country == 'RU' and p.direction == 'ru')
+             or (country == 'TJ' and p.direction == 'tj-tj' and p.currency == 'TJS' and p.basis == 'local_amount'))]}
         for country, policy in MERCHANT_COUNTRIES.items()}
 
 
