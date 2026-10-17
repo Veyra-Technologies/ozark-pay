@@ -16,7 +16,7 @@ MONEY_QUANT = Decimal('0.01')
 PERCENT_QUANT = Decimal('0.0001')
 SUPPORTED_ENTITY_TYPES = {'merchant', 'trader', 'aggregator', 'external_processor'}
 SUPPORTED_FEE_SIDES = {'merchant_fee', 'executor_fee'}
-SUPPORTED_CURRENCIES = {'RUB'}
+SUPPORTED_CURRENCIES = {'RUB', 'TJS'}
 MAX_RATE_PERCENT = Decimal('100.0000')
 COMMISSION_TIER_METHODS = ('sbp', 'c2c', 'mobile_commerce', 'sbp_qr')
 COMMISSION_TIER_RANGES = (
@@ -244,6 +244,14 @@ async def ensure_no_overlap(db: AsyncSession, values: dict, *, exclude_id: UUID 
 
 
 async def ensure_entity_exists(db: AsyncSession, values: dict) -> None:
+    if values.get('currency', 'RUB') == 'TJS':
+        model = {'merchant':Merchant, 'trader':User, 'aggregator':AggregatorAccount}.get(values['entity_type'])
+        owner = await db.get(model, values['entity_id']) if model else None
+        if (not owner or owner.working_country != 'TJ' or owner.is_archived
+                or values['payment_method'] != 'c2c' or values['min_amount'] < 10
+                or (model is User and (owner.role != 'trader' or not owner.is_active or owner.is_locked))):
+            raise FeeConfigurationError('TJS fees require an eligible TJ cabinet, C2C and bounds from 10 TJS')
+        return
     if values['entity_type'] == 'merchant':
         query = select(Merchant.id).join(User, User.id == Merchant.owner_id).where(
             Merchant.id == values['entity_id'],
@@ -271,6 +279,7 @@ async def ensure_entity_exists(db: AsyncSession, values: dict) -> None:
     elif values['entity_type'] == 'aggregator':
         query = select(AggregatorAccount.id).where(
             AggregatorAccount.id == values['entity_id'],
+            or_(AggregatorAccount.working_country.is_(None),AggregatorAccount.working_country != 'TJ'),
             AggregatorAccount.status == 'active',
             AggregatorAccount.is_archived.is_(False),
         )

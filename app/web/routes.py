@@ -1412,7 +1412,8 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
         api_key = 'pk_' + secrets.token_urlsafe(24)
         secret_key = 'sk_' + secrets.token_urlsafe(32)
         db.add(ApiKey(merchant_id=m.id, api_key=api_key, secret_hash=encrypt_secret(secret_key), mode='sandbox'))
-        db.add(Balance(merchant_id=m.id, available=Decimal('0.00'), frozen=Decimal('0.00')))
+        if m.working_country != 'TJ':
+            db.add(Balance(merchant_id=m.id, available=Decimal('0.00'), frozen=Decimal('0.00')))
     await audit(db, 'cabinet_user_created', 'user', actor.id, user.id, client_ip(request), {'role': role, 'merchant_api_key_created': bool(api_key)})
     await db.commit()
     if api_key:
@@ -1909,6 +1910,8 @@ async def _get_aggregator_for_update(db: AsyncSession, aggregator_id: str) -> Ag
 async def cabinet_create_aggregator(
     request: Request,
     name: str = Form(...),
+    country: str = Form('RU'),
+    tariff_plan_id: str = Form(''),
     callback_url: str = Form(''),
     success_url: str = Form(''),
     fail_url: str = Form(''),
@@ -1927,9 +1930,17 @@ async def cabinet_create_aggregator(
     if actor.role not in [Role.superadmin.value, Role.admin.value]:
         return _aggregator_redirect('Not enough permissions')
     try:
+        if country == 'TJ':
+            submitted = await request.form()
+            if not all(str(submitted.get(field) or '').strip() for field in ('min_payment_amount','max_payment_amount','commission_percent','tariff_plan_id')):
+                raise ValueError('Для TJ укажите лимиты TJS, комиссию и тариф явно')
+            from app.schemas.common import AggregatorCreate
+            AggregatorCreate(name=name.strip(),country='TJ',tariff_plan_id=tariff_plan_id,
+                min_payment_amount=min_payment_amount,max_payment_amount=max_payment_amount,commission_percent=commission_percent)
         account, secret = await create_aggregator_account(
             db,
             name=name.strip(),
+            country=country, actor=actor, tariff_plan_id=UUID(tariff_plan_id) if tariff_plan_id else None,
             callback_url=_optional_url(callback_url),
             success_url=_optional_url(success_url),
             fail_url=_optional_url(fail_url),
@@ -2096,7 +2107,9 @@ async def create_requisite(request: Request, method: str = Form(...), value: str
         clean_value, suffix = validated_requisite_value(jurisdiction, value, last4)
     except HTTPException as exc:
         return _redirect(str(exc.detail), 'requisites')
-    minimum = Decimal('100.00') if account.working_country == 'RU' else Decimal('1.00')
+    from app.services.bank_requisites import validate_requisite_limits
+    validate_requisite_limits(jurisdiction, min_check, max_check)
+    minimum = Decimal('10.00') if account.working_country == 'TJ' else Decimal('100.00') if account.working_country == 'RU' else Decimal('1.00')
     maximum = Decimal('150000.00') if account.working_country == 'RU' else Decimal('1000000000.00')
     req = Requisite(
         trader_id=account.id,
@@ -2120,9 +2133,11 @@ async def create_requisite(request: Request, method: str = Form(...), value: str
         simultaneous_limit=max(1, min(50, int(simultaneous_limit))),
         min_check=max(minimum, safe_decimal(min_check, str(minimum))),
         max_check=min(maximum, safe_decimal(max_check, str(maximum))),
-        status=(status if jurisdiction.country in ('RU', 'GE') and status in ('active', 'disabled', 'review') else jurisdiction.status),
-        enabled=(status == 'active' if jurisdiction.country in ('RU', 'GE') else jurisdiction.enabled),
+        status=(status if jurisdiction.country in ('RU', 'GE', 'TJ') and status in ('active', 'disabled', 'review') else jurisdiction.status),
+        enabled=(status == 'active' if jurisdiction.country in ('RU', 'GE', 'TJ') else jurisdiction.enabled),
     )
+    if jurisdiction.country == 'TJ':
+        req.min_check, req.max_check = Decimal(min_check), Decimal(max_check)
     db.add(req)
     await audit(db, 'requisite_created', 'requisite', actor_id=user.id, ip=client_ip(request), details={"method": jurisdiction.method, "provider_type": jurisdiction.provider_type, "provider_name": jurisdiction.bank_name, "country": jurisdiction.country, "currency": jurisdiction.currency, "bank_id": jurisdiction.bank_id, "timeframe": timeframe, "success_delay_minutes": success_delay_minutes, "simultaneous_limit": simultaneous_limit})
     await db.commit()
@@ -2149,7 +2164,7 @@ async def toggle_requisite(request: Request, requisite_id: str, db: AsyncSession
         return _redirect('Платёжное направление ещё не подключено', 'requisites')
     if not req.enabled and req.country == 'RU':
         await require_payment_account(db, req.trader_id)
-    if not req.enabled and req.country == 'GE':
+    if not req.enabled and req.country in ('GE', 'TJ'):
         account = await require_working_account(db, req.trader_id)
         jurisdiction = await resolve_requisite_jurisdiction(db, account, method=req.method, bank_id=req.bank_id or '')
         validated_requisite_value(jurisdiction, reveal_text(req.value_encrypted), req.last4)
@@ -2205,7 +2220,7 @@ async def edit_requisite(
             operator_code=operator_code, bank_name=bank_name,
             allow_legacy=bool(legacy_candidate and legacy_candidate == (req.bank_name or '').strip()),
         )
-        if req.country == 'GE' and not value.strip() and req.method == jurisdiction.method and req.bank_id == jurisdiction.bank_id:
+        if req.country in ('GE', 'TJ') and not value.strip() and req.method == jurisdiction.method and req.bank_id == jurisdiction.bank_id:
             value = reveal_text(req.value_encrypted)
         clean_value, suffix = validated_requisite_value(jurisdiction, value, last4)
         await check_requisite_identity_edit(db, req, jurisdiction, clean_value)
@@ -2229,10 +2244,14 @@ async def edit_requisite(
     req.timeframe = timeframe if timeframe in ["час", "день"] else "час"
     req.success_delay_minutes = max(0, min(60, int(success_delay_minutes)))
     req.simultaneous_limit = max(1, min(50, int(simultaneous_limit)))
+    from app.services.bank_requisites import validate_requisite_limits
+    validate_requisite_limits(jurisdiction, min_check, max_check)
     req.min_check = max(Decimal('1.00'), safe_decimal(min_check, '100'))
     req.max_check = min(Decimal('1000000000.00') if req.country == 'GE' else Decimal('1000000.00'), safe_decimal(max_check, '150000'))
-    req.status = (status if status in ['active', 'disabled', 'review'] else 'active') if jurisdiction.country in ('RU', 'GE') else jurisdiction.status
-    req.enabled = req.status == 'active' if jurisdiction.country in ('RU', 'GE') else False
+    if req.country == 'TJ':
+        req.min_check, req.max_check = Decimal(min_check), Decimal(max_check)
+    req.status = (status if status in ['active', 'disabled', 'review'] else 'active') if jurisdiction.country in ('RU', 'GE', 'TJ') else jurisdiction.status
+    req.enabled = req.status == 'active' if jurisdiction.country in ('RU', 'GE', 'TJ') else False
     await audit(db, 'requisite_updated', 'requisite', actor_id=user.id, target_id=str(req.id), ip=client_ip(request))
     await db.commit()
     return _success_redirect('requisites')
@@ -2325,7 +2344,7 @@ async def update_trader_finance(request: Request, trader_id: str, trader_balance
     trader.trader_assigned_merchants = assigned_merchants
     try:
         adjustment_key = f'trader-manual-adjustment:{trader.id}:{datetime.now(timezone.utc).timestamp()}'
-        if trader.working_country in {'AM', 'GE'}:
+        if trader.working_country in {'AM', 'GE', 'TJ'}:
             target_balance = max(Decimal('0'), safe_decimal(usdt_balance, '0'))
             target_hold = min(target_balance, max(Decimal('0'), safe_decimal(usdt_hold, '0')))
             await manual_usdt_wallet_adjustment(
@@ -2344,7 +2363,7 @@ async def update_trader_finance(request: Request, trader_id: str, trader_balance
     except (LedgerError, TraderFinanceError):
         await db.rollback()
         return _redirect('financial_invariant_error', 'traders')
-    await audit(db, 'trader_finance_updated', 'user', actor.id, trader.id, client_ip(request), {'accounting_currency': 'USDT' if trader.working_country in {'AM','GE'} else 'RUB', 'balance': str(target_balance), 'hold': str(target_hold), 'priority': trader.trader_traffic_priority, 'commission_percent': str(trader.trader_commission_percent), 'merchants': assigned_merchants})
+    await audit(db, 'trader_finance_updated', 'user', actor.id, trader.id, client_ip(request), {'accounting_currency': 'USDT' if trader.working_country in {'AM','GE','TJ'} else 'RUB', 'balance': str(target_balance), 'hold': str(target_hold), 'priority': trader.trader_traffic_priority, 'commission_percent': str(trader.trader_commission_percent), 'merchants': assigned_merchants})
     await db.commit()
     return _success_redirect('traders')
 
@@ -4437,7 +4456,8 @@ def _trader_deposit_details(
 
 async def _trader_deposit_filters(request, subject, db):
     ge = bool(subject and subject.working_country == 'GE')
-    banks = [str(bank.id) for bank in await list_country_banks(db, 'GE')] if ge else [bank.code for bank in get_enabled_banks()]
+    local_directory = bool(subject and subject.working_country in ('GE', 'TJ'))
+    banks = [str(bank.id) for bank in await list_country_banks(db, subject.working_country)] if local_directory else [bank.code for bank in get_enabled_banks()]
     return normalized_deposit_filters(request.query_params, valid_bank_codes=banks, crossborder=ge)
 
 
@@ -5932,12 +5952,13 @@ async def role_cabinet(
     wallet_rows = (await db.execute(
         select(TraderWallet).where(
             TraderWallet.trader_id.in_(finance_trader_ids),
-            TraderWallet.currency == 'USDT',
+            TraderWallet.currency.in_(('USDT','TJS')),
         )
     )).scalars().all() if finance_trader_ids else []
-    wallets_by_trader = {row.trader_id: row for row in wallet_rows}
+    wallets_by_trader = {row.trader_id: row for row in wallet_rows if row.currency == 'USDT'}
+    local_wallets_by_trader = {row.trader_id: row for row in wallet_rows if row.currency == 'TJS'}
     trader_wallet_views = {
-        str(row.id): wallet_view(row, wallets_by_trader.get(row.id))
+        str(row.id): wallet_view(row, wallets_by_trader.get(row.id), local_wallet=local_wallets_by_trader.get(row.id))
         for row in known_traders.values()
     }
     deposit_ids_for_snapshots = {row.id for row in deposits}
@@ -6037,7 +6058,7 @@ async def role_cabinet(
         active_requests = sum(1 for d in related_deposits if d.status in active_statuses)
         successful_deposits = [d for d in related_deposits if d.status in success_statuses]
         failed_deposits = [d for d in related_deposits if d.status in {DepositStatus.failed.value, DepositStatus.cancelled.value, DepositStatus.expired.value}]
-        foreign = t.working_country in {'AM', 'GE'}
+        foreign = t.working_country in {'AM', 'GE', 'TJ'}
         foreign_totals = foreign_statistics(
             successful_deposits,
             snapshots_by_deposit,
@@ -6299,9 +6320,9 @@ async def role_cabinet(
         context['work_quote'] = await profile_quote(quote_account, db=db)
         quote_wallet = wallets_by_trader.get(quote_account.id)
         context['trader_wallet_views'][str(quote_account.id)] = wallet_view(
-            quote_account, quote_wallet, context['work_quote']
+            quote_account, quote_wallet, context['work_quote'], local_wallet=local_wallets_by_trader.get(quote_account.id)
         )
-        if quote_account.working_country in {'AM', 'GE'}:
+        if quote_account.working_country in {'AM', 'GE', 'TJ'}:
             local_banks = await list_country_banks(db, quote_account.working_country)
             context['local_bank_options'] = [
                 {
@@ -6321,6 +6342,18 @@ async def role_cabinet(
                 context['payment_method_options'] = [{'value': 'kz-ge', 'label': 'KZ → GE'}]
                 context['deposit_active_statuses'] = ['pending']
                 context['deposit_terminal_statuses'] = ['paid', 'cancelled', 'refunded']
+            elif role == 'trader' and quote_account.working_country == 'TJ':
+                context['bank_options'] = [{**bank, 'code': str(bank['id'])} for bank in context['local_bank_options']]
+                context['payment_method_options'] = [{'value': 'c2c', 'label': 'TJ → TJ · C2C'}]
+    from app.web.tj import cabinet_context as tj_context
+    tj_merchant = context.get('profile_merchant') or merchant
+    tj_trader = context.get('profile_working_account') or trader_subject
+    context['tj_cabinet'] = await tj_context(db, merchant=tj_merchant) if tj_merchant and tj_merchant.working_country == 'TJ' else await tj_context(db, trader=tj_trader)
+    context['is_tj_cabinet'] = bool(context['tj_cabinet'])
+    if context['is_tj_cabinet'] and role in ('merchant','trader','operator'):
+        context['sections'] = [s for s in sections if s not in ('Трансгран','Rolling','Settle — Россия','Settle — Казахстан','Выплаты','Вывод средств')]
+        if 'Тарифы' not in context['sections']:
+            context['sections'].append('Тарифы')
     return templates.TemplateResponse(request=request, name='cabinet.html', context=context)
 
 
@@ -6329,3 +6362,5 @@ router.include_router(crossborder_live_router)
 
 from app.web.settlements import router as settlement_router
 router.include_router(settlement_router)
+from app.web.tj import router as tj_router
+router.include_router(tj_router)

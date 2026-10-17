@@ -20,7 +20,7 @@
       if (initial && group.dataset.currentPlan) plans.value = group.dataset.currentPlan;
       group.querySelector('[data-merchant-basis]').textContent = country.value === 'KZ'
         ? 'Номинал и ориентиры — KZT. Ступень комиссии и расчёты — BASE_USDT; обновление курса не меняет утверждённые границы.'
-        : country.value === 'RU' ? 'Диапазоны чеков и расчёт комиссии — RUB. Курс Rapira применяется по существующим правилам.' : '';
+        : country.value === 'TJ' ? 'Диапазоны — TJS, минимум 10 TJS. Приём закрыт до подтверждения источника Rapira Green 1–3.' : country.value === 'RU' ? 'Диапазоны чеков и расчёт комиссии — RUB. Курс Rapira применяется по существующим правилам.' : '';
     };
     country.addEventListener('change', () => sync(false)); sync(true);
   });

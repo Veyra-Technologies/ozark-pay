@@ -63,6 +63,12 @@ from app.services.external_processors import (
 router=APIRouter(prefix='/merchant', tags=['merchant-api'])
 
 def _require_local_method(merchant, data):
+    if merchant.working_country == 'TJ':
+        from app.core.tajikistan import BLOCK_REASON, validate_amount
+        if data.currency != 'TJS' or data.method.value != 'c2c':
+            raise merchant_error(422, 'country_method_mismatch', 'TJ cabinet requires TJS and C2C.')
+        validate_amount(data.amount)
+        raise merchant_error(503, 'tj_contract_unconfirmed', BLOCK_REASON)
     if merchant.working_country and merchant.working_country != 'RU':
         raise merchant_error(422, 'country_method_mismatch', 'This cabinet uses its country-specific Merchant API.')
     if merchant.working_country == 'RU' and data.currency != 'RUB':
@@ -333,6 +339,8 @@ async def _rolling_fields_for_deposit(db: AsyncSession, dep: Deposit) -> dict:
 
 @router.post('/deposits')
 async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
+    if merchant.working_country == 'TJ':
+        _require_local_method(merchant, data)
     idem = _idempotency_key(request, data.external_id)
     request_fingerprint = _request_fingerprint('deposit', data)
     callback_url = (data.metadata or {}).get('callback_url')
@@ -686,10 +694,11 @@ async def cancel_payout(external_id: str, request: Request, db: AsyncSession=Dep
 
 @router.get('/balance')
 async def balance(request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
-    currency = 'USDT' if merchant.working_country == 'KZ' else 'RUB'
+    currency = 'TJS' if merchant.working_country == 'TJ' else 'USDT' if merchant.working_country == 'KZ' else 'RUB'
     balances = (await db.execute(select(Balance).where(Balance.merchant_id == merchant.id))).scalars().all()
     b = next((row for row in balances if row.currency == currency), None)
-    finance = await rolling_overview(db, merchant.id)
+    finance = ({'enabled': False, 'code': 'tj_policy_unconfirmed'} if merchant.working_country == 'TJ'
+               else await rolling_overview(db, merchant.id))
     await log_req(db,merchant,request); await db.commit()
     rolling_payload = {
         key: (str(value) if isinstance(value, Decimal) else value)
@@ -716,7 +725,7 @@ async def statistics(request: Request, db: AsyncSession=Depends(get_db), merchan
     pay_failed=(await db.execute(select(func.count()).select_from(Payout).where(Payout.merchant_id==merchant.id, Payout.status.in_([PayoutStatus.failed.value,PayoutStatus.cancelled.value,PayoutStatus.rejected.value])))).scalar_one()
     turnover=(await db.execute(select(func.coalesce(func.sum(Deposit.amount),0)).where(Deposit.merchant_id==merchant.id, Deposit.status==DepositStatus.paid.value))).scalar_one()
     await log_req(db,merchant,request); await db.commit()
-    return {'turnover':turnover,'successful_deposits':dep_success,'failed_deposits':dep_failed,'successful_payouts':pay_success,'failed_payouts':pay_failed,'conversion': float(dep_success / max(dep_success+dep_failed,1))}
+    return {'turnover':turnover,'successful_deposits':dep_success,'failed_deposits':dep_failed,'successful_payouts':pay_success,'failed_payouts':pay_failed,'conversion': float(dep_success / max(dep_success+dep_failed,1)), **({'currency':'TJS','working_country':'TJ'} if merchant.working_country == 'TJ' else {})}
 
 def _deposit_operation_out(dep: Deposit) -> dict:
     return {

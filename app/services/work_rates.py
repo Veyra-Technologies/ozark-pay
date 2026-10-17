@@ -5,6 +5,11 @@ from app.services.trader_work import RATE_SOURCES
 
 
 async def profile_quote(account, *, db):
+    if account and account.working_country == 'TJ':
+        from app.core.tajikistan import BLOCK_REASON, PARSER_ID
+        return {'available': False, 'source': PARSER_ID, 'currency': 'TJS', 'rate': None,
+                'provider_timestamp': None, 'fetched_at': None, 'rate_type': 'mean_1_3',
+                'reason': BLOCK_REASON, 'code': 'tj_contract_unconfirmed'}
     currency = account.working_currency if account else None
     source = account.working_rate_source if account else None
     result = {'available': False, 'source': source, 'currency': currency,

@@ -38,7 +38,7 @@ class User(Base, TimestampMixin):
     working_country: Mapped[str|None]=mapped_column(String(2), nullable=True)
     working_currency: Mapped[str|None]=mapped_column(String(3), nullable=True)
     working_rate_source: Mapped[str|None]=mapped_column(String(16), nullable=True,
-        default=lambda context: {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe'}.get(context.get_current_parameters().get('working_country')))
+        default=lambda context: {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe', 'TJ': 'rapira_green_tjs'}.get(context.get_current_parameters().get('working_country')))
     trader_account_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True, index=True)
     trader_hold: Mapped[Decimal]=mapped_column(Numeric(18,2), default=Decimal('0.00'))
     trader_traffic_priority: Mapped[int]=mapped_column(Integer, default=50)
@@ -60,7 +60,7 @@ class Merchant(Base, TimestampMixin):
     __tablename__='merchants'
     __table_args__ = (
         UniqueConstraint('business_id', 'working_country', name='uq_merchant_business_country'),
-        CheckConstraint("(working_country IS NULL AND rate_parser_id IS NULL) OR (working_country IS NOT NULL AND rate_parser_id IS NOT NULL AND business_id IS NOT NULL AND ((working_country='RU' AND rate_parser_id='rapira') OR (working_country='KZ' AND rate_parser_id='binance_p2p_kaspi_buy_100000_avg10') OR (working_country='GE' AND rate_parser_id='xe')))", name='ck_merchant_country_parser'),
+        CheckConstraint("(working_country IS NULL AND rate_parser_id IS NULL) OR (working_country IS NOT NULL AND rate_parser_id IS NOT NULL AND business_id IS NOT NULL AND ((working_country='RU' AND rate_parser_id='rapira') OR (working_country='KZ' AND rate_parser_id='binance_p2p_kaspi_buy_100000_avg10') OR (working_country='GE' AND rate_parser_id='xe'))) OR COALESCE(working_country='TJ' AND rate_parser_id='rapira_green_tjs' AND business_id IS NOT NULL,false)", name='ck_merchant_country_parser'),
     )
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id: Mapped[uuid.UUID|None] = mapped_column(UUID(as_uuid=True), ForeignKey('business_accounts.id', ondelete='RESTRICT'), nullable=True)
@@ -344,7 +344,7 @@ class TraderWallet(Base, TimestampMixin):
     hold: Mapped[Decimal] = mapped_column(Numeric(24, 8), default=Decimal('0'))
     __table_args__ = (
         UniqueConstraint('trader_id', 'currency', name='uq_trader_wallet_currency'),
-        CheckConstraint("currency = 'USDT'", name='ck_trader_wallet_usdt'),
+        CheckConstraint("currency IN ('USDT','TJS')", name='ck_trader_wallet_usdt'),
         CheckConstraint('balance >= 0 AND hold >= 0 AND hold <= balance', name='ck_trader_wallet_amounts'),
     )
 
@@ -363,7 +363,7 @@ class TraderWalletLedgerEntry(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(String(500), default='')
     idempotency_key: Mapped[str | None] = mapped_column(String(160), unique=True, nullable=True)
     __table_args__ = (
-        CheckConstraint("currency = 'USDT'", name='ck_trader_wallet_ledger_usdt'),
+        CheckConstraint("currency IN ('USDT','TJS')", name='ck_trader_wallet_ledger_usdt'),
         CheckConstraint('balance_after >= 0 AND hold_after >= 0 AND hold_after <= balance_after', name='ck_trader_wallet_ledger_amounts'),
     )
 
@@ -1300,8 +1300,8 @@ class BankDirectory(Base, TimestampMixin):
     verified_on: Mapped[date] = mapped_column(Date)
     __table_args__ = (
         UniqueConstraint('country', 'name', name='uq_bank_directory_country_name'),
-        CheckConstraint("country IN ('AM','GE')", name='ck_bank_directory_country'),
-        CheckConstraint("institution_type IN ('bank','microbank')", name='ck_bank_directory_type'),
+        CheckConstraint("country IN ('AM','GE','TJ')", name='ck_bank_directory_country'),
+        CheckConstraint("institution_type IN ('bank','microbank','payment_system')", name='ck_bank_directory_type'),
         CheckConstraint("status IN ('active','inactive')", name='ck_bank_directory_status'),
     )
 
@@ -1571,6 +1571,8 @@ class ApiRequestLog(Base, TimestampMixin):
 
 class AggregatorAccount(Base, TimestampMixin):
     __tablename__='aggregator_accounts'
+    working_country: Mapped[str|None]=mapped_column(String(2), nullable=True)
+    working_currency: Mapped[str|None]=mapped_column(String(3), nullable=True)
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     platform_merchant_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='RESTRICT'), index=True)
     name: Mapped[str]=mapped_column(String(160))

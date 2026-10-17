@@ -328,6 +328,8 @@ async def select_deposit_requisite(
         select(Requisite)
         .where(
             Requisite.method.in_(method_candidates),
+            Requisite.country == 'RU',
+            Requisite.currency == 'RUB',
             Requisite.enabled == True,
             Requisite.status == 'active',
             Requisite.is_archived == False,

@@ -35,7 +35,7 @@ class MerchantCreate(BaseModel):
     tariff_plan_id: UUID
     payment_methods: list[str] = Field(min_length=1)
     model_config = ConfigDict(extra='forbid')
-    country: Literal['RU', 'KZ', 'GE']
+    country: Literal['RU', 'KZ', 'GE', 'TJ']
     parser_id: str
     business_id: UUID | None = None
     email: str = Field(min_length=5, max_length=255)
@@ -64,6 +64,8 @@ class MerchantCreate(BaseModel):
         return validate_ip_whitelist(value)
 
 class AggregatorCreate(BaseModel):
+    country: Literal['RU','TJ'] = 'RU'
+    tariff_plan_id: UUID | None = None
     name: str = Field(min_length=2, max_length=160)
     callback_url: str | None = None
     success_url: str | None = None
@@ -73,6 +75,12 @@ class AggregatorCreate(BaseModel):
     max_payment_amount: Decimal = Field(default=150000, gt=0, decimal_places=2)
     daily_limit: Decimal | None = Field(default=None, ge=0, decimal_places=2)
     monthly_limit: Decimal | None = Field(default=None, ge=0, decimal_places=2)
+
+    @model_validator(mode='after')
+    def tj_configuration(self):
+        if self.country == 'TJ' and (not self.tariff_plan_id or not {'min_payment_amount','max_payment_amount','commission_percent'} <= self.model_fields_set or self.min_payment_amount < 10):
+            raise ValueError('Для TJ нужны явные лимиты от 10 TJS, комиссия и тариф TJ.')
+        return self
 
     @field_validator('callback_url', 'success_url', 'fail_url')
     @classmethod
@@ -153,8 +161,8 @@ class AggregatorPaymentCreate(BaseModel):
     @classmethod
     def validate_aggregator_currency(cls, value: str) -> str:
         value = value.upper().strip()
-        if value != 'RUB':
-            raise ValueError('only RUB currency is supported')
+        if value not in ('RUB', 'TJS'):
+            raise ValueError('only RUB or TJS currency is supported')
         return value
 
     @field_validator('payment_method')
@@ -179,6 +187,15 @@ class AggregatorPaymentCreate(BaseModel):
     @classmethod
     def validate_payment_urls(cls, value: str | None) -> str | None:
         return validate_public_webhook_url(value)
+
+    @model_validator(mode='after')
+    def validate_tj_dimensions(self):
+        if self.currency == 'TJS':
+            from app.core.tajikistan import validate_amount
+            validate_amount(self.amount)
+            if self.payment_method != 'c2c':
+                raise ValueError('TJ supports prepared C2C only')
+        return self
 
 class PaymentCreate(BaseModel):
     external_id: str = Field(min_length=1, max_length=128)
@@ -205,8 +222,8 @@ class PaymentCreate(BaseModel):
     @classmethod
     def normalize_currency(cls, value: str) -> str:
         value = value.upper().strip()
-        if value != 'RUB':
-            raise ValueError('only RUB currency is supported for payment operations')
+        if value not in ('RUB','TJS'):
+            raise ValueError('only RUB or TJS currency is supported for local payment operations')
         return value
 
     @field_validator('method', mode='before')
@@ -220,6 +237,18 @@ class PaymentCreate(BaseModel):
         if value == PaymentMethod.mobile:
             return PaymentMethod.mobile_commerce
         return value
+
+    @model_validator(mode='after')
+    def validate_tj_dimensions(self):
+        if self.currency == 'TJS':
+            from app.core.tajikistan import validate_amount
+            validate_amount(self.amount)
+            if self.method != PaymentMethod.c2c:
+                raise ValueError('Для TJ подготовлен только C2C; QR пока недоступен.')
+        elif self.method == PaymentMethod.tj_qr:
+            raise ValueError('TJ QR не является российским способом оплаты.')
+        return self
+
 
 class PayoutCreate(PaymentCreate):
     destination: str = Field(min_length=3, max_length=255)
@@ -365,10 +394,10 @@ class UserCreateIn(BaseModel):
     merchant_payment_methods: list[str] | None = None
     trader_tariff_method: str | None = None
     model_config = ConfigDict(extra='forbid')
-    merchant_country: Literal['RU', 'KZ', 'GE'] | None = None
+    merchant_country: Literal['RU', 'KZ', 'GE', 'TJ'] | None = None
     merchant_parser_id: str | None = None
     business_id: UUID | None = None
-    working_country: str | None = Field(default=None, pattern='^(RU|AM|GE)$')
+    working_country: str | None = Field(default=None, pattern='^(RU|AM|GE|TJ)$')
     working_currency: str | None = None
     working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe)$')
     trader_account_id: UUID | None = None
@@ -387,7 +416,7 @@ class UserCreateIn(BaseModel):
 
 class WorkingCountryIn(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    working_country: str = Field(pattern='^(RU|AM|GE)$')
+    working_country: str = Field(pattern='^(RU|AM|GE|TJ)$')
     working_currency: str | None = None
     working_rate_source: str | None = Field(default=None, pattern='^(rapira|xe)$')
 

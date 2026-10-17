@@ -1,0 +1,3 @@
+<h3>Назначенный тариф TJ · TJS · C2C</h3>
+{% for tier in tj_cabinet.current_tiers %}<p>{{ tier.min }} … {{ tier.max or '∞' }} TJS · {{ tier.percent }}%</p>{% else %}<p>Тариф не назначен. Начальные ставки не устанавливаются автоматически.</p>{% endfor %}
+<details><summary>Версии доступных тарифов TJ</summary><div class="table-wrap"><table><tr><th>Версия</th><th>Диапазоны TJS</th><th>Начало действия</th></tr>{% for plan in tj_cabinet.tariffs %}<tr><td>v{{ plan.version }}</td><td>{% for tier in plan.tiers %}<div>{{ tier.min }} … {{ tier.max or '∞' }} TJS · {{ tier.percent }}%</div>{% endfor %}</td><td>{{ plan.effective_from }}</td></tr>{% else %}<tr><td colspan="3">Версий нет.</td></tr>{% endfor %}</table></div></details>
