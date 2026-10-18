@@ -59,7 +59,7 @@ class SelectedPaymentRequisite:
             self.requisite.operator_code,
             self.requisite.bank_name,
         )
-        if self.requisite.country == 'TJ':
+        if getattr(self.requisite, 'country', None) == 'TJ':
             provider = {'bank': self.requisite.bank_name or '', 'bank_id': self.requisite.bank_id,
                         'provider_type': (self.financial_context or {}).get('requisite',{}).get('institution_type','bank'), 'country': 'TJ'}
         return {

@@ -2532,7 +2532,9 @@ async def cabinet_decline_deposit(
         return RedirectResponse('/login', status_code=303)
     if staff_2fa_setup_required(user):
         return _twofa_redirect()
-    if user.role not in [Role.superadmin.value, Role.admin.value, Role.trader.value]:
+    if user.role not in [Role.superadmin.value, Role.admin.value] and not (
+        user.role == Role.trader.value and getattr(user, 'working_country', None) == 'TJ'
+    ):
         raise HTTPException(403, 'Only admin or superadmin may decline a deposit')
     reason = reason.strip()
     if user.role == Role.superadmin.value and not reason:
