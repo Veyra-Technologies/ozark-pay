@@ -22,13 +22,13 @@
     </div>
     <div class="actions filter-actions"><button class="primary" type="submit">Найти</button><a class="secondary reset-link" href="{{ cabinet_base }}">Сбросить</a></div>
   </form>
-  <div class="table-wrap appeals-table"><table><tr><th>ID</th><th>Сделка</th><th>Мерчант</th><th>Трейдер</th><th>Сумма</th><th>Срок</th><th>Статус</th><th>Действие</th></tr>
+  <div class="table-wrap appeals-table"><table><tr><th>ID</th><th>Сделка</th><th>Мерчант</th><th>Исполнитель</th><th>Сумма</th><th>Срок</th><th>Статус</th><th>Действие</th></tr>
   {% for a in appeals %}{% set ad = appeal_details.get(a.id|string, {}) %}{% set dep = ad.get('deposit') %}
   <tr class="appeal-row" data-modal-open="appealModal{{ loop.index }}">
     <td><span class="cell-mono cell-ellipsis" title="{{ a.id }}">{{ a.id }}</span></td>
     <td><span class="cell-mono cell-ellipsis" title="{{ dep.external_id if dep and dep.external_id else a.operation_id }}">{{ dep.external_id if dep and dep.external_id else a.operation_id }}</span></td>
     <td>{{ ad.get('merchant_name','—') }}</td>
-    <td>{{ ad.get('trader_email','—') }}</td>
+    <td>{{ ad.get('executor_name',ad.get('trader_email','—')) }}<small>{{ ad.get('executor_label','Трейдер OzarkPay') }}</small></td>
     <td><b>{{ ad.get('amount_claimed','0.00')|tj_money if is_tj_cabinet else ad.get('amount_claimed','0.00') }}</b> {{ dep.currency if dep else 'RUB' }}{% if ad.get('corrected_amount') %}<div class="compact-note">верная сумма: {{ (ad.get('corrected_amount'))|decimal_display }} {{ dep.currency if dep else 'RUB' }}</div>{% endif %}</td>
     <td>{% if ad.get('is_timer_active') %}<span class="timer" data-countdown="{{ ad.get('remaining_seconds',0) }}">90:00</span>{% else %}<span class="small muted">{{ ad.get('deadline_iso','—') }}</span>{% endif %}</td>
     <td>{% if a.status == 'approved' %}<span class="status-pill status-ok">approved</span>{% elif a.status in ['opened','in_review','returned_to_processing'] %}<span class="status-pill status-wait">{{ 'waiting' if a.status == 'in_review' else a.status }}</span>{% elif a.status in ['rejected','closed'] %}<span class="status-pill status-bad">{{ a.status|status_label }}</span>{% else %}<span class="status-pill status-neutral">{{ a.status|status_label }}</span>{% endif %}</td>
@@ -59,7 +59,7 @@
         </div>
         <div class="appeal-info-grid">
           <div class="appeal-info"><b>Сделка</b><span class="cell-mono cell-ellipsis" title="{{ dep.external_id if dep and dep.external_id else a.operation_id }}">{{ dep.external_id if dep and dep.external_id else a.operation_id }}</span></div>
-          <div class="appeal-info"><b>Трейдер</b>{{ ad.get('trader_email','—') }}</div>
+          <div class="appeal-info"><b>Исполнитель</b>{{ ad.get('executor_name',ad.get('trader_email','—')) }}<small>{{ ad.get('executor_label','Трейдер OzarkPay') }}</small></div>
           <div class="appeal-info"><b>Реквизит</b><span class="cell-mono cell-ellipsis" title="{{ ad.get('requisite') or '—' }}">{{ ad.get('requisite') or '—' }}</span></div>
           <div class="appeal-info"><b>Банк получателя</b>{{ (ad.get('recipient_bank') or '')|bank_display or '—' }}</div>
           <div class="appeal-info"><b>Дата операции</b><span class="small">{{ ad.get('operation_date') or '—' }}</span></div>

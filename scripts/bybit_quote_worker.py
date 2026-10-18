@@ -51,7 +51,8 @@ async def run(*, activate):
                 print(json.dumps({'at': datetime.now(timezone.utc).isoformat(), 'status': state['status'],
                     'available': state['available'], 'error': state.get('last_error'),
                     'ad_ids': quote.get('ad_ids'), 'prices': quote.get('raw_values'), 'rate': quote.get('rate'),
-                    'unit': quote.get('unit'), 'fetched_at': quote.get('fetched_at'), 'expires_at': quote.get('expires_at')}), flush=True)
+                    'unit': quote.get('unit'), 'fetched_at': quote.get('fetched_at'),
+                    'expires_at': quote.get('expires_at'), 'last_success_at': state.get('last_success_at')}), flush=True)
         except Exception as exc:
             # Do not log exception text, request objects, headers or credentials.
             print(json.dumps({'status': 'unavailable', 'error': type(exc).__name__}), flush=True)

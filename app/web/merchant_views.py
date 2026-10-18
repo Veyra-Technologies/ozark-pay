@@ -10,7 +10,7 @@ from app.models import CrossBorderOperation, LedgerEntry, Requisite, User
 
 def settlement_currency(merchant):
     if merchant and merchant.working_country == 'TJ':
-        return 'TJS'
+        return 'USDT'
     return 'USDT' if merchant and merchant.working_country == 'KZ' else 'RUB'
 
 

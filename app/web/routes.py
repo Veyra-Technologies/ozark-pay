@@ -397,7 +397,7 @@ for _income_role in ('superadmin', 'admin'):
         ROLE_SECTIONS[_income_role].insert(-1, 'Доход площадки')
 
 for _crossborder_role in ('superadmin', 'admin'):
-    ROLE_SECTIONS[_crossborder_role].extend(['Трансгран', 'Settle — Россия', 'Settle — Казахстан'])
+    ROLE_SECTIONS[_crossborder_role].extend(['Трансгран', 'Settle — Россия', 'Settle — Казахстан', 'Settle — Таджикистан'])
 
 
 @router.get('/cabinet/teamlead/settlements/quote')
@@ -4998,7 +4998,7 @@ async def role_cabinet(
         try: return max(1, min(int(request.query_params.get(name,1)),100000))
         except (TypeError, ValueError): return 1
     settlement_page = settle_page('settlement_page')
-    settlement_queue_pages = {country: settle_page('settle_'+country.lower()+'_page') for country in ('RU','KZ')}
+    settlement_queue_pages = {country: settle_page('settle_'+country.lower()+'_page') for country in ('RU','KZ','TJ')}
     webhook_events = []
     attempts_by_event_id = {}
     webhook_event_views = []
@@ -5517,7 +5517,7 @@ async def role_cabinet(
                 }
 
     if role in ('superadmin','admin') and not staff_2fa_setup_required(user):
-        for country in ('RU','KZ'):
+        for country in ('RU','KZ','TJ'):
             settlement_queues[country] = await merchant_settlement_service.settlement_history(
                 db, country=country, page=settlement_queue_pages[country])
         merchant_settlements = [row for rows in settlement_queues.values() for row in rows]
@@ -5528,7 +5528,7 @@ async def role_cabinet(
                 MerchantSettlement.id == PlatformLedgerEntry.operation_id).where(
                     PlatformLedgerEntry.entry_type == 'settlement_fee_income').group_by(
                         MerchantSettlement.country, PlatformLedgerEntry.currency))).all()
-        settlement_fee_income = {'RU':{'RUB':Decimal(0)},'KZ':{'USDT':Decimal(0)}}
+        settlement_fee_income = {'RU':{'RUB':Decimal(0)},'KZ':{'USDT':Decimal(0)},'TJ':{'USDT':Decimal(0)}}
         for country,currency,total in fee_rows:
             settlement_fee_income.setdefault(country,{})[currency] = total
     elif role == Role.merchant.value and merchant:
@@ -5961,6 +5961,13 @@ async def role_cabinet(
     if appeal_merchant_ids:
         appeal_merchants = (await db.execute(select(Merchant).where(Merchant.id.in_(appeal_merchant_ids)))).scalars().all()
         appeal_merchant_names = {str(m.id): m.name for m in appeal_merchants}
+    appeal_aggregator_ids = {dep.financial_executor_id for dep in appeal_deposits.values()
+                            if dep.financial_executor_type == 'aggregator' and dep.financial_executor_id}
+    appeal_aggregator_names = {}
+    if appeal_aggregator_ids:
+        executors = (await db.execute(select(AggregatorAccount).where(
+            AggregatorAccount.id.in_(appeal_aggregator_ids)))).scalars().all()
+        appeal_aggregator_names = {row.id: row.name for row in executors}
     for appeal in appeals:
         dep = appeal_deposits.get(appeal.operation_id)
         req = req_by_id.get(dep.requisites_id) if dep and dep.requisites_id else None
@@ -5972,7 +5979,12 @@ async def role_cabinet(
             'deposit': dep,
             'merchant_name': appeal_merchant_names.get(str(dep.merchant_id), str(dep.merchant_id)) if dep else '?',
             'trader_id': trader_id,
-            'trader_email': trader.email if trader else trader_email_map.get(trader_id, '?'),
+            'trader_email': trader.email if trader else trader_email_map.get(trader_id, '—'),
+            'executor_type': 'aggregator' if dep and dep.financial_executor_type == 'aggregator' else 'trader',
+            'executor_label': 'External Aggregator' if dep and dep.financial_executor_type == 'aggregator' else 'Трейдер OzarkPay',
+            'executor_name': (appeal_aggregator_names.get(dep.financial_executor_id, str(dep.financial_executor_id))
+                if dep and dep.financial_executor_type == 'aggregator'
+                else trader.email if trader else trader_email_map.get(trader_id, trader_id or '—')),
             'amount_claimed': meta.get('amount_claimed') or (str(dep.amount) if dep else '0.00'),
             'requisite': meta.get('requisite') or (display_requisite_value(req) if req else ''),
             'recipient_bank': meta.get('recipient_bank') or (requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else ''),
@@ -6426,7 +6438,7 @@ async def role_cabinet(
         from app.services.aggregator_execution import own_context
         context['external_aggregator'] = await own_context(db, account, request=request) if account else None
     if context['is_tj_cabinet'] and role in ('merchant','trader','operator'):
-        context['sections'] = [s for s in sections if s not in ('Трансгран','Тарифы','Rolling','Settle — Россия','Settle — Казахстан','Выплаты','Вывод средств')]
+        context['sections'] = [s for s in sections if s not in ('Трансгран','Тарифы','Rolling','Settle — Россия','Settle — Казахстан','Settle — Таджикистан','Выплаты','Вывод средств')]
         if role == 'merchant':
             context['sections'].extend(['Settlement', 'Rolling'])
         # Obsolete customer tariff bookmarks cannot expose staff tariff editors.

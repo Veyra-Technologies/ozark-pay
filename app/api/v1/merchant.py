@@ -327,7 +327,12 @@ async def _rolling_fields_for_deposit(db: AsyncSession, dep: Deposit) -> dict:
         context = row.financial_context if row else None
         if not context:
             return {'financial_snapshot': None}
-        return {'financial_snapshot': {key: context[key] for key in (
+        allocation = await db.scalar(select(MerchantRollingAllocation).where(MerchantRollingAllocation.deposit_id == dep.id))
+        return {'rolling_eligible': bool(allocation),
+            'rolling': ({'status':allocation.status, 'merchant_payable_usdt':str(allocation.merchant_payable_usdt),
+                'rolling_applied_usdt':str(allocation.rolling_applied_usdt),
+                'settle_credited_usdt':str(allocation.settle_credited_usdt)} if allocation else None),
+            'financial_snapshot': {key: context[key] for key in (
             'local_currency', 'accounting_currency', 'amount_tjs', 'base_usdt',
             'merchant_fee_tjs', 'merchant_fee_usdt', 'merchant_payable_usdt')}}
     allocation = (await db.execute(
@@ -381,8 +386,11 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
             raise merchant_error(403, 'merchant_creation_required')
         try:
             await local_policy.require_execution(db)
+            from app.services.rolling import require_tj_roll_clear
+            await require_tj_roll_clear(db, merchant.id)
         except ValueError as exc:
-            raise merchant_error(503, 'tj_contract_unconfirmed') from exc
+            code = 'tj_roll_execution_contract_required' if str(exc) == 'tj_roll_execution_contract_required' else 'tj_contract_unconfirmed'
+            raise merchant_error(503, code) from exc
         if getattr(request.state, 'merchant_hmac_version', None) != HMAC_V2:
             raise merchant_error(403, 'hmac_v2_required')
         _require_local_method(merchant, data, local_authorized=True)
@@ -657,6 +665,9 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
                 snapshot=snapshot,
                 quote=rolling_quote,
             )
+        else:
+            from app.services.rolling import create_tj_pending_allocation
+            await create_tj_pending_allocation(db, deposit=dep, snapshot=snapshot)
     except IntegrityError as exc:
         await db.rollback()
         existing = await _existing_deposit_or_conflict(db, merchant, data, idem, request_fingerprint)
@@ -781,11 +792,10 @@ async def cancel_payout(external_id: str, request: Request, db: AsyncSession=Dep
 
 @router.get('/balance')
 async def balance(request: Request, db: AsyncSession=Depends(get_db), merchant: Merchant=Depends(merchant_auth)):
-    currency = 'TJS' if merchant.working_country == 'TJ' else 'USDT' if merchant.working_country == 'KZ' else 'RUB'
+    currency = 'USDT' if merchant.working_country in ('KZ','TJ') else 'RUB'
     balances = (await db.execute(select(Balance).where(Balance.merchant_id == merchant.id))).scalars().all()
     b = next((row for row in balances if row.currency == currency), None)
-    finance = ({'enabled': False, 'code': 'tj_policy_unconfirmed'} if merchant.working_country == 'TJ'
-               else await rolling_overview(db, merchant.id))
+    finance = await rolling_overview(db, merchant.id)
     await log_req(db,merchant,request); await db.commit()
     rolling_payload = {
         key: (str(value) if isinstance(value, Decimal) else value)

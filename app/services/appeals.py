@@ -220,8 +220,7 @@ async def approve_deposit_appeal(db: AsyncSession, appeal: Appeal, *, actor_id=N
         raise ValueError('appeal finance has already been applied')
     trader_id = meta.get('trader_id')
     await settle_trader_for_approved_appeal(db, dep, trader_id)
-    if dep.currency != 'TJS':
-        await reopen_released_allocation(db, dep, reason='appeal approved', idempotency_suffix=str(appeal.id))
+    await reopen_released_allocation(db, dep, reason='appeal approved', idempotency_suffix=str(appeal.id))
     dep.status = DepositStatus.paid.value
     settlement = await settle_deposit_credit(
         db,

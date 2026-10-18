@@ -253,9 +253,9 @@ class MerchantSettlement(Base, TimestampMixin):
     merchant=relationship('Merchant', back_populates='settlements')
     __table_args__=(
         Index('ix_settlement_country_status', 'country', 'status', 'created_at'),
-        CheckConstraint("country IN ('RU','KZ') AND balance_currency IN ('RUB','USDT')", name='ck_settlement_country_currency'),
+        CheckConstraint("country IN ('RU','KZ','TJ') AND balance_currency IN ('RUB','USDT')", name='ck_settlement_country_currency'),
         CheckConstraint("status IN ('pending','approved','sent','reconciliation','completed','rejected')", name='ck_settlement_status'),
-        CheckConstraint("contract_version=0 OR ((contract_version=1 AND fee_usdt=5 AND amount_usdt>0\nAND total_usdt=amount_usdt+fee_usdt AND reserve_amount=payout_balance_amount+fee_balance_amount\nAND balance_id IS NOT NULL AND network='TRC20'\nAND ((country='RU' AND balance_currency='RUB' AND rate_rub>0\nAND payout_balance_amount=amount_rub AND fee_balance_amount=fee_rub AND reserve_amount=total_debit_rub\nAND amount_rub=round(amount_usdt*rate_rub,2) AND fee_rub=round(fee_usdt*rate_rub,2))\nOR (country='KZ' AND balance_currency='USDT' AND payout_balance_amount=amount_usdt\nAND fee_balance_amount=fee_usdt AND reserve_amount=total_usdt AND rate_rub IS NULL\nAND amount_rub IS NULL AND fee_rub IS NULL AND total_debit_rub IS NULL))) IS TRUE)", name='ck_settlement_financial_contract'),
+        CheckConstraint("contract_version=0 OR ((contract_version=1 AND fee_usdt=5 AND amount_usdt>0\nAND total_usdt=amount_usdt+fee_usdt AND reserve_amount=payout_balance_amount+fee_balance_amount\nAND balance_id IS NOT NULL AND network='TRC20'\nAND ((country='RU' AND balance_currency='RUB' AND rate_rub>0\nAND payout_balance_amount=amount_rub AND fee_balance_amount=fee_rub AND reserve_amount=total_debit_rub\nAND amount_rub=round(amount_usdt*rate_rub,2) AND fee_rub=round(fee_usdt*rate_rub,2))\nOR (country IN ('KZ','TJ') AND balance_currency='USDT' AND payout_balance_amount=amount_usdt\nAND fee_balance_amount=fee_usdt AND reserve_amount=total_usdt AND rate_rub IS NULL\nAND amount_rub IS NULL AND fee_rub IS NULL AND total_debit_rub IS NULL))) IS TRUE)", name='ck_settlement_financial_contract'),
         Index('uq_merchant_settlement_registered_tx', 'network', func.lower(tx_hash), unique=True,
               postgresql_where=text('tx_hash IS NOT NULL AND contract_version=1'), sqlite_where=text('tx_hash IS NOT NULL AND contract_version=1')),
         UniqueConstraint(
@@ -893,13 +893,13 @@ class MerchantRollingAccount(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='CASCADE')
     )
     principal_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     recovered_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     outstanding_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     status: Mapped[str] = mapped_column(
         String(16), default=RollingAccountStatus.exhausted.value, index=True
@@ -937,12 +937,12 @@ class MerchantRollingTransfer(Base, TimestampMixin):
         index=True,
     )
     sequence_no: Mapped[int] = mapped_column(Integer)
-    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 8))
     recovered_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     remaining_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     network: Mapped[str | None] = mapped_column(String(32), nullable=True)
     destination_address: Mapped[str | None] = mapped_column(
@@ -1060,25 +1060,34 @@ class MerchantRollingAllocation(Base, TimestampMixin):
     rolling_account_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey('merchant_rolling_accounts.id', ondelete='RESTRICT'), index=True
     )
+    local_currency: Mapped[str] = mapped_column(String(3), default='RUB', server_default='RUB')
+    gross_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    merchant_fee_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    merchant_net_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_local: Mapped[Decimal | None] = mapped_column(Numeric(30, 12), nullable=True)
+    quote_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    rolling_applied_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    settle_credited_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    settle_credited_usdt: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     gross_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     merchant_fee_percent_snapshot: Mapped[Decimal] = mapped_column(Numeric(10, 6))
     merchant_fee_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     merchant_payable_rub: Mapped[Decimal] = mapped_column(
         'merchant_net_rub', Numeric(18, 2)
     )
-    rapira_rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8))
-    rapira_rate_symbol: Mapped[str] = mapped_column(String(16))
-    rapira_rate_side: Mapped[str] = mapped_column(String(8), default='ask')
-    rapira_rate_source: Mapped[str] = mapped_column(String(64))
-    rapira_rate_field: Mapped[str] = mapped_column(String(64), default='askPrice')
-    rapira_rate_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    rapira_rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=True)
+    rapira_rate_symbol: Mapped[str] = mapped_column(String(16), nullable=True)
+    rapira_rate_side: Mapped[str] = mapped_column(String(8), default='ask', nullable=True)
+    rapira_rate_source: Mapped[str] = mapped_column(String(64), nullable=True)
+    rapira_rate_field: Mapped[str] = mapped_column(String(64), default='askPrice', nullable=True)
+    rapira_rate_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     rapira_provider_timestamp: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    rapira_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    rapira_freshness_basis: Mapped[str] = mapped_column(String(32))
+    rapira_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    rapira_freshness_basis: Mapped[str] = mapped_column(String(32), nullable=True)
     merchant_payable_usdt: Mapped[Decimal] = mapped_column(
-        'merchant_net_usdt', Numeric(24, 6)
+        'merchant_net_usdt', Numeric(24, 8)
     )
     eligibility_status: Mapped[str] = mapped_column(
         String(16), default='eligible'
@@ -1093,7 +1102,7 @@ class MerchantRollingAllocation(Base, TimestampMixin):
         String(32), default='confirmed_transfer'
     )
     rolling_applied_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     rolling_applied_rub: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal('0.00')
@@ -1171,7 +1180,10 @@ class MerchantRollingLedgerEntry(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True
     )
     entry_type: Mapped[str] = mapped_column(String(32), index=True)
-    amount_usdt: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    local_currency: Mapped[str] = mapped_column(String(3), default='RUB', server_default='RUB')
+    amount_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_local: Mapped[Decimal | None] = mapped_column(Numeric(30, 12), nullable=True)
+    amount_usdt: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     amount_rub: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     rate_rub: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     network: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -1243,9 +1255,12 @@ class MerchantRollingTransferConsumption(Base, TimestampMixin):
         index=True,
     )
     entry_type: Mapped[str] = mapped_column(String(16))
-    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    local_currency: Mapped[str] = mapped_column(String(3), default='RUB', server_default='RUB')
+    amount_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_local: Mapped[Decimal | None] = mapped_column(Numeric(30, 12), nullable=True)
+    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 8))
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
-    rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8))
+    rate_rub: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(180), unique=True)
     reason: Mapped[str] = mapped_column(String(500))
     __table_args__ = (

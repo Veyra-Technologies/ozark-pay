@@ -246,8 +246,10 @@ async def prepare(db, *, merchant, data, aggregator_id, operation_id, idem, fing
         metadata_json={**(data.metadata or {}), 'processing_route': 'external_aggregator'})
     db.add(deposit)
     await db.flush()
-    await create_operation_fee_snapshot(db, deposit=deposit, merchant_rule=merchant_rule,
+    snapshot = await create_operation_fee_snapshot(db, deposit=deposit, merchant_rule=merchant_rule,
         executor_rule=executor_rule, executor_type='aggregator', executor_id=account.id, financial_context=context)
+    from app.services.rolling import create_tj_pending_allocation
+    await create_tj_pending_allocation(db, deposit=deposit, snapshot=snapshot)
     execution = AggregatorExecution(deposit_id=deposit.id, aggregator_id=account.id,
         integration_version_id=version.id, external_id=str(operation_id), state='prepared', attempts=0)
     db.add(execution)

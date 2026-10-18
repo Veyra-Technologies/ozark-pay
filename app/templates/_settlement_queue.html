@@ -1,4 +1,4 @@
-{% set queue_country = 'RU' if s == 'Settle — Россия' else 'KZ' %}
+{% set queue_country = 'RU' if s == 'Settle — Россия' else ('KZ' if s == 'Settle — Казахстан' else 'TJ') %}
 <p class="compact-note">Выплаты только по заявкам мерчантов. Одобрение сохраняет резерв. Отправка выполняется вручную; TXID и подтверждение исполнения регистрируются отдельными действиями.</p>
 <div class="grid">{% for currency, amount in settlement_fee_income.get(queue_country,{}).items() %}<div class="metric"><b>Учтённые комиссии Settle</b><p>{{ amount|decimal_display }} {{ currency }}</p><small>Отдельно от комиссий депозитов и маржи KZ → GE</small></div>{% endfor %}</div>
 {% for st in settlement_queues.get(queue_country,[]) %}

@@ -134,7 +134,14 @@ async def parser_state(db, parser_id, *, refresh=False, persist=True):
         return {'configuration': {'parser_id': parser_id, 'active': False, 'parameters': PARSER_POLICY.get(parser_id, {})},
                 'available': False, 'status': 'unavailable', 'last_error': 'parser_configuration_missing', 'quote': None}
     state = {'configuration': public_config(config), 'available': False, 'status': 'unavailable',
-             'last_error': None, 'quote': None}
+             'last_error': None, 'quote': None, 'last_success_at': None}
+    if parser_id == 'bybit_p2p_tjs_green_avg3':
+        # Historical success is diagnostic only. It never substitutes for the
+        # current verified Redis quote and cannot admit a financial operation.
+        last_success = await db.scalar(select(RateObservation.fetched_at).where(
+            RateObservation.configuration_id == config.id).order_by(
+            RateObservation.fetched_at.desc()).limit(1))
+        state['last_success_at'] = last_success.isoformat() if last_success else None
     if not config.is_active:
         return {**state, 'last_error': 'parser_disabled'}
     if parser_id == 'bybit_p2p_tjs_green_avg3':
@@ -184,6 +191,8 @@ async def parser_state(db, parser_id, *, refresh=False, persist=True):
             snapshot['contract_confirmed'] = bybit_p2p.verified_contract()
         state.update(available=bool(fresh), status='current' if fresh else 'stale',
                      quote=snapshot, age_seconds=int((now - fetched).total_seconds()))
+        if fresh and parser_id == 'bybit_p2p_tjs_green_avg3':
+            state['last_success_at'] = fetched.isoformat()
         if fresh and persist:
             fingerprint = hashlib.sha256(json.dumps(snapshot, sort_keys=True).encode()).hexdigest()
             statement = insert(RateObservation).values(configuration_id=config.id, fingerprint=fingerprint,

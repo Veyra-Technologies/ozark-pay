@@ -57,7 +57,7 @@
 
 {% if profile_kind %}{% include '_' ~ ('merchant' if profile_kind == 'merchants' else 'trader') ~ '_profile.html' %}{% else %}
 {% for s in sections %}
-{% set section_id = 'settle-ru' if s == 'Settle — Россия' else ('settle-kz' if s == 'Settle — Казахстан' else ('crossborder' if s == 'Трансгран' else ('wallet' if s == 'Кошелёк' else 'sec' ~ loop.index))) %}
+{% set section_id = 'settle-ru' if s == 'Settle — Россия' else ('settle-kz' if s == 'Settle — Казахстан' else ('settle-tj' if s == 'Settle — Таджикистан' else ('crossborder' if s == 'Трансгран' else ('wallet' if s == 'Кошелёк' else 'sec' ~ loop.index)))) %}
 {% set ui_scope = '' %}
 {% if s in ['Мои реквизиты','Реквизиты'] %}{% set ui_scope = 'requisites' %}
 {% elif 'Пополн' in s %}{% set ui_scope = 'deposits' %}
@@ -71,7 +71,7 @@
 {% elif s == 'Пользователи' %}{% set ui_scope = 'users' %}
 {% elif 'Создать кабинет' in s %}{% set ui_scope = 'create' %}
 {% elif s == 'TeamLead' %}{% set ui_scope = 'teamlead' %}
-{% elif s == 'Кошелек' or s in ['Settle — Россия','Settle — Казахстан'] %}{% set ui_scope = 'payouts' %}
+{% elif s == 'Кошелек' or s in ['Settle — Россия','Settle — Казахстан','Settle — Таджикистан'] %}{% set ui_scope = 'payouts' %}
 {% elif s in ['Кошелёк','Баланс'] %}{% set ui_scope = 'wallet' %}
 {% elif 'AI-офис' in s %}{% set ui_scope = 'ai-office' %}
 {% endif %}
@@ -837,7 +837,7 @@
 
   {% elif s == 'Апелляции' %}
   {% include '_appeals.html' %}
-  {% elif s in ['Settle — Россия','Settle — Казахстан'] and role in ['superadmin','admin'] %}
+  {% elif s in ['Settle — Россия','Settle — Казахстан','Settle — Таджикистан'] and role in ['superadmin','admin'] %}
   {% include '_settlement_queue.html' %}
 
   {% elif 'Выплат' in s %}
@@ -854,85 +854,7 @@
   <h3>ROLLING</h3>
   {% set mro = merchant_rolling_overview %}
   {% set pending_rolling_transfers = merchant_rolling_transfers|selectattr('status','equalto','pending_confirmation')|list %}
-  {% if pending_rolling_transfers %}
-  <div class="rolling-card">
-    {% for transfer in pending_rolling_transfers %}
-    {% set transfer_id_text = transfer.id|string %}
-    {% set transfer_source = transfer.source or 'Rapira' %}
-    {% set transfer_source_label = 'Rapira' if transfer_source == 'rapira_live' else transfer_source %}
-    <div class="panel rolling-form-card">
-      <div class="section-head">
-        <div class="heading">
-          <h3>Rolling-перевод #{{ transfer.sequence_no }}</h3>
-          <div class="rolling-secondary-id">Внутренний ID: {{ transfer_id_text[:8] }}…{{ transfer_id_text[-8:] }}</div>
-        </div>
-        <span class="status-pill status-wait">Ожидает подтверждения</span>
-      </div>
-      <div class="detail-grid">
-        <div class="detail-card">
-          <b>Сумма</b>
-          <div class="rolling-amount">{{ ("{:,.2f}".format(transfer.amount_usdt|float) | replace(',', ' '))|decimal_display }} USDT</div>
-        </div>
-        <div class="detail-card"><b>Сеть</b>{{ transfer.network or 'TRC20' }}</div>
-        <div class="detail-card"><b>Дата отправки</b>{{ transfer.sent_at|dt_compact }} UTC</div>
-        <div class="detail-card">
-          <b>Источник</b>
-          <div class="rolling-source-row">
-            <span class="rolling-source-pill">{{ transfer_source_label }}</span>
-            {% if is_rehearsal_environment %}<span class="pill-muted">QA MOCK</span>{% endif %}
-          </div>
-        </div>
-        <div class="detail-card">
-          <b>Destination</b>
-          <div class="rolling-copy-wrap">
-            <span class="rolling-copy-value cell-mono" title="{{ transfer.destination_address }}">{{ transfer.destination_address[:8] }}…{{ transfer.destination_address[-8:] }}</span>
-            <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.destination_address }}">Копировать</button>
-          </div>
-        </div>
-        <div class="detail-card">
-          <b>Tx hash</b>
-          <div class="rolling-copy-wrap">
-            <span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash[:8] }}…{{ transfer.tx_hash[-8:] if transfer.tx_hash else '—' }}</span>
-            {% if transfer.tx_hash %}
-            <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}">Копировать</button>
-            {% endif %}
-          </div>
-        </div>
-      </div>
-      {% if transfer.comment %}
-      <div class="compact-note">Комментарий к переводу: {{ transfer.comment }}</div>
-      {% endif %}
-      <div class="rolling-card-actions">
-        <button class="primary" type="button" data-modal-open="rolling-transfer-confirm-{{ transfer.id }}">Подтвердить получение</button>
-        <button class="secondary" type="button" data-modal-open="rolling-transfer-dispute-{{ transfer.id }}">Сообщить о проблеме</button>
-      </div>
-      <div id="rolling-transfer-confirm-{{ transfer.id }}" class="modal">
-        <div class="modalbox">
-          <h2>Подтверждение поступления</h2>
-          <p>Подтвердить получение {{ ("{:,.2f}".format(transfer.amount_usdt|float) | replace(',', ' '))|decimal_display }} USDT?</p>
-          <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/confirm" data-confirm="Подтвердить получение {{ "{:,.2f}".format(transfer.amount_usdt|float) | replace(',', ' ') }} USDT?" class="modal-actions">
-            {{ csrf_input(request) }}
-            <button class="primary" type="submit">Подтвердить</button>
-            <button class="secondary" type="button" data-modal-close="rolling-transfer-confirm-{{ transfer.id }}">Отмена</button>
-          </form>
-        </div>
-      </div>
-      <div id="rolling-transfer-dispute-{{ transfer.id }}" class="modal">
-        <div class="modalbox">
-          <h2>Сообщить о проблеме</h2>
-          <p>Укажите причину проблемы и отправьте сообщение Superadmin.</p>
-          <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/dispute" class="modal-actions" data-confirm="Отправить сообщение о проблеме?">
-            {{ csrf_input(request) }}
-            <textarea name="reason" required maxlength="500" rows="3" placeholder="Опишите проблему"></textarea>
-            <button class="dangerbtn" type="submit">Отправить сообщение</button>
-            <button class="secondary" type="button" data-modal-close="rolling-transfer-dispute-{{ transfer.id }}">Отмена</button>
-          </form>
-        </div>
-      </div>
-      </div>
-    {% endfor %}
-  </div>
-  {% endif %}
+  {% include '_merchant_rolling_receipts.html' %}
   {% if mro.has_confirmed_rolling %}
   <div class="grid">
     <div class="metric"><b>Confirmed principal</b><p>{{ (mro.principal)|decimal_display }} USDT</p></div>
@@ -1475,6 +1397,7 @@ function activateSection(id, save=true){
     localStorage.setItem('platform_active_section',id);
     const nextUrl=new URL(window.location.href);
     nextUrl.hash=id;
+    if(nextUrl.searchParams.has('section'))nextUrl.searchParams.set('section',id);
     history.replaceState(null,'',nextUrl.pathname+nextUrl.search+nextUrl.hash);
     window.scrollTo({top:0,left:0,behavior:'auto'});
   }
@@ -1603,7 +1526,7 @@ if(SESSION_VIEW_TOKEN){
 const querySection=new URLSearchParams(location.search).get('section');
 const fromHash=location.hash?location.hash.slice(1):'';
 const saved=localStorage.getItem('platform_active_section');
-activateSection(resolveSectionId(querySection)||resolveSectionId(fromHash)||saved||'sec1',false);
+activateSection(resolveSectionId(fromHash)||resolveSectionId(querySection)||saved||'sec1',false);
 function renderCommissionTierForm(form){
   let allState={};
   try{allState=JSON.parse(form.dataset.tierState||'{}');}catch(error){allState={};}

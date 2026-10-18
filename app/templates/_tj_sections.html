@@ -44,11 +44,14 @@
     <div class="metric"><b>В обработке</b><p data-raw-value>{{ (totals.pending+totals.approved+totals.sent+totals.reconciliation)|tj_money }} USDT</p></div>
     <div class="metric"><b>Исполнено</b><p data-raw-value>{{ totals.completed|tj_money }} USDT</p></div>
   </div>
-  <p class="compact-note">Создание выплат TJ закрыто: сеть, комиссия и политика исполнения не утверждены.</p><button disabled type="button">Запросить Settlement</button>
-  <h3>История расчётов</h3><div class="table-wrap"><table><tr><th>Дата</th><th>ID</th><th>Сумма</th><th>Статус</th></tr>{% for row in tj_cabinet.settlements %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.id|short_identifier }}</td><td data-raw-value>{{ row.reserve_amount|tj_money }} {{ row.balance_currency }}</td><td>{{ row.status|status_label }}</td></tr>{% else %}<tr><td colspan="4">Расчётов пока нет</td></tr>{% endfor %}</table></div>
+  {% include '_merchant_settlement.html' %}
 {% elif s == 'Rolling' and role == 'merchant' %}
   {% set rolling=tj_cabinet.rolling %}
+  {% set mro=rolling %}
+  {% include '_merchant_rolling_receipts.html' %}
   <div class="grid">{% for key,label in [('principal','Подтверждено'),('recovered','Погашено'),('outstanding','Остаток обязательства'),('pending_exposure','В обработке')] %}<div class="metric"><b>{{ label }}</b><p data-raw-value>{{ rolling.get(key,0)|tj_money }} USDT</p></div>{% endfor %}</div>
-  <p class="compact-note">Действующий Rolling учитывает авансовое финансирование отдельно от баланса и обеспечения исполнителей. Индивидуальная политика удержаний TJ, процент и сроки разблокирования не назначены. Новые удержания не создаются.</p>
-  <h3>История Rolling</h3><div class="table-wrap"><table><tr><th>Дата</th><th>ID</th><th>Сумма</th><th>Статус</th></tr>{% for row in rolling.get('transfers',[]) %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.id|short_identifier }}</td><td data-raw-value>{{ row.amount_usdt|tj_money }} USDT</td><td>{{ row.status|status_label }}</td></tr>{% else %}<tr><td colspan="4">Индивидуальный Rolling не настроен</td></tr>{% endfor %}</table></div>
+  <p><b>Статус:</b> {{ rolling.status|status_label }}</p>
+  <p class="compact-note">Аванс учитывается после подтверждения его получения. Погашение допускается только по подтверждённым операциям действующего договора.</p>
+  <h3>История финансирования</h3><div class="table-wrap"><table><tr><th>Дата</th><th>ID</th><th>Сумма</th><th>Погашено</th><th>Остаток</th><th>Статус</th></tr>{% for row in rolling.get('transfers',[]) %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.id|short_identifier }}</td><td data-raw-value>{{ row.amount_usdt|tj_money }} USDT</td><td>{{ row.recovered_usdt|tj_money }} USDT</td><td>{{ row.remaining_usdt|tj_money }} USDT</td><td>{{ row.status|status_label }}</td></tr>{% else %}<tr><td colspan="6">Финансирования пока нет</td></tr>{% endfor %}</table></div>
+  <h3>История выполнения</h3><div class="table-wrap"><table><tr><th>Дата</th><th>Операция</th><th>Чистая сумма</th><th>Погашено</th><th>Зачислено в баланс</th><th>Статус</th></tr>{% for row in merchant_rolling_allocations if row.local_currency == 'TJS' %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.deposit_id|short_identifier }}</td><td>{{ row.merchant_net_local|tj_money }} TJS · {{ row.merchant_payable_usdt|tj_money }} USDT</td><td>{{ row.rolling_applied_usdt|tj_money }} USDT</td><td>{{ row.settle_credited_usdt|tj_money }} USDT</td><td>{{ row.status|status_label }}</td></tr>{% else %}<tr><td colspan="6">Подтверждённых операций пока нет</td></tr>{% endfor %}</table></div>
 {% endif %}

@@ -13,7 +13,7 @@ $payload = ConvertFrom-SecureString (ConvertTo-SecureString (Get-Content -Litera
 $workerArgs = @('python','-B','-m','scripts.bybit_quote_worker')
 if ($Activate) { $workerArgs += '--activate' }
 try {
-    $payload | docker run -i --name $ContainerName --network ozark-tj-qa-20261017_default --env-file $resolvedEnvironment --memory 384m --cpus 1 --log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false $Image @workerArgs
+    $payload | docker run -i --name $ContainerName --label com.ozarkpay.service=bybit-readonly --network ozark-tj-qa-20261017_default --env-file $resolvedEnvironment --memory 384m --cpus 1 --health-cmd 'python -B -m scripts.bybit_parser_health' --health-interval 30s --health-timeout 10s --health-start-period 60s --health-retries 2 --log-driver local --log-opt max-size=1m --log-opt max-file=1 --log-opt compress=false $Image @workerArgs
     if ($LASTEXITCODE -ne 0) { throw 'Read-only quote worker stopped' }
 } finally {
     Remove-Variable payload -ErrorAction SilentlyContinue

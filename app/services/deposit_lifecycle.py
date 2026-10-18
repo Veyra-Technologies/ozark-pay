@@ -614,8 +614,7 @@ async def _finalize_unsuccessful_deposit(
     # Global lock order: Deposit -> Requisite/Trader -> Rolling account/allocation.
     if release_trader_hold:
         await release_trader_deposit_hold(db, deposit)
-    if deposit.currency != 'TJS':
-        await release_pending_allocation(db, deposit, reason=reason)
+    await release_pending_allocation(db, deposit, reason=reason)
     await check_payment_result_for_risk(db, deposit)
     # PostgreSQL server_onupdate expires updated_at after autoflush. Refresh it
     # explicitly so the synchronous webhook snapshot builder never triggers

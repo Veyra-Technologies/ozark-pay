@@ -4,7 +4,7 @@
   {% set groups = [
     ('Рабочий стол', ['Обзор','Операции','Мои реквизиты','Пополнение','Пополнения','Все пополнения','Выплаты','Все выплаты','Апелляции','Смс хаб','SMS подтверждения','История обращений']),
     ('Контроль', ['Безопасность','Антискам / Risk Control','Audit log','Интеграция с AI-офисом']),
-    ('Финансы', ['Кошелек','Кошелёк','Баланс','Статистика','Тарифы','Settle — Россия','Settle — Казахстан','Settlement','Rolling','Доход площадки','Начисления','Начисления мерчантов','Вывод средств','История выплат','Журнал баланса']),
+    ('Финансы', ['Кошелек','Кошелёк','Баланс','Статистика','Тарифы','Settle — Россия','Settle — Казахстан','Settle — Таджикистан','Settlement','Rolling','Доход площадки','Начисления','Начисления мерчантов','Вывод средств','История выплат','Журнал баланса']),
     ('Команда и партнёры', ['Мои трейдеры','Мои мерчанты','Трейдеры','Мерчанты','TeamLead','Площадки/агрегаторы','Aggregators','Пользователи','Создать кабинет']),
     ('Развитие и интеграции', ['API ключи','Webhook','Интеграция казино','API-интеграция','Трансгран']),
     ('Операционные настройки', ['Реквизиты'])
@@ -13,7 +13,7 @@
     {% set visible = [] %}{% for label in labels %}{% if label in sections %}{% set _ = visible.append(label) %}{% endif %}{% endfor %}
     {% if visible %}<details class="nav-section" {% if group in ['Рабочий стол','Контроль'] %}open{% endif %}><summary>{{ group }}</summary>{% endif %}
     {% for s in visible %}
-      {% set section_id = 'settle-ru' if s == 'Settle — Россия' else ('settle-kz' if s == 'Settle — Казахстан' else ('crossborder' if s == 'Трансгран' else ('wallet' if s == 'Кошелёк' else 'sec' ~ (sections.index(s) + 1)))) %}
+      {% set section_id = 'settle-ru' if s == 'Settle — Россия' else ('settle-kz' if s == 'Settle — Казахстан' else ('settle-tj' if s == 'Settle — Таджикистан' else ('crossborder' if s == 'Трансгран' else ('wallet' if s == 'Кошелёк' else 'sec' ~ (sections.index(s) + 1))))) %}
       <{% if profile_kind %}a href="{{ cabinet_base }}#{{ section_id }}"{% else %}button type="button"{% endif %} aria-controls="{{ section_id }}" class="{% if sections.index(s) == 0 %}active{% endif %}" data-target="{{ section_id }}">{{ 'Анти-Скам' if 'Risk' in s else ('Аудит логов' if s == 'Audit log' else ('Площадки' if s == 'Площадки/агрегаторы' else ('Агрегаторы' if s == 'Aggregators' else s))) }}</{% if profile_kind %}a{% else %}button{% endif %}>
     {% endfor %}
     {% if visible %}</details>{% endif %}

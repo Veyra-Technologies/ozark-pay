@@ -196,8 +196,9 @@ async def settle_credit(db, deposit, fee_snapshot, description):
         raise CrossBorderError('local settlement already applied')
     payable = Decimal(context['merchant_payable_usdt'])
     margin = Decimal(context['platform_margin_usdt'])
-    entry = await credit(db, deposit.merchant_id, payable, deposit.id,
-        f'local-deposit:{deposit.id}:merchant-credit', description, currency='USDT')
+    from app.services.rolling import apply_merchant_financing
+    financing = await apply_merchant_financing(db, deposit=deposit, snapshot=fee_snapshot,
+        merchant_payable_rub=deposit.amount-fee_snapshot.merchant_fee_amount, description=description)
     await record_fee(db, deposit.merchant_id, fee_snapshot.merchant_fee_amount, deposit.id,
         f'local-deposit:{deposit.id}:merchant-fee', description, currency='TJS')
     await record_platform_executor_fee(db, deposit.merchant_id, fee_snapshot.executor_fee_amount,
@@ -207,10 +208,14 @@ async def settle_credit(db, deposit, fee_snapshot, description):
     await db.flush()
     fee_snapshot.settlement_status = 'settled'
     fee_snapshot.settled_at = datetime.now(timezone.utc)
-    fee_snapshot.ledger_reference = entry.id
+    fee_snapshot.ledger_reference = await db.scalar(select(LedgerEntry.id).where(
+        LedgerEntry.operation_id == deposit.id, LedgerEntry.merchant_id == deposit.merchant_id,
+        LedgerEntry.currency == 'USDT', LedgerEntry.entry_type == 'credit'))
     public = {key:context[key] for key in ('local_currency','accounting_currency','amount_tjs',
         'base_usdt','merchant_fee_tjs','merchant_fee_usdt','merchant_payable_usdt')}
     deposit.metadata_json = {**(deposit.metadata_json or {}), 'local_financial_result': public,
+        'rolling_financing': {key:str(value) if isinstance(value, Decimal) else value
+                             for key,value in financing.items() if key != 'quote'},
         'merchant_fee_amount': str(fee_snapshot.merchant_fee_amount),
         'merchant_payable_amount': str(deposit.amount-fee_snapshot.merchant_fee_amount),
         'merchant_payable_currency': 'TJS', 'accounting_currency': 'USDT'}
@@ -246,8 +251,11 @@ async def reverse_credit(db, deposit, *, actor, reason, reference):
     else:
         await get_usdt_wallet(db, row.executor_id, for_update=True)
     try:
-        await debit_available(db, deposit.merchant_id, Decimal(context['merchant_payable_usdt']),
-            deposit.id, f'local-deposit:{deposit.id}:merchant-refund', reason, currency='USDT', entry_type='local_refund')
+        from app.services.rolling import reverse_paid_allocation
+        allocation = await reverse_paid_allocation(db, deposit=deposit, actor_id=actor.id, reason=reason)
+        if not allocation:
+            await debit_available(db, deposit.merchant_id, Decimal(context['merchant_payable_usdt']),
+                deposit.id, f'local-deposit:{deposit.id}:merchant-refund', reason, currency='USDT', entry_type='local_refund')
     except LedgerError as exc:
         raise CrossBorderError('Merchant USDT assets are unavailable for an accounting refund') from exc
     movement = move_usdt_wallet

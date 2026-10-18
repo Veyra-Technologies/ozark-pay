@@ -42,7 +42,7 @@ async def actor(request, db, *, admin=False):
 def redirect(request, user, *, code=None, country=None):
     role = getattr(request.state, 'settlement_actor_role', None) or user.role
     base = realm_cabinet_path(request_auth_realm(request) or realm_for_role(role))
-    section = 'settle-' + country.lower() if country else 'sec4'
+    section = 'settle-' + country.lower() if country else getattr(request.state, 'settlement_section', 'sec4')
     return RedirectResponse(cabinet_redirect_url(base, section=section, success=not code,
                             extra={'ui_error':code} if code else None), status_code=303)
 
@@ -75,6 +75,8 @@ async def create(request: Request, db: DBSession):
     merchant = await db.scalar(select(Merchant).where(Merchant.owner_id==user.id, Merchant.is_archived.is_(False)))
     if not merchant:
         raise HTTPException(404, 'Кабинет не найден')
+    if merchant.working_country == 'TJ':
+        request.state.settlement_section = 'sec10'
     form = await request.form()
     check_form(form, ('amount_usdt','trc20_address','idempotency_key','request_confirmed','expected_reserve_amount'))
     if 'request_confirmed' in form and str(form['request_confirmed']).lower() not in ('true','on','1'):
