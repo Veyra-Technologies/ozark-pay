@@ -6441,6 +6441,9 @@ async def role_cabinet(
         context['sections'] = [s for s in sections if s not in ('Трансгран','Тарифы','Rolling','Settle — Россия','Settle — Казахстан','Settle — Таджикистан','Выплаты','Вывод средств')]
         if role == 'merchant':
             context['sections'].extend(['Settlement', 'Rolling'])
+        elif role in ('trader', 'operator'):
+            # Reuse the existing TJ summary without changing saved section IDs.
+            context['sections'].append('Обзор')
         # Obsolete customer tariff bookmarks cannot expose staff tariff editors.
         if request.query_params.get('section', '').casefold() in ('tariffs', 'тарифы'):
             return RedirectResponse(cabinet_base, status_code=303)
