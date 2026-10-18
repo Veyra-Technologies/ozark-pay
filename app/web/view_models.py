@@ -106,6 +106,7 @@ _WEBHOOK_STATUS_LABELS = {
     "dead": "Исчерпан лимит попыток",
 }
 _DEPOSIT_STATUS_LABELS = {
+    'refunded': 'Бухгалтерский возврат',
     "created": "Создано",
     "pending": "Ожидает обработки",
     "appeal_opened": "Открыта апелляция",
@@ -147,6 +148,16 @@ def decimal_display(value: object) -> str:
     return f"{amount:,.2f}".replace(",", " ").replace(".", ",")
 
 
+def usdt_display(value: object) -> str:
+    try:
+        amount = Decimal(str(value or '0')).quantize(Decimal('.00000001'), rounding=ROUND_HALF_UP)
+        if not amount.is_finite():
+            return '—'
+    except (InvalidOperation, ValueError):
+        return '—'
+    return format(abs(amount) if amount == 0 else amount, ',.8f').replace(',', ' ').replace('.', ',')
+
+
 def money_rub(value: object) -> str:
     return f"{decimal_display(value)} ₽"
 
@@ -162,6 +173,10 @@ def status_label(value: object) -> str:
         'opened':'Открыта', 'in_review':'На проверке', 'approved':'Одобрено', 'resolved':'Решена',
         'settled':'Рассчитано', 'credited':'Начислено', 'reversed':'Отменено', 'confirmed':'Подтверждён',
         'absent':'Не открыт', 'suspended':'Приостановлен', 'disputed':'Оспаривается',
+        'exhausted':'Обязательство погашено', 'sent':'Отправлен', 'reconciliation':'Требует сверки',
+        'credit':'Зачисление', 'hold':'Резервирование', 'release':'Снятие резерва',
+        'debit':'Списание', 'debit_available':'Списание доступных средств',
+        'local_refund':'Возврат', 'local_fee_reversal':'Сторно комиссии',
         'pending_confirmation':'Ожидает подтверждения', 'revoked':'Отозван', 'retiring':'Выводится из действия',
         'preparing':'В подготовке', 'prepared':'Подготовлено', 'sending':'Отправляется',
         'unknown':'Результат уточняется', 'refused':'Отказано', 'applied':'Применено',

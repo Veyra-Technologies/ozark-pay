@@ -54,6 +54,8 @@ async def reconcile_merchant_balance(db: AsyncSession, merchant_id: UUID, curren
         elif entry.entry_type == LedgerType.hold.value:
             expected_available -= amount
             expected_frozen += amount
+        elif entry.entry_type == 'local_refund':
+            expected_available -= amount
         elif entry.entry_type == LedgerType.release.value:
             expected_available += amount
             expected_frozen -= amount
@@ -103,9 +105,44 @@ async def reconcile_trader_balance(db: AsyncSession, trader_id: UUID) -> Reconci
     )
 
 
-async def platform_income_total(db: AsyncSession, merchant_id: UUID | None = None) -> Decimal:
-    query = select(PlatformLedgerEntry).where(PlatformLedgerEntry.entry_type == 'platform_income')
+async def platform_income_total(db: AsyncSession, merchant_id: UUID | None = None, *, currency='RUB') -> Decimal:
+    from app.services.crossborder_money import usdt
+    kinds = ('platform_income', 'local_refund') if currency == 'USDT' else ('platform_income',)
+    query = select(PlatformLedgerEntry).where(PlatformLedgerEntry.entry_type.in_(kinds), PlatformLedgerEntry.currency == currency)
     if merchant_id is not None:
         query = query.where(PlatformLedgerEntry.merchant_id == merchant_id)
     rows = (await db.execute(query)).scalars().all()
-    return money(sum((money(row.amount) for row in rows), Decimal('0.00')))
+    quantize_amount = usdt if currency == 'USDT' else money
+    return quantize_amount(sum((quantize_amount(row.amount) for row in rows), Decimal('0.00')))
+
+
+async def reconcile_usdt_wallet(db, trader_id):
+    """Rebuild a TJ wallet from journal movements, independently of after-values."""
+    from app.models import TraderWallet, TraderWalletLedgerEntry
+    from app.services.crossborder_money import usdt
+    trader = await db.get(User, trader_id)
+    if not trader or trader.working_country != 'TJ':
+        raise ValueError('TJ wallet required')
+    wallet = await db.scalar(select(TraderWallet).where(TraderWallet.trader_id == trader_id, TraderWallet.currency == 'USDT'))
+    rows = (await db.execute(select(TraderWalletLedgerEntry).where(
+        TraderWalletLedgerEntry.trader_id == trader_id, TraderWalletLedgerEntry.currency == 'USDT'))).scalars().all()
+    balance, frozen = Decimal(0), Decimal(0)
+    for row in rows:
+        amount = row.amount
+        if row.entry_type in ('balance_adjustment', 'credit'):
+            balance += amount
+        elif row.entry_type in ('reserve_set', 'hold'):
+            frozen += amount
+        elif row.entry_type == 'release':
+            frozen -= amount
+        elif row.entry_type == 'debit':
+            balance -= amount
+            frozen -= amount
+        elif row.entry_type == 'debit_available':
+            balance -= amount
+        else:
+            raise ValueError('Unknown TJ wallet movement')
+    available = usdt(wallet.balance-wallet.hold) if wallet else usdt(0)
+    actual_frozen = usdt(wallet.hold) if wallet else usdt(0)
+    return ReconciliationResult(available == usdt(balance-frozen) and actual_frozen == usdt(frozen),
+        available, actual_frozen, usdt(balance-frozen), usdt(frozen), Decimal('.00000001'))

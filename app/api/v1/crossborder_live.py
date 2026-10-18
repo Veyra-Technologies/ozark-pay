@@ -128,7 +128,7 @@ class ParserIn(StrictInput):
 
 
 class CountryIn(StrictInput):
-    country: Literal['RU', 'KZ', 'GE']
+    country: Literal['RU', 'KZ', 'GE', 'TJ']
     parser_id: str
     business_id: UUID | None = None
 

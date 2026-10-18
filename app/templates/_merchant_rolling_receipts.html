@@ -1,0 +1,80 @@
+  {% set pending_rolling_transfers = merchant_rolling_transfers|selectattr('status','equalto','pending_confirmation')|list %}
+  {% if pending_rolling_transfers %}
+  <div class="rolling-card">
+    {% for transfer in pending_rolling_transfers %}
+    {% set transfer_id_text = transfer.id|string %}
+    {% set transfer_source = transfer.source or 'Rapira' %}
+    {% set transfer_source_label = 'Rapira' if transfer_source == 'rapira_live' else transfer_source %}
+    <div class="panel rolling-form-card">
+      <div class="section-head">
+        <div class="heading">
+          <h3>Rolling-перевод #{{ transfer.sequence_no }}</h3>
+          <div class="rolling-secondary-id">Внутренний ID: {{ transfer_id_text[:8] }}…{{ transfer_id_text[-8:] }}</div>
+        </div>
+        <span class="status-pill status-wait">Ожидает подтверждения</span>
+      </div>
+      <div class="detail-grid">
+        <div class="detail-card">
+          <b>Сумма</b>
+          <div class="rolling-amount">{{ transfer.amount_usdt|decimal_display }} USDT</div>
+        </div>
+        <div class="detail-card"><b>Сеть</b>{{ transfer.network or 'TRC20' }}</div>
+        <div class="detail-card"><b>Дата отправки</b>{{ transfer.sent_at|dt_compact }} UTC</div>
+        <div class="detail-card">
+          <b>Источник</b>
+          <div class="rolling-source-row">
+            <span class="rolling-source-pill">{{ transfer_source_label }}</span>
+            {% if is_rehearsal_environment %}<span class="pill-muted">QA MOCK</span>{% endif %}
+          </div>
+        </div>
+        <div class="detail-card">
+          <b>Destination</b>
+          <div class="rolling-copy-wrap">
+            <span class="rolling-copy-value cell-mono" title="{{ transfer.destination_address }}">{{ transfer.destination_address[:8] }}…{{ transfer.destination_address[-8:] }}</span>
+            <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.destination_address }}">Копировать</button>
+          </div>
+        </div>
+        <div class="detail-card">
+          <b>Tx hash</b>
+          <div class="rolling-copy-wrap">
+            <span class="rolling-copy-value cell-mono" title="{{ transfer.tx_hash }}">{{ transfer.tx_hash[:8] }}…{{ transfer.tx_hash[-8:] if transfer.tx_hash else '—' }}</span>
+            {% if transfer.tx_hash %}
+            <button class="secondary btn-small rolling-copy-btn" type="button" data-copy-value="{{ transfer.tx_hash }}">Копировать</button>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% if transfer.comment %}
+      <div class="compact-note">Комментарий к переводу: {{ transfer.comment }}</div>
+      {% endif %}
+      <div class="rolling-card-actions">
+        <button class="primary" type="button" data-modal-open="rolling-transfer-confirm-{{ transfer.id }}">Подтвердить получение</button>
+        <button class="secondary" type="button" data-modal-open="rolling-transfer-dispute-{{ transfer.id }}">Сообщить о проблеме</button>
+      </div>
+      <div id="rolling-transfer-confirm-{{ transfer.id }}" class="modal">
+        <div class="modalbox">
+          <h2>Подтверждение поступления</h2>
+          <p>Подтвердить получение {{ transfer.amount_usdt|decimal_display }} USDT?</p>
+          <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/confirm" data-confirm="Подтвердить получение {{ transfer.amount_usdt|decimal_display }} USDT?" class="modal-actions">
+            {{ csrf_input(request) }}
+            <button class="primary" type="submit">Подтвердить</button>
+            <button class="secondary" type="button" data-modal-close="rolling-transfer-confirm-{{ transfer.id }}">Отмена</button>
+          </form>
+        </div>
+      </div>
+      <div id="rolling-transfer-dispute-{{ transfer.id }}" class="modal">
+        <div class="modalbox">
+          <h2>Сообщить о проблеме</h2>
+          <p>Укажите причину проблемы и отправьте сообщение Superadmin.</p>
+          <form method="post" action="{{ cabinet_base }}/rolling/transfers/{{ transfer.id }}/dispute" class="modal-actions" data-confirm="Отправить сообщение о проблеме?">
+            {{ csrf_input(request) }}
+            <textarea name="reason" required maxlength="500" rows="3" placeholder="Опишите проблему"></textarea>
+            <button class="dangerbtn" type="submit">Отправить сообщение</button>
+            <button class="secondary" type="button" data-modal-close="rolling-transfer-dispute-{{ transfer.id }}">Отмена</button>
+          </form>
+        </div>
+      </div>
+      </div>
+    {% endfor %}
+  </div>
+  {% endif %}

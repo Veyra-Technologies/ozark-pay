@@ -1,0 +1,104 @@
+  {% if role == 'merchant' and not is_tj_cabinet %}
+  <div class="panel">
+    <h3>Создать апелляцию</h3>
+    <form method="post" action="{{ cabinet_base }}/appeals/create" enctype="multipart/form-data" data-confirm="Создать апелляцию по этой сделке?">{{ csrf_input(request) }}
+      <div class="row"><div><label>ID сделки</label><input name="operation_lookup" placeholder="UUID или external_id" required></div><div><label>Сумма</label><input name="amount" type="number" min="0.01" step="0.01" required></div></div>
+      <div class="row"><div><label>Реквизит</label><input name="requisite" placeholder="Телефон, карта или СБП" required></div><div><label>Банк получателя</label><input name="recipient_bank" list="rfBanks" placeholder="Начните вводить название банка" autocomplete="off" required data-bank-autocomplete></div></div>
+      <label>Дата операции</label><input name="operation_date" type="datetime-local" required>
+      <div class="row"><div><label>Трейдер</label><select name="trader_id" required>{% for t in merchant_traders %}<option value="{{ t.id }}">{{ t.email }}</option>{% else %}<option value="" disabled selected>Нет доступных трейдеров</option>{% endfor %}</select></div><div><label>Чек</label><input name="receipt_file" type="file" accept=".jpg,.jpeg,.png,.webp,.pdf" required></div></div>
+      <label>Комментарий</label><textarea name="message" rows="3" placeholder="Кратко опишите ситуацию"></textarea>
+      <button class="primary" type="submit">Создать апелляцию</button>
+    </form>
+  </div>
+  {% endif %}
+  <form class="panel" method="get" action="{{ cabinet_base }}">
+    <div class="row">
+      <div><label>ID апелляции/сделки</label><input name="appeal_query" value="{{ appeal_filters.get('query','') }}" placeholder="ID апелляции, сделки или external ID"></div>
+      <div><label>Сумма</label><input name="appeal_amount" type="number" min="0.01" step="0.01" value="{{ appeal_filters.get('amount','') }}"></div>
+    </div>
+    <div class="row">
+      <div><label>Реквизит</label><input name="appeal_requisite" value="{{ appeal_filters.get('requisite','') }}" placeholder="Реквизит или банк"></div>
+      <div><label>Дата</label><input name="appeal_date" type="date" value="{{ appeal_filters.get('date','') }}"></div>
+    </div>
+    <div class="actions filter-actions"><button class="primary" type="submit">Найти</button><a class="secondary reset-link" href="{{ cabinet_base }}">Сбросить</a></div>
+  </form>
+  <div class="table-wrap appeals-table"><table><tr><th>ID</th><th>Сделка</th><th>Мерчант</th><th>Исполнитель</th><th>Сумма</th><th>Срок</th><th>Статус</th><th>Действие</th></tr>
+  {% for a in appeals %}{% set ad = appeal_details.get(a.id|string, {}) %}{% set dep = ad.get('deposit') %}
+  <tr class="appeal-row" data-modal-open="appealModal{{ loop.index }}">
+    <td><span class="cell-mono cell-ellipsis" title="{{ a.id }}">{{ a.id }}</span></td>
+    <td><span class="cell-mono cell-ellipsis" title="{{ dep.external_id if dep and dep.external_id else a.operation_id }}">{{ dep.external_id if dep and dep.external_id else a.operation_id }}</span></td>
+    <td>{{ ad.get('merchant_name','—') }}</td>
+    <td>{{ ad.get('executor_name',ad.get('trader_email','—')) }}<small>{{ ad.get('executor_label','Трейдер OzarkPay') }}</small></td>
+    <td><b>{{ ad.get('amount_claimed','0.00')|tj_money if is_tj_cabinet else ad.get('amount_claimed','0.00') }}</b> {{ dep.currency if dep else 'RUB' }}{% if ad.get('corrected_amount') %}<div class="compact-note">верная сумма: {{ (ad.get('corrected_amount'))|decimal_display }} {{ dep.currency if dep else 'RUB' }}</div>{% endif %}</td>
+    <td>{% if ad.get('is_timer_active') %}<span class="timer" data-countdown="{{ ad.get('remaining_seconds',0) }}">90:00</span>{% else %}<span class="small muted">{{ ad.get('deadline_iso','—') }}</span>{% endif %}</td>
+    <td>{% if a.status == 'approved' %}<span class="status-pill status-ok">approved</span>{% elif a.status in ['opened','in_review','returned_to_processing'] %}<span class="status-pill status-wait">{{ 'waiting' if a.status == 'in_review' else a.status }}</span>{% elif a.status in ['rejected','closed'] %}<span class="status-pill status-bad">{{ a.status|status_label }}</span>{% else %}<span class="status-pill status-neutral">{{ a.status|status_label }}</span>{% endif %}</td>
+    <td><button class="secondary appeal-open" type="button" data-modal-open="appealModal{{ loop.index }}">Открыть</button></td>
+  </tr>
+  {% else %}<tr><td colspan="8">Апелляций пока нет</td></tr>{% endfor %}
+  </table></div>
+  {% for a in appeals %}{% set ad = appeal_details.get(a.id|string, {}) %}{% set dep = ad.get('deposit') %}{% set messages = appeal_messages_by_id.get(a.id|string, []) %}
+  <div id="appealModal{{ loop.index }}" class="modal appeal-modal">
+    <div class="modalbox appeal-modalbox">
+      <div class="appeal-modal-scroll">
+        <div class="modal-title-row">
+          <div><h2>Апелляция</h2><div class="text-mono text-muted cell-ellipsis" title="{{ a.id }}">{{ a.id }}</div></div>
+          <button class="secondary" type="button" data-modal-close="appealModal{{ loop.index }}">Закрыть</button>
+        </div>
+        <div class="appeal-hero">
+          <div class="appeal-main-card">
+            <h3>{{ ad.get('merchant_name','—') }}</h3>
+            <div class="appeal-amount">{{ (ad.get('amount_claimed','0.00'))|decimal_display }} {{ dep.currency if dep else 'RUB' }}</div>
+            {% if ad.get('corrected_amount') %}<div class="compact-note">Верная сумма: {{ (ad.get('corrected_amount'))|decimal_display }} {{ dep.currency if dep else 'RUB' }}</div>{% endif %}
+          </div>
+          <div class="appeal-side-card">
+            <b>Статус</b><br>
+            {% if a.status == 'approved' %}<span class="status-pill status-ok">approved</span>{% elif a.status in ['opened','in_review','returned_to_processing'] %}<span class="status-pill status-wait">{{ 'waiting' if a.status == 'in_review' else a.status }}</span>{% elif a.status in ['rejected','closed'] %}<span class="status-pill status-bad">{{ a.status|status_label }}</span>{% else %}<span class="status-pill status-neutral">{{ a.status|status_label }}</span>{% endif %}
+            {% if ad.get('trader_rejection_reason_label') %}<div class="compact-note">{{ ad.get('trader_rejection_reason_label') }}</div>{% endif %}
+            <div class="compact-note">Срок: {% if ad.get('is_timer_active') %}<span class="timer" data-countdown="{{ ad.get('remaining_seconds',0) }}">90:00</span>{% else %}{{ ad.get('deadline_iso','—') }}{% endif %}</div>
+          </div>
+        </div>
+        <div class="appeal-info-grid">
+          <div class="appeal-info"><b>Сделка</b><span class="cell-mono cell-ellipsis" title="{{ dep.external_id if dep and dep.external_id else a.operation_id }}">{{ dep.external_id if dep and dep.external_id else a.operation_id }}</span></div>
+          <div class="appeal-info"><b>Исполнитель</b>{{ ad.get('executor_name',ad.get('trader_email','—')) }}<small>{{ ad.get('executor_label','Трейдер OzarkPay') }}</small></div>
+          <div class="appeal-info"><b>Реквизит</b><span class="cell-mono cell-ellipsis" title="{{ ad.get('requisite') or '—' }}">{{ ad.get('requisite') or '—' }}</span></div>
+          <div class="appeal-info"><b>Банк получателя</b>{{ (ad.get('recipient_bank') or '')|bank_display or '—' }}</div>
+          <div class="appeal-info"><b>Дата операции</b><span class="small">{{ ad.get('operation_date') or '—' }}</span></div>
+          <div class="appeal-info"><b>Создана</b><span class="text-date" title="{{ a.created_at|dt_full }}">{{ a.created_at|dt_compact }}</span></div>
+          <div class="appeal-info"><b>Предыдущий статус</b>{{ ad.get('previous_deposit_status') or '—' }}</div>
+        </div>
+        <div class="appeal-files">
+          <h3>Файлы</h3>
+          <div class="appeal-file-list">
+            {% if ad.get('receipt_url') %}<a class="appeal-file-link" href="{{ ad.get('receipt_url') }}" target="_blank">{{ ad.get('receipt_name','чек') }}</a>{% endif %}
+            {% if ad.get('statement_url') %}<a class="appeal-file-link" href="{{ ad.get('statement_url') }}" target="_blank">{{ ad.get('statement_name','выписка') }}</a>{% endif %}
+            {% if not ad.get('receipt_url') and not ad.get('statement_url') %}<span class="muted">Файлов нет</span>{% endif %}
+          </div>
+        </div>
+        {% if ad.get('can_trader_act') or ad.get('can_staff_extend') or ad.get('can_staff_final') %}
+        <div class="appeal-actions-panel">
+          <h3>Действия</h3>
+          {% if ad.get('can_trader_act') %}
+          <div class="appeal-action-grid">
+            {% if not dep or dep.currency != 'TJS' %}<form class="appeal-action-card" method="post" action="{{ cabinet_base }}/appeals/{{ a.id }}/trader/accept" data-confirm="Принять апелляцию и подтвердить оплату?">{{ csrf_input(request) }}<b>Платёж найден</b><button class="primary" type="submit">Принять</button></form>{% else %}<p>Финансовое решение TJ принимает Admin/SuperAdmin после проверки чека и выписки.</p>{% endif %}
+            <form class="appeal-action-card" method="post" action="{{ cabinet_base }}/appeals/{{ a.id }}/trader/reject" data-confirm="Отклонить апелляцию: неверные реквизиты?">{{ csrf_input(request) }}<input type="hidden" name="reason" value="wrong_requisite"><b>Ошибка в реквизитах</b><button class="secondary" type="submit">Неверные реквизиты</button></form>
+            <form class="appeal-action-card" method="post" action="{{ cabinet_base }}/appeals/{{ a.id }}/trader/reject" data-confirm="Отклонить апелляцию: неверная сумма?">{{ csrf_input(request) }}<input type="hidden" name="reason" value="wrong_amount"><b>Другая сумма</b><input name="corrected_amount" type="number" min="0.01" step="0.01" placeholder="Верная сумма"><button class="secondary" type="submit">Неверная сумма</button></form>
+            <form class="appeal-action-card" method="post" action="{{ cabinet_base }}/appeals/{{ a.id }}/trader/reject" enctype="multipart/form-data" data-confirm="Отклонить апелляцию: платеж не найден? Проверьте, что выписка прикреплена.">{{ csrf_input(request) }}<input type="hidden" name="reason" value="no_payment"><b>Платёж не найден</b><input name="statement_file" type="file" accept=".jpg,.jpeg,.png,.webp,.pdf" required><button class="dangerbtn" type="submit">Нет платежа</button></form>
+          </div>
+          {% else %}
+          <div class="actions">
+            {% if ad.get('can_staff_extend') %}<form class="inline-form" method="post" action="{{ cabinet_base }}/appeals/{{ a.id }}/extend" data-confirm="Продлить срок обработки апелляции?">{{ csrf_input(request) }}<input name="minutes" type="number" min="1" max="1440" value="30"><button class="secondary" type="submit">Продлить</button></form>{% endif %}
+            {% if ad.get('can_staff_final') %}<form method="post" action="{{ cabinet_base }}/appeals/{{ a.id }}/staff/resolve" data-confirm="Одобрить апелляцию?">{{ csrf_input(request) }}<input type="hidden" name="action" value="approve"><button class="primary" type="submit">Одобрить</button></form><form method="post" action="{{ cabinet_base }}/appeals/{{ a.id }}/staff/resolve" data-confirm="Отклонить апелляцию?">{{ csrf_input(request) }}<input type="hidden" name="action" value="reject"><button class="dangerbtn" type="submit">Отклонить</button></form>{% endif %}
+          </div>
+          {% endif %}
+        </div>
+        {% endif %}
+        <div class="appeal-history">
+          <h3>История</h3>
+          {% for m in messages %}
+          <div class="appeal-message"><div class="appeal-message-head"><b>{{ m.author }}</b><span class="text-date" title="{{ m.created_at|dt_full }}">{{ m.created_at|dt_compact }}</span></div><div>{{ m.message }}</div>{% if m.attachment_path %}<div class="compact-note">{{ m.attachment_path }}</div>{% endif %}</div>
+          {% else %}<div class="muted">Сообщений пока нет</div>{% endfor %}
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}

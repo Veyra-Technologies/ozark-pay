@@ -39,7 +39,7 @@ class SettlementAction(BaseModel):
 
 
 def error(exc):
-    status = (503 if isinstance(exc, service.MerchantSettlementRateUnavailable) else
+    status = (503 if isinstance(exc, service.MerchantSettlementRateUnavailable) or exc.code == 'tj_settlement_production_disabled' else
               404 if exc.code == 'merchant_settlement_not_found' else
               403 if exc.code == 'permission_denied' else
               409 if isinstance(exc, service.MerchantSettlementConflict) or exc.code.endswith('insufficient_available') else 422)
@@ -85,13 +85,13 @@ async def merchant_detail(settlement_id: UUID, merchant: MerchantIdentity, db: D
 
 
 @router.get('/admin/settlements/{country}')
-async def admin_queue(country: Literal['RU','KZ'], actor: StaffIdentity, db: DBSession, page: int = 1):
+async def admin_queue(country: Literal['RU','KZ','TJ'], actor: StaffIdentity, db: DBSession, page: int = 1):
     rows = await service.settlement_history(db, country=country, page=page)
     return {'country': country, 'items': [service.public_settlement(row) for row in rows]}
 
 
 @router.post('/admin/settlements/{country}/{settlement_id}/{action}')
-async def admin_action(country: Literal['RU','KZ'], settlement_id: UUID,
+async def admin_action(country: Literal['RU','KZ','TJ'], settlement_id: UUID,
     action: Literal['approve','send','complete','reject','reconcile','resolve-not-sent'],
     payload: SettlementAction, request: Request,
     actor: StaffIdentity, db: DBSession):

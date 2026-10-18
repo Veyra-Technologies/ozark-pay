@@ -16,8 +16,10 @@ def public_assignment(row):
             'created_at': row.created_at.isoformat() if row.created_at else None}
 
 
-async def current(db, *, merchant_id=None, trader_id=None):
+async def current(db, *, merchant_id=None, trader_id=None, include_deprecated=False):
     query = select(ParserAssignment)
+    if not include_deprecated:
+        query = query.where(ParserAssignment.parser_id != 'rapira_green_tjs')
     if merchant_id:
         query = query.where(ParserAssignment.merchant_id == merchant_id)
     if trader_id:
@@ -35,11 +37,13 @@ async def assign(db, *, actor, owner_type, owner_id, parser_id, purpose, is_acti
     if not owner or not owner.working_country or (owner_type == 'trader' and owner.role != 'trader'):
         raise CrossBorderError('Кабинет или страна не найдены')
     country = owner.working_country
-    allowed = ({'RU': ['rapira'], 'KZ': [PARSER_ID], 'GE': ['xe']}.get(country, [])
-               if owner_type == 'merchant' else ([GEL_PARSER_ID, PARSER_ID] if country == 'GE' else []))
-    required_purpose = 'financial' if owner_type == 'merchant' and country in ('RU', 'KZ') else 'informational'
+    allowed = ({'RU': ['rapira'], 'KZ': [PARSER_ID], 'GE': ['xe'], 'TJ': ['bybit_p2p_tjs_green_avg3']}.get(country, [])
+               if owner_type == 'merchant' else (['bybit_p2p_tjs_green_avg3'] if country == 'TJ' else [GEL_PARSER_ID, PARSER_ID] if country == 'GE' else []))
+    required_purpose = 'financial' if country == 'TJ' or owner_type == 'merchant' and country in ('RU', 'KZ') else 'informational'
     if parser_id not in allowed or purpose != required_purpose:
         raise CrossBorderError('Парсер или назначение не соответствует стране кабинета')
+    if country == 'TJ' and is_active:
+        raise CrossBorderError('Финансовое назначение TJ нельзя включить до подтверждения контракта')
     from app.services.rate_registry import configuration
     await scope_lock(db, 'parser-config:' + parser_id)
     config = await configuration(db, parser_id)
@@ -92,6 +96,15 @@ async def require_assignment(db, *, merchant_id=None, trader_id=None, parser_id,
 
 
 async def provision_trader(db, *, actor, trader):
+    if trader.role == 'trader' and trader.working_country == 'TJ':
+        db.add(trader)
+        await db.flush()
+        from app.services.tj_cabinets import provision_balances
+        await provision_balances(db, trader=trader)
+        if not await current(db, trader_id=trader.id):
+            await assign(db, actor=actor, owner_type='trader', owner_id=trader.id,
+                parser_id='bybit_p2p_tjs_green_avg3', purpose='financial', is_active=False,
+                reason='TJ_contract_unconfirmed')
     if trader.role == 'trader' and trader.working_country == 'GE':
         db.add(trader)
         await db.flush()

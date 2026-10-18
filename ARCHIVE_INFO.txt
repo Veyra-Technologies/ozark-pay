@@ -1,6 +1,12 @@
-OzarkPay source archive
-Generated (UTC): 2026-10-11T16:04:38+00:00
-Git branch: codex/tradespace-external-aggregator
-Base commit: d0470ad
-Includes current working-tree source changes.
-Excludes Git metadata, local secrets, databases, backups, uploads, logs, caches, virtual environments, runtime artifacts, and older archives.
+OzarkPay — TJ Wave 3.2.1 source release
+Release date: 2026-10-18
+Git branch: feature/tj-local-payments
+Wave 3.2 base: 92981cd759dea533b8aa9b8d68554af14f73fe76
+Schema: 0045_tj_rolling_admission
+The exact archive revision is recorded in SOURCE_REVISION.txt in the delivered ZIP.
+The source excludes Git metadata, credentials/2FA, private environment files,
+Bybit vaults, databases, backups, uploads, logs, caches, test suites, QA harnesses,
+synthetic datasets, virtual environments, runtime artifacts and older archives.
+TJ Settlement reuses USDT TRC20 with 5 USDT on top; Roll reuses paid-Deposit FIFO.
+Windows read-only Bybit recovery uses owner DPAPI and a limited logon supervisor.
+Timeweb/main are unchanged. Real TJ Deposit, Settlement and Roll remain disabled.

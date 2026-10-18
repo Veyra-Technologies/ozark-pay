@@ -37,6 +37,9 @@ async def settle_deposit_credit(
     if not deposit or deposit.merchant_id != merchant_id:
         raise FeeConfigurationError('deposit does not match settlement target')
     snapshot = await get_operation_fee_snapshot(db, operation_id, lock=True)
+    if deposit.currency == 'TJS':
+        from app.services.local_deposit_policy import settle_credit
+        return await settle_credit(db, deposit, snapshot, description)
     gross = money(amount)
     if money(deposit.amount) != gross or money(snapshot.calculation_base_amount) != gross:
         raise FeeConfigurationError('fee snapshot amount does not match deposit')

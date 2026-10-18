@@ -557,6 +557,16 @@ async def deliver_event(
     lock_owner: str | None = None,
     http_post=None,
 ):
+    try:
+        candidate_id = uuid.UUID(str(event_id))
+    except (TypeError, ValueError):
+        return None
+    candidate = await db.get(WebhookEvent, candidate_id)
+    if candidate and isinstance(candidate.payload, dict) and candidate.payload.get('currency') == 'TJS':
+        from app.services.local_deposit_policy import require_execution
+        await require_execution(db)
+        if http_post is None:
+            raise ValueError('TJ external delivery is not authorised; QA requires an injected transport')
     owner = (lock_owner or uuid.uuid4().hex)[:64]
     claim = await _claim_event(
         db,

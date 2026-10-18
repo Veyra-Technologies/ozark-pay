@@ -196,6 +196,15 @@ def _country(merchant):
     return merchant.working_country
 
 
+async def _require_tj_execution(db, country):
+    if country == 'TJ':
+        from app.services.local_deposit_policy import require_execution
+        try:
+            await require_execution(db)
+        except ValueError as exc:
+            raise MerchantSettlementError('tj_settlement_production_disabled') from exc
+
+
 async def _requesting_merchant(db, merchant_id, requested_by_id):
     merchant = await db.get(Merchant, merchant_id)
     owner = await db.get(User, requested_by_id)
@@ -239,9 +248,15 @@ async def merchant_settlement_quote(db, merchant_id, *, allow_unavailable=False)
         if not allow_unavailable:
             raise MerchantSettlementError(result['error'])
         return result
-    if country == 'KZ':
+    if country in ('KZ', 'TJ'):
         result.update(rate_available=True, rate_source='usdt_balance', rate_stale=False,
                       max_request_usdt=usdt(max(Decimal(0), available - fee)))
+        if country == 'TJ':
+            try:
+                await _require_tj_execution(db, country)
+                result['execution_allowed'] = True
+            except MerchantSettlementError:
+                result.update(execution_allowed=False, error='tj_settlement_production_disabled')
         return result
     from app.services.crossborder_money import CrossBorderError
     from app.services.parser_assignments import require_legacy_rapira_assignment
@@ -277,7 +292,7 @@ async def settlement_preview(db, merchant_id, amount_usdt):
     total = money(payout + fee)
     return {**quote, 'amount_usdt': amount, 'payout_balance_amount': payout, 'fee_balance_amount': fee,
             'reserve_amount': total, 'total_usdt': usdt(amount + quote['fee_usdt']),
-            'can_request': total <= quote['available']}
+            'can_request': total <= quote['available'] and quote.get('execution_allowed', True)}
 
 
 def _assert_idempotent_match(existing, *, merchant_id, requested_by_id, amount_usdt, trc20_address):
@@ -319,6 +334,7 @@ async def create_merchant_settlement(db, *, merchant_id, requested_by_id, amount
         raise MerchantSettlementError('invalid_usdt_amount')
     address, idem = _validated_address(trc20_address), _idempotency_key(idempotency_key)
     merchant = await _requesting_merchant(db, merchant_id, requested_by_id)
+    await _require_tj_execution(db, merchant.working_country)
     existing = await _existing_idempotent(db, merchant_id=merchant_id, idempotency_key=idem)
     if existing:
         _assert_idempotent_match(existing, merchant_id=merchant_id, requested_by_id=requested_by_id,
@@ -394,11 +410,14 @@ async def create_merchant_settlement(db, *, merchant_id, requested_by_id, amount
 
 
 async def _locked_settlement_and_balance(db, settlement_id, *, actor_id, expected_country=None):
-    await _admin(db, actor_id)
+    actor = await _admin(db, actor_id)
     identity = (await db.execute(select(MerchantSettlement.merchant_id, MerchantSettlement.country,
         MerchantSettlement.balance_currency).where(MerchantSettlement.id == settlement_id))).first()
     if not identity or (expected_country is not None and identity.country != expected_country):
         raise MerchantSettlementError('merchant_settlement_not_found')
+    await _require_tj_execution(db, identity.country)
+    if identity.country == 'TJ' and not actor.twofa_enabled:
+        raise MerchantSettlementError('permission_denied')
     balance = await _balance(db, identity.merchant_id, identity.balance_currency)
     row = await db.scalar(select(MerchantSettlement).where(MerchantSettlement.id == settlement_id)
         .with_for_update().execution_options(populate_existing=True))

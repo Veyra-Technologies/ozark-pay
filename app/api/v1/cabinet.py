@@ -75,7 +75,8 @@ async def _operation_visible_to_user(db: AsyncSession, user: User, operation_typ
 @router.get('/wallet')
 async def wallet(db: AsyncSession=Depends(get_db), user: User=Depends(current_user)):
     m=await my_merchant(db,user)
-    currency = 'USDT' if m.working_country == 'KZ' else 'RUB'
+    from app.web.merchant_views import settlement_currency
+    currency = settlement_currency(m)
     rows=(await db.execute(select(Balance).where(Balance.merchant_id==m.id))).scalars().all()
     b=next((row for row in rows if row.currency == currency), None)
     return {'merchant':m.name,'country':m.working_country,'currency':currency,
@@ -89,6 +90,14 @@ async def working_profile(db: AsyncSession=Depends(get_db), user: User=Depends(r
     from app.services.trader_work import accepts_currency
     account_id = trader_account_id(user)
     account = await db.get(User, account_id) if account_id else None
+    if account and account.working_country == 'TJ':
+        from app.core.tajikistan import admission_status
+        from app.models import TraderWallet
+        wallets = (await db.execute(select(TraderWallet).where(TraderWallet.trader_id == account.id))).scalars().all()
+        return {'trader_id': account.id, 'working_country': 'TJ', 'working_currency': 'TJS',
+                'country_editable': False, 'payment_methods': ['c2c'], 'settlement_currency': 'USDT',
+                'balances': [{'currency': w.currency, 'balance': w.balance, 'hold': w.hold} for w in wallets],
+                'admission': admission_status()}
     ge_route = bool(account and account.working_country == 'GE' and account.is_active
                     and not account.is_locked and not account.is_archived)
     return {'trader_id': account_id, 'working_country': account.working_country if account else None,
@@ -127,7 +136,7 @@ async def statistics(db: AsyncSession=Depends(get_db), user: User=Depends(curren
     failed_deposits=(await db.execute(select(func.count()).select_from(Deposit).where(Deposit.merchant_id==m.id, Deposit.status.in_([DepositStatus.failed.value,DepositStatus.cancelled.value,DepositStatus.expired.value])))).scalar_one()
     successful_payouts=(await db.execute(select(func.count()).select_from(Payout).where(Payout.merchant_id==m.id, Payout.status==PayoutStatus.completed.value))).scalar_one()
     failed_payouts=(await db.execute(select(func.count()).select_from(Payout).where(Payout.merchant_id==m.id, Payout.status.in_([PayoutStatus.failed.value,PayoutStatus.cancelled.value,PayoutStatus.rejected.value])))).scalar_one()
-    return {'turnover':turnover,'successful_deposits':successful_deposits,'failed_deposits':failed_deposits,'successful_payouts':successful_payouts,'failed_payouts':failed_payouts}
+    return {'turnover':turnover,'successful_deposits':successful_deposits,'failed_deposits':failed_deposits,'successful_payouts':successful_payouts,'failed_payouts':failed_payouts, **({'currency':'TJS','working_country':'TJ'} if m.working_country == 'TJ' else {})}
 
 @router.post('/sms')
 async def sms(data: SmsIn, db: AsyncSession=Depends(get_db), user: User=Depends(require_roles(Role.superadmin,Role.admin,Role.support,Role.operator,Role.trader))):

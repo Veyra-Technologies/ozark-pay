@@ -61,6 +61,40 @@ async def ensure_usdt_wallet(db, trader_id: UUID) -> TraderWallet:
     return wallet
 
 
+async def move_usdt_wallet(db, trader_id, *, kind, amount, operation_id, key, description):
+    """Locked, currency-explicit movements shared by local collateral accounting.
+
+    balance includes hold; a debit consumes hold rather than debiting available twice.
+    Positive amounts in the journal describe the movement, not a second asset.
+    """
+    amount = _decimal(amount)
+    if amount <= 0 or kind not in ('hold', 'release', 'debit', 'debit_available', 'credit'):
+        raise TraderFinanceError('invalid wallet movement')
+    wallet = await get_usdt_wallet(db, trader_id, for_update=True)
+    if not wallet:
+        raise TraderFinanceError('USDT wallet is missing')
+    existing = await db.scalar(select(TraderWalletLedgerEntry).where(
+        TraderWalletLedgerEntry.idempotency_key == key))
+    if existing:
+        if (existing.wallet_id != wallet.id or existing.operation_id != operation_id
+                or existing.entry_type != kind or existing.amount != amount):
+            raise TraderFinanceError('wallet idempotency mismatch')
+        return existing
+    if kind in ('hold', 'debit_available') and wallet.balance - wallet.hold < amount:
+        raise TraderFinanceError('insufficient available USDT collateral')
+    if kind in ('release', 'debit') and wallet.hold < amount:
+        raise TraderFinanceError('insufficient USDT reserve')
+    from app.services.wallet_movements import collateral_delta
+    wallet.balance, wallet.hold = collateral_delta(wallet.balance, wallet.hold, kind, amount)
+    entry = TraderWalletLedgerEntry(wallet_id=wallet.id, trader_id=trader_id,
+        operation_id=operation_id, entry_type=kind, amount=amount, currency='USDT',
+        balance_after=wallet.balance, hold_after=wallet.hold,
+        idempotency_key=key, description=description)
+    db.add(entry)
+    await db.flush()
+    return entry
+
+
 async def manual_usdt_wallet_adjustment(
     db,
     trader: User,
@@ -129,7 +163,7 @@ async def manual_usdt_wallet_adjustment(
     return entries
 
 
-def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict | None = None) -> dict:
+def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict | None = None, *, local_wallet=None) -> dict:
     if not account:
         return {'country': None, 'local_currency': None, 'accounting_currency': None}
     country = account.working_country
@@ -139,7 +173,7 @@ def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict |
     result = {
         'country': country,
         'local_currency': local_currency,
-        'accounting_currency': 'USDT' if country in {'AM', 'GE'} else 'RUB',
+        'accounting_currency': 'USDT' if country in {'AM', 'GE', 'TJ'} else 'RUB',
         'usdt_balance': usdt_balance,
         'usdt_hold': usdt_hold,
         'usdt_available': usdt_balance - usdt_hold,
@@ -151,6 +185,12 @@ def wallet_view(account: User | None, wallet: TraderWallet | None, quote: dict |
         'local_hold': None,
         'local_available': None,
     }
+    if country == 'TJ':
+        if local_wallet and (local_wallet.trader_id != account.id or local_wallet.currency != 'TJS'):
+            raise TraderFinanceError('local wallet owner/currency mismatch')
+        balance = _decimal(local_wallet.balance if local_wallet else 0, LOCAL_QUANTUM)
+        hold = _decimal(local_wallet.hold if local_wallet else 0, LOCAL_QUANTUM)
+        result.update(local_balance=balance, local_hold=hold, local_available=balance-hold)
     if country in {'AM', 'GE'} and quote and quote.get('available') and quote.get('rate'):
         rate = _decimal(quote['rate'], Decimal('0.000000000001'))
         result.update(

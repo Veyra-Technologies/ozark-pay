@@ -37,7 +37,7 @@ class User(Base, TimestampMixin):
     trader_balance: Mapped[Decimal]=mapped_column(Numeric(18,2), default=Decimal('0.00'))
     working_country: Mapped[str|None]=mapped_column(String(2), nullable=True)
     working_currency: Mapped[str|None]=mapped_column(String(3), nullable=True)
-    working_rate_source: Mapped[str|None]=mapped_column(String(16), nullable=True,
+    working_rate_source: Mapped[str|None]=mapped_column(String(64), nullable=True,
         default=lambda context: {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe'}.get(context.get_current_parameters().get('working_country')))
     trader_account_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id'), nullable=True, index=True)
     trader_hold: Mapped[Decimal]=mapped_column(Numeric(18,2), default=Decimal('0.00'))
@@ -60,7 +60,7 @@ class Merchant(Base, TimestampMixin):
     __tablename__='merchants'
     __table_args__ = (
         UniqueConstraint('business_id', 'working_country', name='uq_merchant_business_country'),
-        CheckConstraint("(working_country IS NULL AND rate_parser_id IS NULL) OR (working_country IS NOT NULL AND rate_parser_id IS NOT NULL AND business_id IS NOT NULL AND ((working_country='RU' AND rate_parser_id='rapira') OR (working_country='KZ' AND rate_parser_id='binance_p2p_kaspi_buy_100000_avg10') OR (working_country='GE' AND rate_parser_id='xe')))", name='ck_merchant_country_parser'),
+        CheckConstraint("(working_country IS NULL AND rate_parser_id IS NULL) OR (working_country IS NOT NULL AND rate_parser_id IS NOT NULL AND business_id IS NOT NULL AND ((working_country='RU' AND rate_parser_id='rapira') OR (working_country='KZ' AND rate_parser_id='binance_p2p_kaspi_buy_100000_avg10') OR (working_country='GE' AND rate_parser_id='xe'))) OR COALESCE(working_country='TJ' AND rate_parser_id='bybit_p2p_tjs_green_avg3' AND business_id IS NOT NULL,false)", name='ck_merchant_country_parser'),
     )
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     business_id: Mapped[uuid.UUID|None] = mapped_column(UUID(as_uuid=True), ForeignKey('business_accounts.id', ondelete='RESTRICT'), nullable=True)
@@ -148,6 +148,8 @@ class LedgerEntry(Base, TimestampMixin):
 
 class Deposit(Base, TimestampMixin):
     __tablename__='deposits'
+    financial_executor_type: Mapped[str|None]=mapped_column(String(32), nullable=True)
+    financial_executor_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('aggregator_accounts.id', ondelete='RESTRICT'), nullable=True)
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     merchant_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('merchants.id', ondelete='CASCADE'), index=True)
     external_id: Mapped[str]=mapped_column(String(128), index=True)
@@ -167,6 +169,7 @@ class Deposit(Base, TimestampMixin):
         server_default=text("now() + interval '15 minutes'"),
     )
     __table_args__=(
+        CheckConstraint("(financial_executor_type IS NULL AND financial_executor_id IS NULL) OR COALESCE(financial_executor_type='aggregator' AND financial_executor_id IS NOT NULL AND currency='TJS' AND requisites_id IS NULL,false)", name='ck_deposit_external_executor'),
         UniqueConstraint('merchant_id','external_id', name='uq_deposit_merchant_external'),
         UniqueConstraint('merchant_id','idempotency_key', name='uq_deposit_merchant_idempotency'),
         Index('ix_deposits_status_expires_at', 'status', 'expires_at'),
@@ -250,9 +253,9 @@ class MerchantSettlement(Base, TimestampMixin):
     merchant=relationship('Merchant', back_populates='settlements')
     __table_args__=(
         Index('ix_settlement_country_status', 'country', 'status', 'created_at'),
-        CheckConstraint("country IN ('RU','KZ') AND balance_currency IN ('RUB','USDT')", name='ck_settlement_country_currency'),
+        CheckConstraint("country IN ('RU','KZ','TJ') AND balance_currency IN ('RUB','USDT')", name='ck_settlement_country_currency'),
         CheckConstraint("status IN ('pending','approved','sent','reconciliation','completed','rejected')", name='ck_settlement_status'),
-        CheckConstraint("contract_version=0 OR ((contract_version=1 AND fee_usdt=5 AND amount_usdt>0\nAND total_usdt=amount_usdt+fee_usdt AND reserve_amount=payout_balance_amount+fee_balance_amount\nAND balance_id IS NOT NULL AND network='TRC20'\nAND ((country='RU' AND balance_currency='RUB' AND rate_rub>0\nAND payout_balance_amount=amount_rub AND fee_balance_amount=fee_rub AND reserve_amount=total_debit_rub\nAND amount_rub=round(amount_usdt*rate_rub,2) AND fee_rub=round(fee_usdt*rate_rub,2))\nOR (country='KZ' AND balance_currency='USDT' AND payout_balance_amount=amount_usdt\nAND fee_balance_amount=fee_usdt AND reserve_amount=total_usdt AND rate_rub IS NULL\nAND amount_rub IS NULL AND fee_rub IS NULL AND total_debit_rub IS NULL))) IS TRUE)", name='ck_settlement_financial_contract'),
+        CheckConstraint("contract_version=0 OR ((contract_version=1 AND fee_usdt=5 AND amount_usdt>0\nAND total_usdt=amount_usdt+fee_usdt AND reserve_amount=payout_balance_amount+fee_balance_amount\nAND balance_id IS NOT NULL AND network='TRC20'\nAND ((country='RU' AND balance_currency='RUB' AND rate_rub>0\nAND payout_balance_amount=amount_rub AND fee_balance_amount=fee_rub AND reserve_amount=total_debit_rub\nAND amount_rub=round(amount_usdt*rate_rub,2) AND fee_rub=round(fee_usdt*rate_rub,2))\nOR (country IN ('KZ','TJ') AND balance_currency='USDT' AND payout_balance_amount=amount_usdt\nAND fee_balance_amount=fee_usdt AND reserve_amount=total_usdt AND rate_rub IS NULL\nAND amount_rub IS NULL AND fee_rub IS NULL AND total_debit_rub IS NULL))) IS TRUE)", name='ck_settlement_financial_contract'),
         Index('uq_merchant_settlement_registered_tx', 'network', func.lower(tx_hash), unique=True,
               postgresql_where=text('tx_hash IS NOT NULL AND contract_version=1'), sqlite_where=text('tx_hash IS NOT NULL AND contract_version=1')),
         UniqueConstraint(
@@ -344,7 +347,7 @@ class TraderWallet(Base, TimestampMixin):
     hold: Mapped[Decimal] = mapped_column(Numeric(24, 8), default=Decimal('0'))
     __table_args__ = (
         UniqueConstraint('trader_id', 'currency', name='uq_trader_wallet_currency'),
-        CheckConstraint("currency = 'USDT'", name='ck_trader_wallet_usdt'),
+        CheckConstraint("currency IN ('USDT','TJS')", name='ck_trader_wallet_usdt'),
         CheckConstraint('balance >= 0 AND hold >= 0 AND hold <= balance', name='ck_trader_wallet_amounts'),
     )
 
@@ -363,7 +366,7 @@ class TraderWalletLedgerEntry(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(String(500), default='')
     idempotency_key: Mapped[str | None] = mapped_column(String(160), unique=True, nullable=True)
     __table_args__ = (
-        CheckConstraint("currency = 'USDT'", name='ck_trader_wallet_ledger_usdt'),
+        CheckConstraint("currency IN ('USDT','TJS')", name='ck_trader_wallet_ledger_usdt'),
         CheckConstraint('balance_after >= 0 AND hold_after >= 0 AND hold_after <= balance_after', name='ck_trader_wallet_ledger_amounts'),
     )
 
@@ -890,13 +893,13 @@ class MerchantRollingAccount(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='CASCADE')
     )
     principal_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     recovered_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     outstanding_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     status: Mapped[str] = mapped_column(
         String(16), default=RollingAccountStatus.exhausted.value, index=True
@@ -934,12 +937,12 @@ class MerchantRollingTransfer(Base, TimestampMixin):
         index=True,
     )
     sequence_no: Mapped[int] = mapped_column(Integer)
-    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 8))
     recovered_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     remaining_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     network: Mapped[str | None] = mapped_column(String(32), nullable=True)
     destination_address: Mapped[str | None] = mapped_column(
@@ -1057,25 +1060,34 @@ class MerchantRollingAllocation(Base, TimestampMixin):
     rolling_account_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey('merchant_rolling_accounts.id', ondelete='RESTRICT'), index=True
     )
+    local_currency: Mapped[str] = mapped_column(String(3), default='RUB', server_default='RUB')
+    gross_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    merchant_fee_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    merchant_net_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_local: Mapped[Decimal | None] = mapped_column(Numeric(30, 12), nullable=True)
+    quote_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    rolling_applied_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    settle_credited_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    settle_credited_usdt: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     gross_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     merchant_fee_percent_snapshot: Mapped[Decimal] = mapped_column(Numeric(10, 6))
     merchant_fee_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
     merchant_payable_rub: Mapped[Decimal] = mapped_column(
         'merchant_net_rub', Numeric(18, 2)
     )
-    rapira_rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8))
-    rapira_rate_symbol: Mapped[str] = mapped_column(String(16))
-    rapira_rate_side: Mapped[str] = mapped_column(String(8), default='ask')
-    rapira_rate_source: Mapped[str] = mapped_column(String(64))
-    rapira_rate_field: Mapped[str] = mapped_column(String(64), default='askPrice')
-    rapira_rate_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    rapira_rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8), nullable=True)
+    rapira_rate_symbol: Mapped[str] = mapped_column(String(16), nullable=True)
+    rapira_rate_side: Mapped[str] = mapped_column(String(8), default='ask', nullable=True)
+    rapira_rate_source: Mapped[str] = mapped_column(String(64), nullable=True)
+    rapira_rate_field: Mapped[str] = mapped_column(String(64), default='askPrice', nullable=True)
+    rapira_rate_updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
     rapira_provider_timestamp: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    rapira_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    rapira_freshness_basis: Mapped[str] = mapped_column(String(32))
+    rapira_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=True)
+    rapira_freshness_basis: Mapped[str] = mapped_column(String(32), nullable=True)
     merchant_payable_usdt: Mapped[Decimal] = mapped_column(
-        'merchant_net_usdt', Numeric(24, 6)
+        'merchant_net_usdt', Numeric(24, 8)
     )
     eligibility_status: Mapped[str] = mapped_column(
         String(16), default='eligible'
@@ -1090,7 +1102,7 @@ class MerchantRollingAllocation(Base, TimestampMixin):
         String(32), default='confirmed_transfer'
     )
     rolling_applied_usdt: Mapped[Decimal] = mapped_column(
-        Numeric(24, 6), default=Decimal('0.000000')
+        Numeric(24, 8), default=Decimal('0.000000')
     )
     rolling_applied_rub: Mapped[Decimal] = mapped_column(
         Numeric(18, 2), default=Decimal('0.00')
@@ -1168,7 +1180,10 @@ class MerchantRollingLedgerEntry(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True, index=True
     )
     entry_type: Mapped[str] = mapped_column(String(32), index=True)
-    amount_usdt: Mapped[Decimal | None] = mapped_column(Numeric(24, 6), nullable=True)
+    local_currency: Mapped[str] = mapped_column(String(3), default='RUB', server_default='RUB')
+    amount_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_local: Mapped[Decimal | None] = mapped_column(Numeric(30, 12), nullable=True)
+    amount_usdt: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     amount_rub: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     rate_rub: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     network: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -1240,9 +1255,12 @@ class MerchantRollingTransferConsumption(Base, TimestampMixin):
         index=True,
     )
     entry_type: Mapped[str] = mapped_column(String(16))
-    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 6))
+    local_currency: Mapped[str] = mapped_column(String(3), default='RUB', server_default='RUB')
+    amount_local: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    rate_local: Mapped[Decimal | None] = mapped_column(Numeric(30, 12), nullable=True)
+    amount_usdt: Mapped[Decimal] = mapped_column(Numeric(24, 8))
     amount_rub: Mapped[Decimal] = mapped_column(Numeric(18, 2))
-    rate_rub: Mapped[Decimal] = mapped_column(Numeric(24, 8))
+    rate_rub: Mapped[Decimal | None] = mapped_column(Numeric(24, 8), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(180), unique=True)
     reason: Mapped[str] = mapped_column(String(500))
     __table_args__ = (
@@ -1300,8 +1318,8 @@ class BankDirectory(Base, TimestampMixin):
     verified_on: Mapped[date] = mapped_column(Date)
     __table_args__ = (
         UniqueConstraint('country', 'name', name='uq_bank_directory_country_name'),
-        CheckConstraint("country IN ('AM','GE')", name='ck_bank_directory_country'),
-        CheckConstraint("institution_type IN ('bank','microbank')", name='ck_bank_directory_type'),
+        CheckConstraint("country IN ('AM','GE','TJ')", name='ck_bank_directory_country'),
+        CheckConstraint("institution_type IN ('bank','microbank','payment_system')", name='ck_bank_directory_type'),
         CheckConstraint("status IN ('active','inactive')", name='ck_bank_directory_status'),
     )
 
@@ -1571,6 +1589,8 @@ class ApiRequestLog(Base, TimestampMixin):
 
 class AggregatorAccount(Base, TimestampMixin):
     __tablename__='aggregator_accounts'
+    working_country: Mapped[str|None]=mapped_column(String(2), nullable=True)
+    working_currency: Mapped[str|None]=mapped_column(String(3), nullable=True)
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     platform_merchant_id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), ForeignKey('merchants.id', ondelete='RESTRICT'), index=True)
     name: Mapped[str]=mapped_column(String(160))
@@ -1686,9 +1706,10 @@ class ExternalProcessorConnection(Base, TimestampMixin):
     __tablename__='external_processor_connections'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str]=mapped_column(String(160), unique=True, index=True)
-    adapter_type: Mapped[str]=mapped_column(String(32), default='tradespace', index=True)
+    adapter_type: Mapped[str]=mapped_column(String(32), default='merchant_hmac_v2', index=True)
     environment: Mapped[str]=mapped_column(String(16), default='sandbox', index=True)
     api_base_url: Mapped[str]=mapped_column(String(500))
+    webhook_header_prefix: Mapped[str]=mapped_column(String(64), default='X-Processor', server_default='X-Processor')
     api_key_encrypted: Mapped[str]=mapped_column(Text)
     api_secret_encrypted: Mapped[str]=mapped_column(Text)
     webhook_key_id: Mapped[str]=mapped_column(String(160))
@@ -1710,7 +1731,7 @@ class ExternalProcessorConnection(Base, TimestampMixin):
     updated_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     is_archived: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
     __table_args__=(
-        CheckConstraint("adapter_type IN ('tradespace')", name='ck_external_processor_adapter'),
+        CheckConstraint("adapter_type IN ('merchant_hmac_v2')", name='ck_external_processor_adapter'),
         CheckConstraint("environment IN ('sandbox','production')", name='ck_external_processor_environment'),
         CheckConstraint('min_amount >= 0', name='ck_external_processor_min_amount'),
         CheckConstraint('max_amount > min_amount', name='ck_external_processor_amount_range'),
@@ -1728,6 +1749,7 @@ class ExternalProcessorVersion(Base, TimestampMixin):
     adapter_type: Mapped[str]=mapped_column(String(32))
     environment: Mapped[str]=mapped_column(String(16))
     api_base_url: Mapped[str]=mapped_column(String(500))
+    webhook_header_prefix: Mapped[str]=mapped_column(String(64), default='X-Processor', server_default='X-Processor')
     api_key_encrypted: Mapped[str]=mapped_column(Text)
     api_secret_encrypted: Mapped[str]=mapped_column(Text)
     webhook_key_id: Mapped[str]=mapped_column(String(160), index=True)
@@ -1744,7 +1766,7 @@ class ExternalProcessorVersion(Base, TimestampMixin):
     created_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     __table_args__=(
         UniqueConstraint('connection_id','version', name='uq_external_processor_version'),
-        CheckConstraint("adapter_type IN ('tradespace')", name='ck_external_processor_version_adapter'),
+        CheckConstraint("adapter_type IN ('merchant_hmac_v2')", name='ck_external_processor_version_adapter'),
         CheckConstraint("environment IN ('sandbox','production')", name='ck_external_processor_version_environment'),
     )
 
@@ -1830,6 +1852,7 @@ class FeeRule(Base, TimestampMixin):
     version: Mapped[int]=mapped_column(Integer, default=1)
     created_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
     updated_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
+    country_tariff_plan_id: Mapped[uuid.UUID|None]=mapped_column(ForeignKey('country_tariff_plans.id', ondelete='RESTRICT'), nullable=True)
     __table_args__=(
         CheckConstraint(
             "entity_type IN ('merchant','trader','aggregator','external_processor')",
@@ -1897,6 +1920,7 @@ class OperationFeeSnapshot(Base, TimestampMixin):
     settlement_status: Mapped[str]=mapped_column(String(32), default='pending', index=True)
     settled_at: Mapped[datetime|None]=mapped_column(DateTime(timezone=True), nullable=True)
     ledger_reference: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), nullable=True)
+    financial_context: Mapped[dict|None]=mapped_column(JSON(none_as_null=True), nullable=True)
     __table_args__=(
         UniqueConstraint(
             'deposit_id',

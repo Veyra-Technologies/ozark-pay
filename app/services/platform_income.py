@@ -43,7 +43,9 @@ async def platform_income_dashboard(
     page: int = 1,
     page_size: int = 50,
 ) -> dict:
-    conditions = []
+    # This legacy report reconciles RUB snapshots with RUB and TeamLead journals.
+    # Local TJS commissions and their USDT settlement must never enter its sums.
+    conditions = [OperationFeeSnapshot.currency == 'RUB']
     if date_from is not None:
         conditions.append(OperationFeeSnapshot.rate_snapshot_at >= date_from)
     if date_to is not None:
@@ -135,6 +137,7 @@ async def platform_income_dashboard(
             select(func.coalesce(func.sum(PlatformLedgerEntry.amount), 0)).where(
                 PlatformLedgerEntry.operation_id.in_(settled_operation_ids),
                 PlatformLedgerEntry.entry_type == 'platform_income',
+                PlatformLedgerEntry.currency == 'RUB',
             )
         )).scalar_one())
     snapshot_income = money(financial_aggregate[4])
@@ -180,6 +183,7 @@ async def platform_income_dashboard(
                 PlatformLedgerEntry.entry_type.in_(
                     ('teamlead_expense', 'teamlead_expense_reversal')
                 ),
+                PlatformLedgerEntry.currency == 'RUB',
             ).group_by(PlatformLedgerEntry.entry_type)
         )).all()
         expense_totals = {row[0]: money(row[1]) for row in expense_rows}
@@ -304,6 +308,8 @@ async def platform_income_dashboard(
         executor_labels.update({('external_processor', row[0]): row[1] for row in processor_rows})
 
     return {
+        'report_currency': 'RUB',
+        'report_country': 'RU',
         'filters': {
             'date_from': date_from,
             'date_to': date_to,

@@ -1,0 +1,7 @@
+<p>Подтверждайте только после проверки фактического банковского поступления.</p>
+<input type="hidden" name="requisite_id" value="{{ op.requisites_id }}">
+<label>Фактически получено, TJS<input name="actual_amount" type="number" min="10" step="0.01" value="{{ op.amount }}" required></label>
+<label>Время банковского поступления<input type="datetime-local" step="1" data-local-time required></label>
+<input type="hidden" name="received_at" data-local-time-iso>
+<label>Ссылка / номер записи банковской выписки<input name="reference" minlength="4" maxlength="200" required></label>
+<label><input type="checkbox" name="bank_credit_confirmed" required> Я проверил поступление на этот реквизит и указанную сумму</label>

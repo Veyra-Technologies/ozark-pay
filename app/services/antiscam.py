@@ -607,10 +607,10 @@ async def can_route_payment_to_trader(db: AsyncSession, trader: User | None, amo
             max_active = trader.trader_limited_max_active_payments or settings.max_active_payments_when_risky
             if max_active and await active_payments_for_trader(db, trader.id) >= max_active:
                 return False
-            max_amount = trader.trader_limited_max_amount or global_settings.limited_reinstate_max_amount
+            max_amount = trader.trader_limited_max_amount or (None if trader.working_country == 'TJ' else global_settings.limited_reinstate_max_amount)
             if max_amount and amount_value > money(max_amount):
                 return False
-    if global_settings.high_amount_extra_risk_enabled and amount_value >= money(global_settings.high_amount_threshold):
+    if trader.working_country != 'TJ' and global_settings.high_amount_extra_risk_enabled and amount_value >= money(global_settings.high_amount_threshold):
         if not bool(trader.trader_allow_high_amount) or not settings.allow_high_amount_traffic:
             return False
     return int(trader.trader_risk_score or 0) < 86
@@ -636,10 +636,10 @@ async def can_route_payment_to_requisite(db: AsyncSession, req: Requisite, trade
             max_active = req.limited_max_active_payments or req_settings.limited_max_active_payments
             if max_active and await active_payments_for_requisite(db, req.id) >= max_active:
                 return False
-            max_amount = req.limited_max_amount or req_settings.limited_max_amount
+            max_amount = req.limited_max_amount or (None if req.country == 'TJ' else req_settings.limited_max_amount)
             if max_amount and amount_value > money(max_amount):
                 return False
-    if global_settings.high_amount_extra_risk_enabled and amount_value >= money(global_settings.high_amount_threshold):
+    if req.country != 'TJ' and global_settings.high_amount_extra_risk_enabled and amount_value >= money(global_settings.high_amount_threshold):
         if not bool(req.allow_high_amount) or not bool(req_settings.allow_high_amount_traffic):
             return False
     return int(req.risk_score or 0) < 86 and await can_route_payment_to_trader(db, trader, amount_value)

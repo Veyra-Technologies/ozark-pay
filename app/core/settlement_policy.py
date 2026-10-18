@@ -3,7 +3,7 @@ from decimal import Decimal
 
 SETTLEMENT_FEE_USDT = Decimal('5.00')
 SETTLEMENT_NETWORK = 'TRC20'
-SETTLEMENT_CURRENCIES = {'RU': 'RUB', 'KZ': 'USDT'}
+SETTLEMENT_CURRENCIES = {'RU': 'RUB', 'KZ': 'USDT', 'TJ': 'USDT'}
 SETTLEMENT_ACTIVE_STATUSES = ('pending', 'approved', 'sent', 'reconciliation')
 
 SETTLEMENT_STATUS_LABELS = {
@@ -13,7 +13,8 @@ SETTLEMENT_STATUS_LABELS = {
 }
 SETTLEMENT_ERROR_MESSAGES = {
     'permission_denied': 'Недостаточно прав для действия с заявкой.',
-    'merchant_settlement_country_required': 'Для новых заявок назначьте кабинету страну RU или KZ.',
+    'merchant_settlement_country_required': 'Для новых заявок назначьте кабинету страну RU, KZ или TJ.',
+    'tj_settlement_production_disabled': 'Реальные выплаты TJ закрыты до отдельного разрешения. Финансовый цикл доступен только на изолированном QA.',
     'invalid_usdt_amount': 'Укажите положительную сумму выплаты USDT.',
     'invalid_trc20_address': 'Укажите корректный адрес TRON с действительной контрольной суммой.',
     'invalid_trc20_network': 'Адрес не соответствует сети TRON (TRC20).',

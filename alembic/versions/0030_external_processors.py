@@ -1,4 +1,4 @@
-"""Outbound external payment processors and TradeSpace routing.
+"""Outbound external payment processors and generic Merchant HMAC v2 routing.
 
 Revision ID: 0030_external_processors
 Revises: 0029_trader_wallets_local_banks
@@ -19,7 +19,7 @@ def upgrade():
         'external_processor_connections',
         sa.Column('id', postgresql.UUID(as_uuid=True), primary_key=True),
         sa.Column('name', sa.String(160), nullable=False),
-        sa.Column('adapter_type', sa.String(32), nullable=False, server_default='tradespace'),
+        sa.Column('adapter_type', sa.String(32), nullable=False, server_default='merchant_hmac_v2'),
         sa.Column('environment', sa.String(16), nullable=False, server_default='sandbox'),
         sa.Column('api_base_url', sa.String(500), nullable=False),
         sa.Column('api_key_encrypted', sa.Text(), nullable=False),
@@ -45,7 +45,7 @@ def upgrade():
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint('name', name='uq_external_processor_connections_name'),
-        sa.CheckConstraint("adapter_type IN ('tradespace')", name='ck_external_processor_adapter'),
+        sa.CheckConstraint("adapter_type IN ('merchant_hmac_v2')", name='ck_external_processor_adapter'),
         sa.CheckConstraint("environment IN ('sandbox','production')", name='ck_external_processor_environment'),
         sa.CheckConstraint('min_amount >= 0', name='ck_external_processor_min_amount'),
         sa.CheckConstraint('max_amount > min_amount', name='ck_external_processor_amount_range'),
@@ -80,7 +80,7 @@ def upgrade():
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint('connection_id','version', name='uq_external_processor_version'),
-        sa.CheckConstraint("adapter_type IN ('tradespace')", name='ck_external_processor_version_adapter'),
+        sa.CheckConstraint("adapter_type IN ('merchant_hmac_v2')", name='ck_external_processor_version_adapter'),
         sa.CheckConstraint("environment IN ('sandbox','production')", name='ck_external_processor_version_environment'),
     )
     op.create_index('ix_external_processor_versions_connection_id', 'external_processor_versions', ['connection_id'])

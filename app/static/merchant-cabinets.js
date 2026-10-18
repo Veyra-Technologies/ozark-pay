@@ -18,9 +18,13 @@
       const chosen = initial ? JSON.parse(group.dataset.currentMethods) : [];
       [...methods.options].forEach(option => { option.selected = chosen.length ? chosen.includes(option.value) : true; });
       if (initial && group.dataset.currentPlan) plans.value = group.dataset.currentPlan;
+      const tj = country.value === 'TJ';
+      plans.disabled = tj;
+      plans.required = !tj;
+      plans.parentElement.hidden = tj;
       group.querySelector('[data-merchant-basis]').textContent = country.value === 'KZ'
         ? 'Номинал и ориентиры — KZT. Ступень комиссии и расчёты — BASE_USDT; обновление курса не меняет утверждённые границы.'
-        : country.value === 'RU' ? 'Диапазоны чеков и расчёт комиссии — RUB. Курс Rapira применяется по существующим правилам.' : '';
+        : country.value === 'TJ' ? 'Диапазоны — TJS, минимум 10 TJS. Приём закрыт до подтверждения источника Bybit P2P Green 1–3.' : country.value === 'RU' ? 'Диапазоны чеков и расчёт комиссии — RUB. Курс Rapira применяется по существующим правилам.' : '';
     };
     country.addEventListener('change', () => sync(false)); sync(true);
   });

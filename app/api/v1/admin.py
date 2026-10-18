@@ -88,6 +88,8 @@ def _risk_public(event: RiskEvent) -> dict:
 
 def _aggregator_public(account: AggregatorAccount) -> dict:
     return {
+        'country': account.working_country,
+        'currency': account.working_currency or 'RUB',
         'id': account.id,
         'platform_merchant_id': account.platform_merchant_id,
         'name': account.name,
@@ -96,14 +98,14 @@ def _aggregator_public(account: AggregatorAccount) -> dict:
         'callback_url': account.callback_url,
         'success_url': account.success_url,
         'fail_url': account.fail_url,
-        'commission_percent': account.commission_percent,
+        'commission_percent': None if account.working_country == 'TJ' else account.commission_percent,
         'min_payment_amount': account.min_payment_amount,
         'max_payment_amount': account.max_payment_amount,
         'daily_limit': account.daily_limit,
         'monthly_limit': account.monthly_limit,
-        'balance': account.balance,
-        'hold_balance': account.hold_balance,
-        'total_turnover': account.total_turnover,
+        'balance': None if account.working_country == 'TJ' else account.balance,
+        'hold_balance': None if account.working_country == 'TJ' else account.hold_balance,
+        'total_turnover': None if account.working_country == 'TJ' else account.total_turnover,
         'created_at': account.created_at,
         'updated_at': account.updated_at,
     }
@@ -147,6 +149,8 @@ def _aggregator_callback_public(log: AggregatorCallbackLog) -> dict:
 
 def _apply_aggregator_update(account: AggregatorAccount, data: AggregatorUpdate) -> None:
     fields = data.model_fields_set
+    if account.working_country == 'TJ' and 'commission_percent' in fields and data.commission_percent is not None:
+        raise ValueError('Комиссия TJ задаётся только индивидуальными версиями тарифов')
     if 'name' in fields and data.name is not None:
         account.name = data.name
     if 'callback_url' in fields:
@@ -215,14 +219,24 @@ async def create_merchant(data: MerchantCreate, request: Request, db: AsyncSessi
         await assign_merchant_country(db, actor=actor, merchant=merchant, country=data.country,
                                       parser_id=data.parser_id, business_id=data.business_id)
         from app.services.merchant_cabinets import configure
-        await configure(db, actor=actor, merchant=merchant, currency=data.currency, parser_id=data.parser_id,
-            tariff_plan_id=data.tariff_plan_id, methods=data.payment_methods)
+        if merchant.working_country == 'TJ':
+            from app.services.merchant_cabinets import validate_dimensions
+            from app.services.tj_cabinets import save_personal_plan
+            validate_dimensions('TJ', data.currency, data.parser_id, data.payment_methods)
+            merchant.payment_methods = ['c2c']
+            if data.tariff_tiers:
+                await save_personal_plan(db, actor=actor, party='merchant', entity_id=merchant.id,
+                    tiers=data.tariff_tiers, effective_from=data.tariff_effective_from)
+        else:
+            await configure(db, actor=actor, merchant=merchant, currency=data.currency, parser_id=data.parser_id,
+                tariff_plan_id=data.tariff_plan_id, methods=data.payment_methods)
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(422, str(exc)) from exc
     secret=secrets.token_urlsafe(32); api_key='pk_'+secrets.token_urlsafe(24)
     db.add(ApiKey(merchant_id=merchant.id, api_key=api_key, secret_hash=encrypt_secret(secret), mode='sandbox' if data.sandbox_mode else 'production'))
-    db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
+    if merchant.working_country != 'TJ':
+        db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
     db.add(KycProfile(merchant_id=merchant.id, status='not_started', risk_level='standard'))
     await audit(db,'merchant_created','merchant',actor.id,merchant.id,client_ip(request))
     await db.commit()
@@ -241,6 +255,9 @@ async def create_aggregator(data: AggregatorCreate, request: Request, db: AsyncS
         account, secret = await create_aggregator_account(
             db,
             name=data.name,
+            country=data.country, actor=actor, tariff_plan_id=data.tariff_plan_id,
+            parser_id=data.parser_id, login_email=data.login_email, login_password=data.login_password,
+            tariff_tiers=data.tariff_tiers, tariff_effective_from=data.tariff_effective_from,
             callback_url=data.callback_url,
             success_url=data.success_url,
             fail_url=data.fail_url,
@@ -329,6 +346,8 @@ async def list_aggregator_callbacks(aggregator_id: UUID, db: AsyncSession=Depend
 
 @router.post('/users')
 async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin, Role.admin))):
+    if data.role == Role.aggregator:
+        raise HTTPException(422, 'Создайте связанный кабинет через /admin/aggregators или единую административную форму')
     if actor.role == Role.admin.value and data.role == Role.admin:
         raise HTTPException(403, 'admin cannot create another admin')
     if data.role == Role.superadmin:
@@ -343,6 +362,10 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
         from app.services.trader_finance import ensure_usdt_wallet
         await ensure_usdt_wallet(db, user.id)
     result={'user_id':user.id,'email':user.email,'role':user.role,'twofa_setup_required':needs_2fa}
+    if user.role == 'trader' and user.working_country == 'TJ' and data.tariff_tiers:
+        from app.services.tj_cabinets import save_personal_plan
+        await save_personal_plan(db, actor=actor, party='trader', entity_id=user.id,
+            tiers=data.tariff_tiers, effective_from=data.tariff_effective_from)
     if data.role == Role.merchant:
         merchant=Merchant(owner_id=user.id, name=data.merchant_name or data.email, webhook_url=None, ip_whitelist=[], sandbox_mode=True)
         db.add(merchant); await db.flush()
@@ -351,15 +374,27 @@ async def create_user(data: UserCreateIn, request: Request, db: AsyncSession=Dep
             await assign_merchant_country(db, actor=actor, merchant=merchant, country=data.merchant_country,
                 parser_id=data.merchant_parser_id, business_id=data.business_id)
             from app.services.merchant_cabinets import configure
-            await configure(db, actor=actor, merchant=merchant, currency=data.merchant_currency,
-                parser_id=data.merchant_parser_id, tariff_plan_id=data.merchant_tariff_plan_id,
-                methods=data.merchant_payment_methods)
+            if merchant.working_country == 'TJ':
+                from app.services.merchant_cabinets import validate_dimensions
+                from app.services.tj_cabinets import save_personal_plan
+                validate_dimensions('TJ', data.merchant_currency, data.merchant_parser_id, data.merchant_payment_methods)
+                if data.merchant_tariff_plan_id:
+                    raise ValueError('Для нового TJ задайте индивидуальные диапазоны вместо общего тарифа')
+                merchant.payment_methods = ['c2c']
+                if data.tariff_tiers:
+                    await save_personal_plan(db, actor=actor, party='merchant', entity_id=merchant.id,
+                        tiers=data.tariff_tiers, effective_from=data.tariff_effective_from)
+            else:
+                await configure(db, actor=actor, merchant=merchant, currency=data.merchant_currency,
+                    parser_id=data.merchant_parser_id, tariff_plan_id=data.merchant_tariff_plan_id,
+                    methods=data.merchant_payment_methods)
         except ValueError as exc:
             await db.rollback()
             raise HTTPException(422, str(exc)) from exc
         secret=secrets.token_urlsafe(32); api_key='pk_'+secrets.token_urlsafe(24)
         db.add(ApiKey(merchant_id=merchant.id, api_key=api_key, secret_hash=encrypt_secret(secret), mode='sandbox'))
-        db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
+        if merchant.working_country != 'TJ':
+            db.add(Balance(merchant_id=merchant.id, available=Decimal('0.00')))
         db.add(KycProfile(merchant_id=merchant.id, status='not_started', risk_level='standard'))
         result.update({'merchant_id':merchant.id,'api_key':api_key,'secret_key':secret})
     await audit(db,'user_created','user',actor.id,user.id,client_ip(request),{'role':user.role})
@@ -407,6 +442,10 @@ async def add_requisite(data: RequisiteIn, request: Request, db: AsyncSession=De
         requested_country=data.country,
         requested_currency=data.currency,
     )
+    from app.services.bank_requisites import validate_requisite_limits
+    if jurisdiction.country == 'TJ' and not {'min_check','max_check'} <= data.model_fields_set:
+        raise HTTPException(422, 'Для TJ задайте min_check и max_check явно в TJS')
+    validate_requisite_limits(jurisdiction, data.min_check, data.max_check)
     clean_value, suffix = validated_requisite_value(jurisdiction, data.value, data.last4)
     req=Requisite(
         trader_id=account.id,
@@ -476,6 +515,10 @@ async def update_requisite(requisite_id: UUID, data: RequisiteIn, request: Reque
         db, account, method=data.method.value, bank_id=data.bank_id or '', bank_code=data.bank_code or '',
         operator_code=data.operator_code or '', bank_name=data.bank_name or '',
         requested_country=data.country, requested_currency=data.currency)
+    from app.services.bank_requisites import validate_requisite_limits
+    validate_requisite_limits(jurisdiction,
+        data.min_check if 'min_check' in data.model_fields_set else req.min_check,
+        data.max_check if 'max_check' in data.model_fields_set else req.max_check)
     value, suffix = validated_requisite_value(jurisdiction, data.value, data.last4)
     await check_requisite_identity_edit(db, req, jurisdiction, value)
     for field in ('method', 'bank_id', 'bank_code', 'operator_code', 'bank_name', 'country', 'currency'):
@@ -502,8 +545,8 @@ async def bank_directory(country: str = Query(..., min_length=2, max_length=2), 
         account = await require_working_account(db, trader_account_id(actor))
         if normalized != account.working_country:
             raise HTTPException(403, 'bank directory is limited to the assigned country')
-    if normalized not in {'AM', 'GE'}:
-        raise HTTPException(422, 'country must be AM or GE')
+    if normalized not in {'AM', 'GE', 'TJ'}:
+        raise HTTPException(422, 'country must be AM, GE or TJ')
     rows = (await db.execute(select(BankDirectory).where(
         BankDirectory.country == normalized,
         BankDirectory.status == 'active',
@@ -524,10 +567,10 @@ async def bank_directory(country: str = Query(..., min_length=2, max_length=2), 
 async def list_requisites(request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin,Role.admin,Role.support,Role.merchant,Role.operator,Role.trader))):
     if actor.role in [Role.superadmin.value, Role.admin.value, Role.support.value]:
         rows = (await db.execute(select(Requisite).order_by(Requisite.created_at.desc()).limit(500))).scalars().all()
-        payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
+        payload = [_requisite_public(req, include_value=req.country not in ('GE','TJ')) for req in rows]
     elif actor.role in [Role.operator.value, Role.trader.value]:
         rows = (await db.execute(select(Requisite).where(Requisite.trader_id == trader_account_id(actor)).order_by(Requisite.created_at.desc()).limit(500))).scalars().all()
-        payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
+        payload = [_requisite_public(req, include_value=req.country not in ('GE','TJ')) for req in rows]
     else:
         merchant = (await db.execute(select(Merchant).where(Merchant.owner_id == actor.id))).scalar_one_or_none()
         if not merchant:
@@ -542,7 +585,7 @@ async def list_requisites(request: Request, db: AsyncSession=Depends(get_db), ac
                 payload = []
             else:
                 rows = (await db.execute(select(Requisite).where(Requisite.id.in_(req_ids)).order_by(Requisite.created_at.desc()))).scalars().all()
-                payload = [_requisite_public(req, include_value=req.country != 'GE') for req in rows]
+                payload = [_requisite_public(req, include_value=req.country not in ('GE','TJ')) for req in rows]
     await audit(db, 'requisites_viewed', 'requisite', actor.id, None, client_ip(request), {'count': len(payload), 'role': actor.role})
     await db.commit()
     return payload
@@ -777,6 +820,12 @@ async def review_kyc(
 @router.post('/deposits/{deposit_id}/confirm')
 async def confirm_deposit(deposit_id: str, request: Request, db: AsyncSession=Depends(get_db), actor=Depends(require_roles(Role.superadmin))):
     try:
+        try:
+            bank_confirmation = await request.json()
+        except ValueError:
+            bank_confirmation = None
+        if not isinstance(bank_confirmation, dict):
+            bank_confirmation = None
         result = await confirm_deposit_payment(
             db,
             deposit_id,
@@ -784,6 +833,7 @@ async def confirm_deposit(deposit_id: str, request: Request, db: AsyncSession=De
             actor_ip=client_ip(request),
             audit_action='deposit_confirmed',
             description='manual deposit confirmation',
+            bank_confirmation=bank_confirmation,
         )
     except DepositConfirmationError as exc:
         raise HTTPException(exc.status_code, exc.api_detail) from exc

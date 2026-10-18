@@ -21,6 +21,7 @@ class DepositStatus(StrEnum):
     expired = 'expired'
     cancelled = 'cancelled'
     appeal_opened = 'appeal_opened'
+    refunded = 'refunded'
 
 
 class RollingAccountStatus(StrEnum):
@@ -104,6 +105,7 @@ class PayoutStatus(StrEnum):
 
 
 class PaymentMethod(StrEnum):
+    tj_qr = 'tj_qr'
     sbp = 'sbp'
     sbp_qr = 'sbp_qr'
     c2c = 'c2c'

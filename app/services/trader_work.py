@@ -1,16 +1,18 @@
 """Assigned payment jurisdiction. RUB settlement ledgers keep their original currency."""
 from fastapi import HTTPException
 from sqlalchemy import select
-from app.models import User, Requisite, Deposit, TraderLedgerEntry
+from app.models import User, Requisite, Deposit, TraderLedgerEntry, TraderWallet
 
-COUNTRIES = {'RU': ('Россия', 'RUB'), 'AM': ('Армения', 'AMD'), 'GE': ('Грузия', 'GEL')}
-RATE_SOURCES = {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe'}
+COUNTRIES = {'RU': ('Россия', 'RUB'), 'AM': ('Армения', 'AMD'), 'GE': ('Грузия', 'GEL'), 'TJ': ('Таджикистан', 'TJS')}
+RATE_SOURCES = {'RU': 'rapira', 'AM': 'xe', 'GE': 'xe', 'TJ': 'bybit_p2p_tjs_green_avg3'}
 
 
 def validate_profile(country, currency=None, source=None):
     if country not in COUNTRIES:
         raise HTTPException(422, 'Выберите страну работы')
     expected_currency, expected_source = COUNTRIES[country][1], RATE_SOURCES[country]
+    if country == 'TJ' and source != expected_source:
+        raise HTTPException(422, 'Явно выберите Bybit P2P Green USDT/TJS для TJ')
     if currency and currency != expected_currency:
         raise HTTPException(422, 'Валюта приёма не соответствует стране')
     if source and source != expected_source:
@@ -63,8 +65,12 @@ async def configure_new_account(db, actor, target, country=None, currency=None, 
     else:
         if parent_id:
             raise HTTPException(422, 'Трейдер не может быть оператором другого кабинета')
+        if country == 'TJ' and target.id and await db.scalar(select(TraderWallet.id).where(TraderWallet.trader_id == target.id).limit(1)):
+            raise HTTPException(409, 'Для TJ нужен новый отдельный кабинет без прежних кошельков')
         target.working_currency, target.working_rate_source = validate_profile(country, currency, source)
         target.working_country = country
+        if country == 'TJ':
+            target.trader_commission_percent = 0
         if target.id:
             from app.services.trader_finance import ensure_usdt_wallet
             await ensure_usdt_wallet(db, target.id)
@@ -81,6 +87,8 @@ async def assign_country(db, actor, target_id, country, currency=None, source=No
     if target.working_country:
         raise HTTPException(409, 'Страна уже назначена. Изменение требует отдельной миграции')
     currency, source = validate_profile(country, currency, source)
+    if country == 'TJ' and await db.scalar(select(TraderWallet.id).where(TraderWallet.trader_id == target.id).limit(1)):
+        raise HTTPException(409, 'Для TJ нужен новый отдельный кабинет без прежних кошельков')
     has_requisites = (await db.execute(select(Requisite.id).where(Requisite.trader_id == target.id).limit(1))).first()
     has_ledger = (await db.execute(select(TraderLedgerEntry.id).where(TraderLedgerEntry.trader_id == target.id).limit(1))).first()
     if country != 'RU' and (target.trader_balance or target.trader_hold or has_requisites or has_ledger):
@@ -90,6 +98,8 @@ async def assign_country(db, actor, target_id, country, currency=None, source=No
         raise HTTPException(409, 'Валюту исторического кабинета нужно мигрировать отдельно')
     target.working_country, target.working_currency = country, COUNTRIES[country][1]
     target.working_rate_source = source
+    if country == 'TJ':
+        target.trader_commission_percent = 0
     from app.services.trader_finance import ensure_usdt_wallet
     await ensure_usdt_wallet(db, target.id)
     from app.services.parser_assignments import provision_trader

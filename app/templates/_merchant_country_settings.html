@@ -1,7 +1,11 @@
-<div data-crossborder-live data-base="{{ cabinet_base }}/crossborder/live">{{ csrf_input(request) }}
+{% if profile_merchant.working_country == 'TJ' %}
+<div class="panel"><h3>Страна и обработка</h3><p>Таджикистан · TJS / USDT · TJ → TJ · C2C</p><p>Bybit P2P Green USDT/TJS — подготовлен. Страна неизменяема. Индивидуальные условия редактируются во вкладке «Тарифы».</p></div>
+{% else %}<div data-crossborder-live data-base="{{ cabinet_base }}/crossborder/live">{{ csrf_input(request) }}
 <form data-live-action="merchant-settings" class="panel"><h2>Настройки страны</h2>
 <input type="hidden" name="merchant_id" value="{{ profile_merchant.id }}">
 {% set country_catalog = merchant_catalog %}{% set country_merchant = profile_merchant %}{% set field_prefix = '' %}
 {% include '_merchant_country_fields.html' %}
 <button class="primary" type="submit">Сохранить настройки кабинета</button><div data-live-result role="status"></div>
 </form></div>
+
+{% endif %}

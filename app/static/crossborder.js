@@ -12,7 +12,7 @@
       currency.value = selected?.dataset.currency || '';
       const option = document.createElement('option');
       option.value = selected?.dataset.source || '';
-      option.textContent = country.value === 'GE' ? 'Binance · GEL/TBC · информационный' : option.value === 'xe' ? 'XE · среднерыночный' : option.value === 'rapira' ? 'Rapira · ask' : 'Сначала выберите страну';
+      option.textContent = country.value === 'GE' ? 'Binance · GEL/TBC · информационный' : option.value === 'bybit_p2p_tjs_green_avg3' ? 'Bybit P2P Green 1–3 · источник не подтверждён' : option.value === 'xe' ? 'XE · среднерыночный' : option.value === 'rapira' ? 'Rapira · ask' : 'Сначала выберите страну';
       source.replaceChildren(option);
       const method = group.querySelector('[data-trader-tariff-method]');
       if (method) {

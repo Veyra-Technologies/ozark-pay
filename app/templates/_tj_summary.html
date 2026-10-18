@@ -1,0 +1,24 @@
+<div class="panel"><h2>Таджикистан — Локальный (TJ → TJ)</h2>
+<p class="note" role="status">{{ tj_cabinet.admission.reason }}</p>
+<div class="grid">
+{% for currency, label in [('TJS','Локальный баланс'),('USDT','Обеспечение / расчётные обязательства')] %}
+{% set wallet = tj_cabinet.wallets.get(currency,{}) %}
+<div class="metric"><b>{{ 'Расчётные обязательства' if role == 'aggregator' and currency == 'USDT' else label }}</b><p data-raw-value>{{ wallet.get('available',0)|tj_money if currency == 'USDT' else wallet.get('available',0)|decimal_display }} {{ currency }}</p><small data-raw-value>В резерве: {{ wallet.get('hold',0)|tj_money if currency == 'USDT' else wallet.get('hold',0)|decimal_display }} {{ currency }}</small></div>
+{% endfor %}
+<div class="metric"><b>Успешных платежей</b><p>{{ tj_cabinet.successful_count }}</p><small>Оборот: {{ tj_cabinet.turnover_tjs|decimal_display }} TJS</small></div>
+</div>
+<p>Минимальный чек — 10 TJS. C2C: Душанбе Сити или Корти Милли. QR недоступен до утверждения формата. Выплаты Settle для TJ не подключены.</p>
+{% if tj_cabinet.qa_financial %}<p>Все операции этой среды синтетические. Курс принятой операции и её тарифы зафиксированы; банковские подтверждения здесь проверяются только на тестовых данных.</p>{% else %}<p>Парсер Bybit P2P Green 1–3: источник и сторона рынка требуют подтверждения. Значение курса не подставляется.</p>{% endif %}
+{% include '_tj_tariffs.html' %}
+{% if role in ['merchant','trader'] %}{% include '_local_deposit_operations.html' %}{% endif %}
+{% if role == 'aggregator' %}<p>Этот кабинет — входящий партнёр OzarkPay. Приём TJ закрыт. Обработка собственными реквизитами и обеспечение агрегатора требуют отдельного утверждения финансовой модели.</p>{% endif %}
+{% if role == 'aggregator' and s == 'Операции' %}<h3>Операции кабинета TJ</h3>
+<div class="table-wrap"><table><tr><th>ID</th><th>Сумма</th><th>Статус</th></tr>
+{% for op in tj_cabinet.operations %}<tr><td>{{ op.id }}</td><td>{{ op.amount|decimal_display }} TJS</td><td>{{ op.status|status_label }}</td></tr>{% else %}<tr><td colspan="3">Операций нет. Финансовый приём TJ закрыт.</td></tr>{% endfor %}</table></div>{% endif %}
+{% if role == 'aggregator' and s == 'API-интеграция' and tj_aggregator %}
+<h3>Aggregator API</h3><p><code>POST /api/v1/aggregator/v1/payments</code> · TJS · C2C. HMAC и ключи агрегатора, отдельные от Merchant API.</p>
+<p>ID партнёра: <code>{{ tj_aggregator.id }}</code></p>
+<p>API key: <code>{{ tj_aggregator.api_key }}</code> <button type="button" class="secondary" data-copy-value="{{ tj_aggregator.api_key }}">Копировать</button></p>
+<p>Секрет выдаётся администратору один раз при создании. Приём TJ остаётся закрытым.</p>
+{% endif %}
+</div>

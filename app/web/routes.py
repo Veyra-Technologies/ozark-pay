@@ -64,6 +64,7 @@ from app.core.payment_methods import PAYMENT_METHOD_OPTIONS, PAYMENT_METHOD_REQU
 from app.core.requisite_providers import get_requisite_provider_display, get_requisite_provider_label, get_requisite_provider_type, requisite_provider_display, requisite_provider_label, resolve_requisite_provider
 from app.core.russian_banks import RF_BANKS, get_bank_display_name, get_enabled_banks, normalize_bank_name
 from app.api.deps import STAFF_2FA_ROLES
+from app.web.view_models import decimal_display, status_label, usdt_display
 from app.services.audit import audit
 from app.services.appeals import APPEAL_REVIEW_TTL, TRADER_REJECTION_REASONS, appeal_deadline, appeal_remaining_seconds, approve_deposit_appeal, approve_expired_appeals, default_deadline, metadata as appeal_metadata, reject_deposit_appeal, set_metadata as set_appeal_metadata
 from app.services.antiscam import (
@@ -76,6 +77,7 @@ from app.services.antiscam import (
     reinstate_trader,
 )
 from app.services.aggregator_enqueue import enqueue_aggregator_callback_delivery
+from app.web.external_aggregators import router as external_aggregator_router
 from app.services.aggregators import create_aggregator_account, money, percent, regenerate_aggregator_secret, sync_payment_from_deposit
 from app.services.external_processors import (
     ExternalProcessorError,
@@ -337,8 +339,9 @@ templates.env.filters['provider_label'] = requisite_provider_label
 templates.env.filters['dt_compact'] = dt_compact
 templates.env.filters['dt_full'] = dt_full
 templates.env.filters['money_rub'] = money_rub
-from app.web.view_models import decimal_display, status_label
 templates.env.filters['decimal_display'] = decimal_display
+templates.env.filters['tj_money'] = decimal_display
+templates.env.filters['usdt_display'] = usdt_display
 templates.env.filters['status_label'] = status_label
 templates.env.filters['short_identifier'] = short_identifier
 templates.env.filters['deposit_status_label'] = deposit_status_label
@@ -394,7 +397,7 @@ for _income_role in ('superadmin', 'admin'):
         ROLE_SECTIONS[_income_role].insert(-1, 'Доход площадки')
 
 for _crossborder_role in ('superadmin', 'admin'):
-    ROLE_SECTIONS[_crossborder_role].extend(['Трансгран', 'Settle — Россия', 'Settle — Казахстан'])
+    ROLE_SECTIONS[_crossborder_role].extend(['Трансгран', 'Settle — Россия', 'Settle — Казахстан', 'Settle — Таджикистан'])
 
 
 @router.get('/cabinet/teamlead/settlements/quote')
@@ -1373,15 +1376,31 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
         return _twofa_redirect()
     allowed = []
     if actor.role == Role.superadmin.value:
-        allowed = [Role.admin.value, Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value]
+        allowed = [Role.admin.value, Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value, Role.aggregator.value]
     elif actor.role == Role.admin.value:
-        allowed = [Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value]
+        allowed = [Role.support.value, Role.teamlead.value, Role.merchant.value, Role.operator.value, Role.trader.value, Role.aggregator.value]
     if role not in allowed:
         return _redirect('permission_denied', 'create')
     email = email.strip().lower()
     exists = (await db.execute(select(User).where(User.email == email))).scalar_one_or_none()
     if exists:
         return _redirect('email_exists', 'create')
+    submitted = await request.form()
+    if role == Role.aggregator.value:
+        from app.web.tj_create import create_aggregator_from_form
+        try:
+            return await create_aggregator_from_form(request, db, actor, email, password, submitted)
+        except ValueError as exc:
+            await db.rollback()
+            raise HTTPException(422, str(exc)) from exc
+    if (role == 'merchant' and merchant_country == 'TJ') or (role == 'trader' and working_country == 'TJ'):
+        from app.services.tj_cabinets import confirm_parser
+        try:
+            confirm_parser(submitted)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        if len(password) < 12:
+            raise HTTPException(422, 'Пароль должен содержать не менее 12 символов')
     user = User(email=email, password_hash=hash_password(password), role=role, twofa_enabled=False, twofa_secret=None)
     try:
         parent_id = UUID(trader_account_id_value) if trader_account_id_value else None
@@ -1404,15 +1423,32 @@ async def create_user_from_cabinet(request: Request, email: str = Form(...), pas
             await assign_merchant_country(db, actor=actor, merchant=m, country=merchant_country,
                 parser_id=merchant_parser_id, business_id=UUID(business_id) if business_id else None)
             from app.services.merchant_cabinets import configure
-            await configure(db, actor=actor, merchant=m, currency=merchant_currency, parser_id=merchant_parser_id,
-                tariff_plan_id=merchant_tariff_plan_id, methods=merchant_payment_methods)
+            if m.working_country == 'TJ':
+                from app.services.merchant_cabinets import validate_dimensions
+                from app.services.tj_cabinets import inline_tariff
+                validate_dimensions('TJ', merchant_currency, merchant_parser_id, merchant_payment_methods)
+                if merchant_tariff_plan_id:
+                    raise ValueError('Введите индивидуальную сетку нового кабинета вместо общего тарифа')
+                m.payment_methods = ['c2c']
+                await inline_tariff(db, actor=actor, party='merchant', entity_id=m.id, form=submitted)
+            else:
+                await configure(db, actor=actor, merchant=m, currency=merchant_currency, parser_id=merchant_parser_id,
+                    tariff_plan_id=merchant_tariff_plan_id, methods=merchant_payment_methods)
         except ValueError as exc:
             await db.rollback()
             return _redirect(str(exc), 'create')
         api_key = 'pk_' + secrets.token_urlsafe(24)
         secret_key = 'sk_' + secrets.token_urlsafe(32)
         db.add(ApiKey(merchant_id=m.id, api_key=api_key, secret_hash=encrypt_secret(secret_key), mode='sandbox'))
-        db.add(Balance(merchant_id=m.id, available=Decimal('0.00'), frozen=Decimal('0.00')))
+        if m.working_country != 'TJ':
+            db.add(Balance(merchant_id=m.id, available=Decimal('0.00'), frozen=Decimal('0.00')))
+    if role == 'trader' and user.working_country == 'TJ':
+        from app.services.tj_cabinets import inline_tariff
+        try:
+            await inline_tariff(db, actor=actor, party='trader', entity_id=user.id, form=submitted)
+        except ValueError as exc:
+            await db.rollback()
+            raise HTTPException(422, str(exc)) from exc
     await audit(db, 'cabinet_user_created', 'user', actor.id, user.id, client_ip(request), {'role': role, 'merchant_api_key_created': bool(api_key)})
     await db.commit()
     if api_key:
@@ -1783,7 +1819,7 @@ async def _require_external_processor_editor(request: Request, db: AsyncSession)
 def _external_processor_form_values(form) -> dict:
     return {
         'name': form.get('name', ''),
-        'adapter_type': form.get('adapter_type', 'tradespace'),
+        'adapter_type': form.get('adapter_type', 'merchant_hmac_v2'),
         'environment': form.get('environment', 'sandbox'),
         'api_base_url': form.get('api_base_url', ''),
         'api_key': form.get('api_key', ''),
@@ -1909,6 +1945,8 @@ async def _get_aggregator_for_update(db: AsyncSession, aggregator_id: str) -> Ag
 async def cabinet_create_aggregator(
     request: Request,
     name: str = Form(...),
+    country: str = Form('RU'),
+    tariff_plan_id: str = Form(''),
     callback_url: str = Form(''),
     success_url: str = Form(''),
     fail_url: str = Form(''),
@@ -1927,9 +1965,17 @@ async def cabinet_create_aggregator(
     if actor.role not in [Role.superadmin.value, Role.admin.value]:
         return _aggregator_redirect('Not enough permissions')
     try:
+        if country == 'TJ':
+            submitted = await request.form()
+            if not all(str(submitted.get(field) or '').strip() for field in ('min_payment_amount','max_payment_amount','commission_percent','tariff_plan_id')):
+                raise ValueError('Для TJ укажите лимиты TJS, комиссию и тариф явно')
+            from app.schemas.common import AggregatorCreate
+            AggregatorCreate(name=name.strip(),country='TJ',tariff_plan_id=tariff_plan_id,
+                min_payment_amount=min_payment_amount,max_payment_amount=max_payment_amount,commission_percent=commission_percent)
         account, secret = await create_aggregator_account(
             db,
             name=name.strip(),
+            country=country, actor=actor, tariff_plan_id=UUID(tariff_plan_id) if tariff_plan_id else None,
             callback_url=_optional_url(callback_url),
             success_url=_optional_url(success_url),
             fail_url=_optional_url(fail_url),
@@ -1992,6 +2038,8 @@ async def cabinet_update_aggregator(
         account.success_url = _optional_url(success_url)
         account.fail_url = _optional_url(fail_url)
         if commission_percent.strip():
+            if account.working_country == 'TJ':
+                raise ValueError('Комиссия TJ задаётся индивидуальными версиями тарифов')
             account.commission_percent = percent(safe_decimal(commission_percent, '0'))
         account.min_payment_amount = money(safe_decimal(min_payment_amount, '100'))
         account.max_payment_amount = money(safe_decimal(max_payment_amount, '150000'))
@@ -2096,7 +2144,9 @@ async def create_requisite(request: Request, method: str = Form(...), value: str
         clean_value, suffix = validated_requisite_value(jurisdiction, value, last4)
     except HTTPException as exc:
         return _redirect(str(exc.detail), 'requisites')
-    minimum = Decimal('100.00') if account.working_country == 'RU' else Decimal('1.00')
+    from app.services.bank_requisites import validate_requisite_limits
+    validate_requisite_limits(jurisdiction, min_check, max_check)
+    minimum = Decimal('10.00') if account.working_country == 'TJ' else Decimal('100.00') if account.working_country == 'RU' else Decimal('1.00')
     maximum = Decimal('150000.00') if account.working_country == 'RU' else Decimal('1000000000.00')
     req = Requisite(
         trader_id=account.id,
@@ -2120,9 +2170,11 @@ async def create_requisite(request: Request, method: str = Form(...), value: str
         simultaneous_limit=max(1, min(50, int(simultaneous_limit))),
         min_check=max(minimum, safe_decimal(min_check, str(minimum))),
         max_check=min(maximum, safe_decimal(max_check, str(maximum))),
-        status=(status if jurisdiction.country in ('RU', 'GE') and status in ('active', 'disabled', 'review') else jurisdiction.status),
-        enabled=(status == 'active' if jurisdiction.country in ('RU', 'GE') else jurisdiction.enabled),
+        status=(status if jurisdiction.country in ('RU', 'GE', 'TJ') and status in ('active', 'disabled', 'review') else jurisdiction.status),
+        enabled=(status == 'active' if jurisdiction.country in ('RU', 'GE', 'TJ') else jurisdiction.enabled),
     )
+    if jurisdiction.country == 'TJ':
+        req.min_check, req.max_check = Decimal(min_check), Decimal(max_check)
     db.add(req)
     await audit(db, 'requisite_created', 'requisite', actor_id=user.id, ip=client_ip(request), details={"method": jurisdiction.method, "provider_type": jurisdiction.provider_type, "provider_name": jurisdiction.bank_name, "country": jurisdiction.country, "currency": jurisdiction.currency, "bank_id": jurisdiction.bank_id, "timeframe": timeframe, "success_delay_minutes": success_delay_minutes, "simultaneous_limit": simultaneous_limit})
     await db.commit()
@@ -2149,7 +2201,7 @@ async def toggle_requisite(request: Request, requisite_id: str, db: AsyncSession
         return _redirect('Платёжное направление ещё не подключено', 'requisites')
     if not req.enabled and req.country == 'RU':
         await require_payment_account(db, req.trader_id)
-    if not req.enabled and req.country == 'GE':
+    if not req.enabled and req.country in ('GE', 'TJ'):
         account = await require_working_account(db, req.trader_id)
         jurisdiction = await resolve_requisite_jurisdiction(db, account, method=req.method, bank_id=req.bank_id or '')
         validated_requisite_value(jurisdiction, reveal_text(req.value_encrypted), req.last4)
@@ -2205,7 +2257,7 @@ async def edit_requisite(
             operator_code=operator_code, bank_name=bank_name,
             allow_legacy=bool(legacy_candidate and legacy_candidate == (req.bank_name or '').strip()),
         )
-        if req.country == 'GE' and not value.strip() and req.method == jurisdiction.method and req.bank_id == jurisdiction.bank_id:
+        if req.country in ('GE', 'TJ') and not value.strip() and req.method == jurisdiction.method and req.bank_id == jurisdiction.bank_id:
             value = reveal_text(req.value_encrypted)
         clean_value, suffix = validated_requisite_value(jurisdiction, value, last4)
         await check_requisite_identity_edit(db, req, jurisdiction, clean_value)
@@ -2229,10 +2281,14 @@ async def edit_requisite(
     req.timeframe = timeframe if timeframe in ["час", "день"] else "час"
     req.success_delay_minutes = max(0, min(60, int(success_delay_minutes)))
     req.simultaneous_limit = max(1, min(50, int(simultaneous_limit)))
+    from app.services.bank_requisites import validate_requisite_limits
+    validate_requisite_limits(jurisdiction, min_check, max_check)
     req.min_check = max(Decimal('1.00'), safe_decimal(min_check, '100'))
     req.max_check = min(Decimal('1000000000.00') if req.country == 'GE' else Decimal('1000000.00'), safe_decimal(max_check, '150000'))
-    req.status = (status if status in ['active', 'disabled', 'review'] else 'active') if jurisdiction.country in ('RU', 'GE') else jurisdiction.status
-    req.enabled = req.status == 'active' if jurisdiction.country in ('RU', 'GE') else False
+    if req.country == 'TJ':
+        req.min_check, req.max_check = Decimal(min_check), Decimal(max_check)
+    req.status = (status if status in ['active', 'disabled', 'review'] else 'active') if jurisdiction.country in ('RU', 'GE', 'TJ') else jurisdiction.status
+    req.enabled = req.status == 'active' if jurisdiction.country in ('RU', 'GE', 'TJ') else False
     await audit(db, 'requisite_updated', 'requisite', actor_id=user.id, target_id=str(req.id), ip=client_ip(request))
     await db.commit()
     return _success_redirect('requisites')
@@ -2325,7 +2381,7 @@ async def update_trader_finance(request: Request, trader_id: str, trader_balance
     trader.trader_assigned_merchants = assigned_merchants
     try:
         adjustment_key = f'trader-manual-adjustment:{trader.id}:{datetime.now(timezone.utc).timestamp()}'
-        if trader.working_country in {'AM', 'GE'}:
+        if trader.working_country in {'AM', 'GE', 'TJ'}:
             target_balance = max(Decimal('0'), safe_decimal(usdt_balance, '0'))
             target_hold = min(target_balance, max(Decimal('0'), safe_decimal(usdt_hold, '0')))
             await manual_usdt_wallet_adjustment(
@@ -2344,7 +2400,7 @@ async def update_trader_finance(request: Request, trader_id: str, trader_balance
     except (LedgerError, TraderFinanceError):
         await db.rollback()
         return _redirect('financial_invariant_error', 'traders')
-    await audit(db, 'trader_finance_updated', 'user', actor.id, trader.id, client_ip(request), {'accounting_currency': 'USDT' if trader.working_country in {'AM','GE'} else 'RUB', 'balance': str(target_balance), 'hold': str(target_hold), 'priority': trader.trader_traffic_priority, 'commission_percent': str(trader.trader_commission_percent), 'merchants': assigned_merchants})
+    await audit(db, 'trader_finance_updated', 'user', actor.id, trader.id, client_ip(request), {'accounting_currency': 'USDT' if trader.working_country in {'AM','GE','TJ'} else 'RUB', 'balance': str(target_balance), 'hold': str(target_hold), 'priority': trader.trader_traffic_priority, 'commission_percent': str(trader.trader_commission_percent), 'merchants': assigned_merchants})
     await db.commit()
     return _success_redirect('traders')
 
@@ -2422,7 +2478,9 @@ async def can_confirm_deposit(db: AsyncSession, user: User, deposit: Deposit) ->
 
 
 @router.post('/cabinet/deposits/{deposit_id}/confirm')
-async def cabinet_confirm_deposit(deposit_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+async def cabinet_confirm_deposit(deposit_id: str, request: Request,
+    actual_amount: str = Form(''), received_at: str = Form(''), requisite_id: str = Form(''),
+    reference: str = Form(''), bank_credit_confirmed: str = Form(''), db: AsyncSession = Depends(get_db)):
     user = await get_current_web_user(request, db)
     if not user:
         return RedirectResponse('/login', status_code=303)
@@ -2445,6 +2503,8 @@ async def cabinet_confirm_deposit(deposit_id: str, request: Request, db: AsyncSe
             actor_ip=client_ip(request),
             audit_action='deposit_confirmed_from_cabinet',
             description='cabinet deposit confirmation',
+            bank_confirmation={'amount':actual_amount,'received_at':received_at,'requisite_id':requisite_id,
+                'reference':reference,'bank_credit_confirmed':bank_credit_confirmed=='on'} if dep.currency=='TJS' else None,
         )
     except DepositConfirmationSystemError as exc:
         return _redirect('deposit_action_failed', 'deposits')
@@ -2466,6 +2526,7 @@ async def cabinet_decline_deposit(
     deposit_id: str,
     request: Request,
     reason: str = Form(''),
+    no_credit_confirmed: str = Form(''), reference: str = Form(''),
     db: AsyncSession = Depends(get_db),
 ):
     user = await get_current_web_user(request, db)
@@ -2473,11 +2534,14 @@ async def cabinet_decline_deposit(
         return RedirectResponse('/login', status_code=303)
     if staff_2fa_setup_required(user):
         return _twofa_redirect()
-    if user.role not in [Role.superadmin.value, Role.admin.value]:
+    if user.role not in [Role.superadmin.value, Role.admin.value] and not (
+        user.role == Role.trader.value and getattr(user, 'working_country', None) == 'TJ'
+    ):
         raise HTTPException(403, 'Only admin or superadmin may decline a deposit')
     reason = reason.strip()
     if user.role == Role.superadmin.value and not reason:
         raise HTTPException(422, 'Decline reason is required')
+    submitted_reason = reason
     reason = reason or 'admin_decline'
     try:
         deposit_uuid = uuid.UUID(deposit_id)
@@ -2488,17 +2552,31 @@ async def cabinet_decline_deposit(
     )).scalar_one_or_none()
     if not dep:
         return _redirect('deposit_not_found', 'deposits')
-    result = await finalize_unsuccessful_deposit(
-        db,
-        dep,
-        reason=f'manual_decline:{reason[:400]}',
-        target_status=DepositStatus.failed.value,
-        actor_id=user.id,
-        actor_role=user.role,
-        actor_ip=client_ip(request),
-        request_id=request.headers.get('X-Request-ID'),
-        audit_action='deposit_declined_from_cabinet',
-    )
+    if user.role == Role.trader.value and (dep.currency != 'TJS' or not await can_confirm_deposit(db,user,dep)):
+        raise HTTPException(403,'Нет доступа к этой операции')
+    if dep.currency == 'TJS':
+        if (no_credit_confirmed != 'on' or not 4 <= len(reference.strip()) <= 200
+                or not 4 <= len(submitted_reason) <= 400):
+            raise HTTPException(422,'Нужны проверка отсутствия поступления, основание и ссылка на сверку')
+        dep.metadata_json = {**(dep.metadata_json or {}), 'local_no_credit': {
+            'confirmed':True,'reference':reference.strip(),'actor_id':str(user.id)}}
+    try:
+        result = await finalize_unsuccessful_deposit(
+            db,
+            dep,
+            reason=f'manual_decline:{reason[:400]}',
+            target_status=DepositStatus.failed.value,
+            actor_id=user.id,
+            actor_role=user.role,
+            actor_ip=client_ip(request),
+            request_id=request.headers.get('X-Request-ID'),
+            audit_action='deposit_declined_from_cabinet',
+        )
+    except ValueError as exc:
+        if dep.currency != 'TJS':
+            raise
+        await db.rollback()
+        raise HTTPException(409,str(exc)) from exc
     await db.commit()
     webhook_enqueued = bool(
         result.webhook_event_id
@@ -4437,7 +4515,8 @@ def _trader_deposit_details(
 
 async def _trader_deposit_filters(request, subject, db):
     ge = bool(subject and subject.working_country == 'GE')
-    banks = [str(bank.id) for bank in await list_country_banks(db, 'GE')] if ge else [bank.code for bank in get_enabled_banks()]
+    local_directory = bool(subject and subject.working_country in ('GE', 'TJ'))
+    banks = [str(bank.id) for bank in await list_country_banks(db, subject.working_country)] if local_directory else [bank.code for bank in get_enabled_banks()]
     return normalized_deposit_filters(request.query_params, valid_bank_codes=banks, crossborder=ge)
 
 
@@ -4919,7 +4998,7 @@ async def role_cabinet(
         try: return max(1, min(int(request.query_params.get(name,1)),100000))
         except (TypeError, ValueError): return 1
     settlement_page = settle_page('settlement_page')
-    settlement_queue_pages = {country: settle_page('settle_'+country.lower()+'_page') for country in ('RU','KZ')}
+    settlement_queue_pages = {country: settle_page('settle_'+country.lower()+'_page') for country in ('RU','KZ','TJ')}
     webhook_events = []
     attempts_by_event_id = {}
     webhook_event_views = []
@@ -5438,7 +5517,7 @@ async def role_cabinet(
                 }
 
     if role in ('superadmin','admin') and not staff_2fa_setup_required(user):
-        for country in ('RU','KZ'):
+        for country in ('RU','KZ','TJ'):
             settlement_queues[country] = await merchant_settlement_service.settlement_history(
                 db, country=country, page=settlement_queue_pages[country])
         merchant_settlements = [row for rows in settlement_queues.values() for row in rows]
@@ -5449,7 +5528,7 @@ async def role_cabinet(
                 MerchantSettlement.id == PlatformLedgerEntry.operation_id).where(
                     PlatformLedgerEntry.entry_type == 'settlement_fee_income').group_by(
                         MerchantSettlement.country, PlatformLedgerEntry.currency))).all()
-        settlement_fee_income = {'RU':{'RUB':Decimal(0)},'KZ':{'USDT':Decimal(0)}}
+        settlement_fee_income = {'RU':{'RUB':Decimal(0)},'KZ':{'USDT':Decimal(0)},'TJ':{'USDT':Decimal(0)}}
         for country,currency,total in fee_rows:
             settlement_fee_income.setdefault(country,{})[currency] = total
     elif role == Role.merchant.value and merchant:
@@ -5514,7 +5593,7 @@ async def role_cabinet(
             str(connection.id): connection.name for connection in external_processor_connections
         }
         external_processor_callback_urls = {
-            str(connection.id): str(request.url_for('tradespace_webhook', connection_id=str(connection.id)))
+            str(connection.id): str(request.url_for('external_processor_webhook', protocol='merchant-v2', connection_id=str(connection.id)))
             for connection in external_processor_connections
         }
         external_processor_ids = [connection.id for connection in external_processor_connections]
@@ -5882,6 +5961,13 @@ async def role_cabinet(
     if appeal_merchant_ids:
         appeal_merchants = (await db.execute(select(Merchant).where(Merchant.id.in_(appeal_merchant_ids)))).scalars().all()
         appeal_merchant_names = {str(m.id): m.name for m in appeal_merchants}
+    appeal_aggregator_ids = {dep.financial_executor_id for dep in appeal_deposits.values()
+                            if dep.financial_executor_type == 'aggregator' and dep.financial_executor_id}
+    appeal_aggregator_names = {}
+    if appeal_aggregator_ids:
+        executors = (await db.execute(select(AggregatorAccount).where(
+            AggregatorAccount.id.in_(appeal_aggregator_ids)))).scalars().all()
+        appeal_aggregator_names = {row.id: row.name for row in executors}
     for appeal in appeals:
         dep = appeal_deposits.get(appeal.operation_id)
         req = req_by_id.get(dep.requisites_id) if dep and dep.requisites_id else None
@@ -5893,7 +5979,12 @@ async def role_cabinet(
             'deposit': dep,
             'merchant_name': appeal_merchant_names.get(str(dep.merchant_id), str(dep.merchant_id)) if dep else '?',
             'trader_id': trader_id,
-            'trader_email': trader.email if trader else trader_email_map.get(trader_id, '?'),
+            'trader_email': trader.email if trader else trader_email_map.get(trader_id, '—'),
+            'executor_type': 'aggregator' if dep and dep.financial_executor_type == 'aggregator' else 'trader',
+            'executor_label': 'External Aggregator' if dep and dep.financial_executor_type == 'aggregator' else 'Трейдер OzarkPay',
+            'executor_name': (appeal_aggregator_names.get(dep.financial_executor_id, str(dep.financial_executor_id))
+                if dep and dep.financial_executor_type == 'aggregator'
+                else trader.email if trader else trader_email_map.get(trader_id, trader_id or '—')),
             'amount_claimed': meta.get('amount_claimed') or (str(dep.amount) if dep else '0.00'),
             'requisite': meta.get('requisite') or (display_requisite_value(req) if req else ''),
             'recipient_bank': meta.get('recipient_bank') or (requisite_provider_display(req.method, req.bank_code, req.operator_code, req.bank_name) if req else ''),
@@ -5904,7 +5995,7 @@ async def role_cabinet(
             'statement_name': (meta.get('statement_file') or {}).get('original_name', 'выписка'),
             'deadline_iso': appeal_deadline(appeal).isoformat(),
             'remaining_seconds': remaining,
-            'is_timer_active': remaining > 0 and appeal.status == AppealStatus.opened.value and not meta.get('trader_decision'),
+            'is_timer_active': (not dep or dep.currency != 'TJS') and remaining > 0 and appeal.status == AppealStatus.opened.value and not meta.get('trader_decision'),
             'trader_rejection_reason_label': meta.get('trader_rejection_reason_label', ''),
             'corrected_amount': meta.get('corrected_amount', ''),
             'previous_deposit_status': meta.get('previous_deposit_status', ''),
@@ -5932,12 +6023,13 @@ async def role_cabinet(
     wallet_rows = (await db.execute(
         select(TraderWallet).where(
             TraderWallet.trader_id.in_(finance_trader_ids),
-            TraderWallet.currency == 'USDT',
+            TraderWallet.currency.in_(('USDT','TJS')),
         )
     )).scalars().all() if finance_trader_ids else []
-    wallets_by_trader = {row.trader_id: row for row in wallet_rows}
+    wallets_by_trader = {row.trader_id: row for row in wallet_rows if row.currency == 'USDT'}
+    local_wallets_by_trader = {row.trader_id: row for row in wallet_rows if row.currency == 'TJS'}
     trader_wallet_views = {
-        str(row.id): wallet_view(row, wallets_by_trader.get(row.id))
+        str(row.id): wallet_view(row, wallets_by_trader.get(row.id), local_wallet=local_wallets_by_trader.get(row.id))
         for row in known_traders.values()
     }
     deposit_ids_for_snapshots = {row.id for row in deposits}
@@ -6037,7 +6129,7 @@ async def role_cabinet(
         active_requests = sum(1 for d in related_deposits if d.status in active_statuses)
         successful_deposits = [d for d in related_deposits if d.status in success_statuses]
         failed_deposits = [d for d in related_deposits if d.status in {DepositStatus.failed.value, DepositStatus.cancelled.value, DepositStatus.expired.value}]
-        foreign = t.working_country in {'AM', 'GE'}
+        foreign = t.working_country in {'AM', 'GE', 'TJ'}
         foreign_totals = foreign_statistics(
             successful_deposits,
             snapshots_by_deposit,
@@ -6299,9 +6391,9 @@ async def role_cabinet(
         context['work_quote'] = await profile_quote(quote_account, db=db)
         quote_wallet = wallets_by_trader.get(quote_account.id)
         context['trader_wallet_views'][str(quote_account.id)] = wallet_view(
-            quote_account, quote_wallet, context['work_quote']
+            quote_account, quote_wallet, context['work_quote'], local_wallet=local_wallets_by_trader.get(quote_account.id)
         )
-        if quote_account.working_country in {'AM', 'GE'}:
+        if quote_account.working_country in {'AM', 'GE', 'TJ'}:
             local_banks = await list_country_banks(db, quote_account.working_country)
             context['local_bank_options'] = [
                 {
@@ -6321,6 +6413,46 @@ async def role_cabinet(
                 context['payment_method_options'] = [{'value': 'kz-ge', 'label': 'KZ → GE'}]
                 context['deposit_active_statuses'] = ['pending']
                 context['deposit_terminal_statuses'] = ['paid', 'cancelled', 'refunded']
+            elif role == 'trader' and quote_account.working_country == 'TJ':
+                context['bank_options'] = [{**bank, 'code': str(bank['id'])} for bank in context['local_bank_options']]
+                context['payment_method_options'] = [{'value': 'c2c', 'label': 'TJ → TJ · C2C'}]
+    from app.web.tj import cabinet_context as tj_context
+    tj_merchant = context.get('profile_merchant') or merchant
+    tj_trader = context.get('profile_working_account') or trader_subject
+    if role == 'aggregator':
+        tj_merchant = await db.scalar(select(Merchant).where(Merchant.owner_id == user.id, Merchant.working_country == 'TJ'))
+    context['tj_cabinet'] = await tj_context(db, merchant=tj_merchant, request=request) if tj_merchant and tj_merchant.working_country == 'TJ' else await tj_context(db, trader=tj_trader, request=request)
+    context['is_tj_cabinet'] = bool(context['tj_cabinet'])
+    if context['is_tj_cabinet']:
+        from app.services.rate_registry import parser_state
+        context['tj_rate_state'] = await parser_state(db, 'bybit_p2p_tjs_green_avg3', refresh=False, persist=False)
+    if context['is_tj_cabinet'] and role == 'merchant':
+        context['merchant_local_docker_api_base_url'] = (
+            f'http://host.docker.internal:{request.url.port or 80}/api/v1/merchant'
+            if request.url.hostname in ('127.0.0.1', 'localhost') and request.url.scheme == 'http'
+            else context['merchant_api_base_url'])
+    if context['is_tj_cabinet'] and role == 'aggregator':
+        context['sections'] = ['Обзор', 'Операции', 'Кошелёк', 'Статистика', 'API-интеграция', 'Безопасность']
+        account = await db.scalar(select(AggregatorAccount).where(AggregatorAccount.platform_merchant_id == tj_merchant.id))
+        context['tj_aggregator'] = account
+        from app.services.aggregator_execution import own_context
+        context['external_aggregator'] = await own_context(db, account, request=request) if account else None
+    if context['is_tj_cabinet'] and role in ('merchant','trader','operator'):
+        context['sections'] = [s for s in sections if s not in ('Трансгран','Тарифы','Rolling','Settle — Россия','Settle — Казахстан','Settle — Таджикистан','Выплаты','Вывод средств')]
+        if role == 'merchant':
+            context['sections'].extend(['Settlement', 'Rolling'])
+        elif role in ('trader', 'operator'):
+            # Reuse the existing TJ summary without changing saved section IDs.
+            context['sections'].append('Обзор')
+        # Obsolete customer tariff bookmarks cannot expose staff tariff editors.
+        if request.query_params.get('section', '').casefold() in ('tariffs', 'тарифы'):
+            return RedirectResponse(cabinet_base, status_code=303)
+    if role in ('admin', 'superadmin'):
+        context['aggregator_tj_tariffs'] = {}
+        for account in aggregator_accounts:
+            if account.working_country == 'TJ':
+                subject = await db.get(Merchant, account.platform_merchant_id)
+                context['aggregator_tj_tariffs'][str(account.id)] = await tj_context(db, merchant=subject)
     return templates.TemplateResponse(request=request, name='cabinet.html', context=context)
 
 
@@ -6329,3 +6461,6 @@ router.include_router(crossborder_live_router)
 
 from app.web.settlements import router as settlement_router
 router.include_router(settlement_router)
+from app.web.tj import router as tj_router
+router.include_router(tj_router)
+router.include_router(external_aggregator_router)

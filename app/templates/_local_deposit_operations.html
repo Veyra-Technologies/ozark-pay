@@ -1,0 +1,32 @@
+{% include '_tj_filters.html' %}
+<div class="table-wrap"><table><thead><tr><th>ID / номер</th><th>Дата</th><th>Сумма</th><th>Метод</th><th>Статус</th><th>Реквизит</th><th>Действия</th></tr></thead><tbody>
+{% for op in tj_cabinet.operations %}{% set own = tj_cabinet.operation_finance.get(op.id|string,{}) %}
+<tr data-local-operation="{{ op.id }}"><td><span class="cell-mono">{{ op.id|short_identifier }}</span><small>{{ op.external_id }}</small></td><td>{{ op.created_at|dt_compact }}</td><td data-raw-value>{{ op.amount|tj_money }} TJS</td><td>{{ op.method|payment_method_label }}</td><td>{{ op.status|status_label }}</td><td>{{ own.get('bank_name') or '—' }}<small>{{ own.get('requisite') or '—' }}</small></td><td><details><summary>Действия и расчёт</summary>
+<p>ID: {{ op.id }} · {{ op.created_at|dt_compact }}</p>
+<p data-raw-value>База: {{ own.get('base_usdt',0)|tj_money }} USDT. {{ 'Комиссия' if role == 'merchant' else 'Вознаграждение' }}: {{ own.get('fee_tjs',0)|tj_money }} TJS / {{ own.get('fee_usdt',0)|tj_money }} USDT.</p>
+<p data-raw-value>{{ 'К зачислению' if role == 'merchant' else 'Окончательное списание обеспечения' }}: {{ own.get('net_usdt',0)|tj_money }} USDT.</p>
+<p>Банк / платёжная система: {{ own.get('bank_name') or '—' }}. Статус обеспечения: {{ op.metadata_json.get('trader_hold_status','—') }}.</p>
+{% if role == 'trader' and tj_cabinet.qa_financial and op.status in ['created','pending'] %}
+<form method="post" action="{{ cabinet_base }}/deposits/{{ op.id }}/confirm" data-local-confirmation>
+{{ csrf_input(request) }}{% include '_local_confirmation_fields.html' %}<button type="submit">Подтвердить банковское поступление</button></form>
+{% endif %}
+{% if role == 'trader' and tj_cabinet.qa_financial and op.status in ['created','pending','appeal_opened'] %}
+<details><summary>Проверено отсутствие поступления</summary><form method="post" action="{{ cabinet_base }}/deposits/{{ op.id }}/decline">
+{{ csrf_input(request) }}<label>Основание<input name="reason" minlength="4" maxlength="400" required></label>
+<label>Номер / ссылка на сверку<input name="reference" minlength="4" maxlength="200" required></label>
+<label><input type="checkbox" name="no_credit_confirmed" required> Проверил выписку: поступления нет</label><button type="submit">Завершить без оплаты и освободить резерв</button></form></details>
+{% endif %}
+{% if role == 'merchant' and tj_cabinet.qa_financial and op.status in ['created','pending','cancelled','failed','expired','appeal_opened'] %}
+<details><summary>Апелляция с банковским чеком</summary><form method="post" enctype="multipart/form-data" action="{{ cabinet_base }}/appeals/create" data-local-evidence>
+{{ csrf_input(request) }}<input type="hidden" name="operation_lookup" value="{{ op.id }}"><input type="hidden" name="trader_id" value="{{ own.trader_id }}">
+<input type="hidden" name="recipient_bank" value="{{ own.bank_id }}"><input type="hidden" name="requisite" value="{{ own.requisite }}">
+<label>Сумма по чеку, TJS<input type="number" name="amount" min="0.01" step="0.01" value="{{ op.amount }}" required></label>
+<label>Дата / время операции<input type="datetime-local" step="1" data-local-time required></label>
+<input type="hidden" name="operation_date" data-local-time-iso>
+<label>Банковский чек<input type="file" name="receipt_file" accept=".png,.jpg,.jpeg,.pdf,.webp" required></label>
+<label>Комментарий<input name="message" maxlength="2000"></label><button type="submit">Передать на разбирательство</button></form></details>
+{% endif %}
+</details></td></tr>{% else %}<tr><td colspan="7">Операций пока нет</td></tr>{% endfor %}
+</tbody></table></div>
+<div class="actions">{% if tj_cabinet.pagination.previous %}<a class="secondary" href="{{ tj_cabinet.pagination.previous }}#{{ section_id }}">Предыдущая</a>{% endif %}<span>Страница {{ tj_cabinet.pagination.page }} из {{ tj_cabinet.pagination.pages }} · {{ tj_cabinet.pagination.count }} заявок</span>{% if tj_cabinet.pagination.next %}<a class="secondary" href="{{ tj_cabinet.pagination.next }}#{{ section_id }}">Следующая</a>{% endif %}</div>
+{% if role == 'merchant' %}<p>Создание и запрос отмены — через подписанный Merchant API. При неизвестном банковском результате резерв сохраняется до разбирательства.</p>{% endif %}

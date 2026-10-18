@@ -1,0 +1,57 @@
+{% set external = external_aggregator if role == 'aggregator' else none %}
+{% set metrics = tj_cabinet.statistics %}
+{% if s == 'Обзор' %}
+<div class="grid">
+  <div class="metric"><b>Успешных операций</b><p>{{ external.successful_count if external else metrics.successful }}</p></div>
+  <div class="metric"><b>Оборот</b><p>{{ (external.turnover_tjs if external else metrics.turnover_tjs)|tj_money }} TJS</p></div>
+  {% set wallets = external.wallets if external else tj_cabinet.wallets %}
+  {% for currency in ['USDT','TJS'] %}{% set wallet = wallets.get(currency,{}) %}
+  <div class="metric"><b>Доступно · {{ currency }}</b><p data-raw-value>{{ wallet.get('available',0)|tj_money }} {{ currency }}</p><small>В резерве: {{ wallet.get('hold',0)|tj_money }} {{ currency }}</small></div>
+  {% endfor %}
+</div>
+{% elif s in ['Пополнение','Пополнения','Операции'] %}
+  {% if external %}{% include '_tj_external_operations.html' %}{% else %}{% include '_local_deposit_operations.html' %}{% endif %}
+{% elif s == 'Апелляции' %}
+  {% include '_appeals.html' %}
+{% elif s in ['Кошелёк','Кошелек','Баланс','Журнал баланса'] %}
+  {% set wallets = external.wallets if external else tj_cabinet.wallets %}
+  <div class="grid">{% for currency in ['USDT','TJS'] %}{% set wallet=wallets.get(currency,{}) %}
+    <div class="metric"><b>Общий баланс · {{ currency }}</b><p data-raw-value>{{ (wallet.get('available',0)+wallet.get('hold',0))|tj_money }} {{ currency }}</p></div>
+    <div class="metric"><b>Доступно · {{ currency }}</b><p data-raw-value>{{ wallet.get('available',0)|tj_money }} {{ currency }}</p></div>
+    <div class="metric"><b>В холде · {{ currency }}</b><p data-raw-value>{{ wallet.get('hold',0)|tj_money }} {{ currency }}</p></div>
+  {% endfor %}</div>
+  {% if role in ['trader','operator'] %}<div class="panel"><h3>Кошелёк пополнения</h3>{% if platform_wallet %}<p>{{ platform_wallet.asset }} · {{ platform_wallet.network }}</p><code class="cell-wrap">{{ platform_wallet.address }}</code><button class="secondary" type="button" data-copy-value="{{ platform_wallet.address }}">Копировать адрес</button>{% else %}<p>Администратор ещё не назначил кошелёк пополнения.</p>{% endif %}</div>{% endif %}
+  <h3>История движений</h3><div class="table-wrap"><table><thead><tr><th>Дата</th><th>Операция</th><th>Движение</th><th>Сумма</th></tr></thead><tbody>
+  {% for row in (external.journal if external else tj_cabinet.journal) %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.operation_id|short_identifier if row.operation_id else '—' }}</td><td>{{ row.entry_type|status_label }}</td><td data-raw-value>{{ row.amount|tj_money }} {{ row.currency }}</td></tr>{% else %}<tr><td colspan="4">Движений пока нет</td></tr>{% endfor %}
+  </tbody></table></div>
+{% elif s == 'Статистика' %}
+  {% include '_tj_filters.html' %}
+  {% if external %}{% set metrics=external.statistics %}{% endif %}
+  <div class="grid">{% for key,label in [('total','Всего заявок'),('successful','Успешных'),('failed','Неуспешных'),('active','Активных')] %}<div class="metric"><b>{{ label }}</b><p>{{ metrics[key] }}</p></div>{% endfor %}
+    <div class="metric"><b>Конверсия завершённых</b><p>{{ metrics.conversion|tj_money }}%</p><small>Оплачено / завершено</small></div>
+    <div class="metric"><b>Оборот</b><p data-raw-value>{{ metrics.turnover_tjs|tj_money }} TJS</p></div>
+    <div class="metric"><b>{{ 'К зачислению' if role == 'merchant' else 'Списано обеспечения' }}</b><p data-raw-value>{{ metrics.settled_usdt|tj_money }} USDT</p></div>
+    <div class="metric"><b>{{ 'Комиссия' if role == 'merchant' else 'Вознаграждение' }}</b><p data-raw-value>{{ metrics.fee_usdt|tj_money }} USDT</p></div>
+  </div>
+{% elif s == 'API-интеграция' and role == 'aggregator' %}
+  {% include '_tj_aggregator_api.html' %}
+{% elif s == 'Settlement' and role == 'merchant' %}
+  {% set wallet=tj_cabinet.wallets.get('USDT',{}) %}{% set totals=tj_cabinet.settlement_totals %}
+  <div class="grid">
+    <div class="metric"><b>Расчётный баланс</b><p data-raw-value>{{ (wallet.get('available',0)+wallet.get('hold',0))|tj_money }} USDT</p></div>
+    <div class="metric"><b>Доступно к расчёту</b><p data-raw-value>{{ wallet.get('available',0)|tj_money }} USDT</p></div>
+    <div class="metric"><b>Удержано</b><p data-raw-value>{{ wallet.get('hold',0)|tj_money }} USDT</p></div>
+    <div class="metric"><b>В обработке</b><p data-raw-value>{{ (totals.pending+totals.approved+totals.sent+totals.reconciliation)|tj_money }} USDT</p></div>
+    <div class="metric"><b>Исполнено</b><p data-raw-value>{{ totals.completed|tj_money }} USDT</p></div>
+  </div>
+  {% include '_merchant_settlement.html' %}
+{% elif s == 'Rolling' and role == 'merchant' %}
+  {% set rolling=tj_cabinet.rolling %}
+  {% set mro=rolling %}
+  {% include '_merchant_rolling_receipts.html' %}
+  <div class="grid">{% for key,label in [('principal','Подтверждено'),('recovered','Погашено'),('outstanding','Остаток обязательства'),('pending_exposure','В обработке')] %}<div class="metric"><b>{{ label }}</b><p data-raw-value>{{ rolling.get(key,0)|tj_money }} USDT</p></div>{% endfor %}</div>
+  <p><b>Статус:</b> {{ rolling.status|status_label }}</p>
+  <p class="compact-note">Аванс учитывается после подтверждения его получения. Погашение допускается только по подтверждённым операциям действующего договора.</p>
+  <h3>История финансирования</h3><div class="table-wrap"><table><tr><th>Дата</th><th>ID</th><th>Сумма</th><th>Погашено</th><th>Остаток</th><th>Статус</th></tr>{% for row in rolling.get('transfers',[]) %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.id|short_identifier }}</td><td data-raw-value>{{ row.amount_usdt|tj_money }} USDT</td><td>{{ row.recovered_usdt|tj_money }} USDT</td><td>{{ row.remaining_usdt|tj_money }} USDT</td><td>{{ row.status|status_label }}</td></tr>{% else %}<tr><td colspan="6">Финансирования пока нет</td></tr>{% endfor %}</table></div>
+  <h3>История выполнения</h3><div class="table-wrap"><table><tr><th>Дата</th><th>Операция</th><th>Чистая сумма</th><th>Погашено</th><th>Зачислено в баланс</th><th>Статус</th></tr>{% for row in merchant_rolling_allocations if row.local_currency == 'TJS' %}<tr><td>{{ row.created_at|dt_compact }}</td><td>{{ row.deposit_id|short_identifier }}</td><td>{{ row.merchant_net_local|tj_money }} TJS · {{ row.merchant_payable_usdt|tj_money }} USDT</td><td>{{ row.rolling_applied_usdt|tj_money }} USDT</td><td>{{ row.settle_credited_usdt|tj_money }} USDT</td><td>{{ row.status|status_label }}</td></tr>{% else %}<tr><td colspan="6">Подтверждённых операций пока нет</td></tr>{% endfor %}</table></div>
+{% endif %}

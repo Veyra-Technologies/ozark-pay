@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -26,6 +27,7 @@ from app.models import (
     MerchantRollingTransfer,
     MerchantRollingTransferConsumption,
     OperationFeeSnapshot,
+    User,
 )
 from app.services.audit import audit
 from app.services.ledger import LedgerError, credit, debit_available
@@ -49,6 +51,112 @@ class RollingStateConflict(RollingError):
 
 class RollingOwnershipError(RollingError):
     code = 'rolling_transfer_forbidden'
+
+
+async def _tj_funding_guard(db, merchant_id, *, actor_id=None, staff=False):
+    merchant = await db.get(Merchant, merchant_id)
+    if merchant and merchant.working_country == 'TJ':
+        from app.services.local_deposit_policy import require_execution
+        try:
+            await require_execution(db)
+        except ValueError as exc:
+            raise RollingError('TJ Rolling production admission is closed') from exc
+        if actor_id:
+            actor = await db.get(User, actor_id)
+            if (not actor or not actor.is_active or actor.is_archived or actor.is_locked
+                    or (staff and (actor.role != 'superadmin' or not actor.twofa_enabled))
+                    or (not staff and (actor.role != 'merchant' or actor.id != merchant.owner_id))):
+                raise RollingOwnershipError('TJ Rolling actor is not authorized')
+        # Share the funding/operation admission mutex; no future payment may
+        # silently bypass an outstanding obligation with an unapproved adapter.
+        await db.execute(select(Merchant.id).where(Merchant.id == merchant_id).with_for_update())
+    return merchant
+
+
+async def require_tj_roll_clear(db, merchant_id):
+    """Serialize TJ funding and admission; repayment uses paid Deposit FIFO only."""
+    await db.execute(select(Merchant.id).where(Merchant.id == merchant_id).with_for_update())
+
+
+async def _usdt_precision(db, merchant_id):
+    merchant = await db.get(Merchant, merchant_id)
+    if merchant and merchant.working_country == 'TJ':
+        from app.services.crossborder_money import usdt as usdt8
+        return usdt8
+    return usdt
+
+
+def _local(row, legacy_field):
+    if getattr(row, 'local_currency', 'RUB') == 'TJS':
+        field = {'gross_rub': 'gross_local', 'merchant_fee_rub': 'merchant_fee_local',
+            'merchant_payable_rub': 'merchant_net_local', 'rapira_rate_rub': 'rate_local',
+            'rolling_applied_rub': 'rolling_applied_local', 'settle_credited_rub': 'settle_credited_local',
+            'amount_rub': 'amount_local', 'rate_rub': 'rate_local'}[legacy_field]
+        return getattr(row, field)
+    return getattr(row, legacy_field)
+
+
+def _set_local(row, field, value):
+    if row.local_currency == 'TJS':
+        field = {'rolling_applied_rub': 'rolling_applied_local',
+                 'settle_credited_rub': 'settle_credited_local'}[field]
+    setattr(row, field, value)
+
+
+def _rate_value(allocation):
+    return (Decimal(allocation.rate_local) if allocation.local_currency == 'TJS'
+            else rolling_rate(allocation.rapira_rate_rub))
+
+
+def _currency_entry(model, allocation, **values):
+    if allocation.local_currency == 'TJS':
+        values.update(local_currency='TJS', amount_local=values.pop('amount_rub', None),
+                      rate_local=values.pop('rate_rub', None))
+        if model is MerchantRollingTransferConsumption:
+            values['amount_rub'] = Decimal(0)
+    return model(**values)
+
+
+async def create_tj_pending_allocation(db, *, deposit, snapshot):
+    """Currency adapter into the existing confirmed-transfer eligibility/FIFO."""
+    await _tj_funding_guard(db, deposit.merchant_id)
+    sequence = await _eligible_transfer_sequence(db, deposit.merchant_id, aware_utc(deposit.created_at))
+    if sequence is None:
+        return None
+    existing = await db.scalar(select(MerchantRollingAllocation).where(
+        MerchantRollingAllocation.deposit_id == deposit.id))
+    if existing:
+        return existing
+    transfer = await db.scalar(select(MerchantRollingTransfer).where(
+        MerchantRollingTransfer.merchant_id == deposit.merchant_id,
+        MerchantRollingTransfer.sequence_no == sequence))
+    context = snapshot.financial_context
+    fixed = context['quote']
+    payable = Decimal(context['merchant_payable_usdt'])
+    local_net = money(deposit.amount - snapshot.merchant_fee_amount)
+    allocation = MerchantRollingAllocation(deposit_id=deposit.id, merchant_id=deposit.merchant_id,
+        rolling_account_id=transfer.rolling_account_id, local_currency='TJS', gross_local=deposit.amount,
+        merchant_fee_local=snapshot.merchant_fee_amount, merchant_net_local=local_net,
+        rate_local=Decimal(fixed['rate']), quote_snapshot=fixed,
+        gross_rub=0, merchant_fee_rub=0, merchant_payable_rub=0,
+        rapira_rate_rub=None, rapira_rate_symbol=None, rapira_rate_side=None,
+        rapira_rate_source=None, rapira_rate_field=None, rapira_rate_updated_at=None,
+        rapira_fetched_at=None, rapira_freshness_basis=None,
+        merchant_fee_percent_snapshot=percentage(snapshot.merchant_rate_percent),
+        merchant_payable_usdt=payable, rolling_applied_usdt=0, rolling_applied_rub=0,
+        settle_credited_rub=0, rolling_applied_local=0, settle_credited_local=0, settle_credited_usdt=0,
+        eligibility_status='eligible', eligible_transfer_sequence=sequence,
+        rolling_eligible_at=aware_utc(deposit.created_at), eligibility_source='confirmed_transfer', status='pending')
+    db.add(allocation)
+    await db.flush()
+    db.add(_currency_entry(MerchantRollingLedgerEntry, allocation,
+        rolling_account_id=transfer.rolling_account_id, merchant_id=deposit.merchant_id,
+        deposit_id=deposit.id, entry_type=RollingLedgerType.pending_added.value,
+        amount_usdt=payable, amount_rub=local_net, rate_rub=Decimal(fixed['rate']),
+        reason='Rolling pending exposure created', idempotency_key=f'rolling:{deposit.id}:pending-added',
+        metadata_json={'quote': fixed, 'eligible_transfer_sequence': sequence,
+                       'rolling_eligible_at': aware_utc(deposit.created_at).isoformat()}))
+    return allocation
 
 
 def money(value) -> Decimal:
@@ -119,7 +227,7 @@ async def get_rolling_account(
         MerchantRollingAccount.merchant_id == merchant_id
     )
     if lock:
-        query = query.with_for_update()
+        query = query.with_for_update().execution_options(populate_existing=True)
     return (await db.execute(query)).scalar_one_or_none()
 
 
@@ -191,11 +299,18 @@ def _validate_transfer_evidence(
     tx_hash: str,
     sent_at: datetime,
     idempotency_key: str,
+    amount_quantizer=usdt,
 ) -> tuple[Decimal, str, str, str, datetime, str]:
-    amount = usdt(amount_usdt)
+    try:
+        amount = amount_quantizer(amount_usdt)
+    except ValueError as exc:
+        raise RollingError('invalid USDT amount') from exc
     normalized_network = (network or '').strip().upper()
     destination = (destination_address or '').strip()
     normalized_hash = (tx_hash or '').strip()
+    # A TRON TXID is a hexadecimal identity; letter case is not a new transfer.
+    if normalized_network == 'TRC20' and re.fullmatch(r'[0-9a-fA-F]{64}', normalized_hash):
+        normalized_hash = normalized_hash.lower()
     normalized_key = (idempotency_key or '').strip()
     if amount <= 0:
         raise RollingError('transfer amount must be positive')
@@ -228,13 +343,15 @@ def _transfer_request_matches(
     destination_address: str,
     tx_hash: str,
     sent_at: datetime,
+    amount_quantizer=usdt,
 ) -> bool:
     return (
         transfer.merchant_id == merchant_id
-        and usdt(transfer.amount_usdt) == amount_usdt
+        and amount_quantizer(transfer.amount_usdt) == amount_usdt
         and transfer.network == network
         and transfer.destination_address == destination_address
-        and transfer.tx_hash == tx_hash
+        and (transfer.tx_hash.lower() if network == 'TRC20' and re.fullmatch(r'[0-9a-f]{64}', tx_hash)
+             else transfer.tx_hash) == tx_hash
         and aware_utc(transfer.sent_at) == sent_at
     )
 
@@ -252,6 +369,8 @@ async def register_rolling_transfer(
     comment: str | None,
     idempotency_key: str,
 ) -> MerchantRollingTransfer:
+    await _tj_funding_guard(db, merchant_id, actor_id=actor_id, staff=True)
+    amount_quantizer = await _usdt_precision(db, merchant_id)
     (
         amount,
         normalized_network,
@@ -266,6 +385,7 @@ async def register_rolling_transfer(
         tx_hash=tx_hash,
         sent_at=sent_at,
         idempotency_key=idempotency_key,
+        amount_quantizer=amount_quantizer,
     )
     existing = (
         await db.execute(
@@ -283,6 +403,7 @@ async def register_rolling_transfer(
             destination_address=destination,
             tx_hash=normalized_hash,
             sent_at=sent_at_utc,
+            amount_quantizer=amount_quantizer,
         ):
             raise RollingStateConflict('transfer idempotency conflict')
         return existing
@@ -315,6 +436,7 @@ async def register_rolling_transfer(
             destination_address=destination,
             tx_hash=normalized_hash,
             sent_at=sent_at_utc,
+            amount_quantizer=amount_quantizer,
         ):
             raise RollingStateConflict('transfer idempotency conflict')
         return existing
@@ -322,7 +444,9 @@ async def register_rolling_transfer(
         await db.execute(
             select(MerchantRollingTransfer.id).where(
                 MerchantRollingTransfer.network == normalized_network,
-                MerchantRollingTransfer.tx_hash == normalized_hash,
+                (func.lower(MerchantRollingTransfer.tx_hash) == normalized_hash
+                 if normalized_network == 'TRC20' and re.fullmatch(r'[0-9a-f]{64}', normalized_hash)
+                 else MerchantRollingTransfer.tx_hash == normalized_hash),
             )
         )
     ).scalar_one_or_none()
@@ -385,11 +509,14 @@ async def confirm_rolling_transfer(
     actor_id: UUID,
     confirmed_at: datetime | None = None,
 ) -> MerchantRollingTransfer:
+    usdt = await _usdt_precision(db, merchant_id)
+    merchant = await _tj_funding_guard(db, merchant_id, actor_id=actor_id)
     transfer = (
         await db.execute(
             select(MerchantRollingTransfer)
             .where(MerchantRollingTransfer.id == transfer_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if not transfer:
@@ -425,6 +552,7 @@ async def confirm_rolling_transfer(
     transfer.confirmed_at = confirmation_time
     transfer.confirmed_by = actor_id
     ledger_entry = MerchantRollingLedgerEntry(
+        local_currency='TJS' if merchant and merchant.working_country == 'TJ' else 'RUB',
         rolling_account_id=account.id,
         rolling_transfer_id=transfer.id,
         merchant_id=merchant_id,
@@ -468,6 +596,7 @@ async def dispute_rolling_transfer(
     actor_id: UUID,
     reason: str,
 ) -> MerchantRollingTransfer:
+    await _tj_funding_guard(db, merchant_id, actor_id=actor_id)
     normalized_reason = (reason or '').strip()
     if not normalized_reason:
         raise RollingError('dispute reason is required')
@@ -476,6 +605,7 @@ async def dispute_rolling_transfer(
             select(MerchantRollingTransfer)
             .where(MerchantRollingTransfer.id == transfer_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if not transfer:
@@ -517,11 +647,19 @@ async def cancel_rolling_transfer(
     normalized_reason = (reason or '').strip()
     if not normalized_reason:
         raise RollingError('cancel reason is required')
+    # Confirmation takes the TJ Merchant mutex before the transfer row. Resolve
+    # the immutable owner first so cancellation cannot invert those locks.
+    merchant_id = await db.scalar(select(MerchantRollingTransfer.merchant_id).where(
+        MerchantRollingTransfer.id == transfer_id))
+    if merchant_id is None:
+        raise RollingError('rolling transfer is missing')
+    await _tj_funding_guard(db, merchant_id, actor_id=actor_id, staff=True)
     transfer = (
         await db.execute(
             select(MerchantRollingTransfer)
             .where(MerchantRollingTransfer.id == transfer_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if not transfer:
@@ -570,7 +708,7 @@ async def _eligible_transfer_sequence(
     if (
         not account
         or account.status != RollingAccountStatus.active.value
-        or usdt(account.outstanding_usdt) <= 0
+        or account.outstanding_usdt <= 0
     ):
         return None
     return (
@@ -744,6 +882,8 @@ async def apply_merchant_financing(
     merchant_payable_rub: Decimal,
     description: str,
 ) -> dict:
+    usdt = await _usdt_precision(db, deposit.merchant_id)
+    is_tj = deposit.currency == 'TJS'
     merchant_payable_rub = money(merchant_payable_rub)
     locked_deposit = (
         await db.execute(
@@ -767,12 +907,14 @@ async def apply_merchant_financing(
             await credit(
                 db,
                 deposit.merchant_id,
-                merchant_payable_rub,
+                Decimal(snapshot.financial_context['merchant_payable_usdt']) if is_tj else merchant_payable_rub,
                 deposit.id,
                 f'deposit-confirm:{deposit.id}:payable',
-                description,
+                description, currency='USDT' if is_tj else 'RUB',
             )
-        return _settle_result(merchant_payable_rub)
+        return ({'financing_route':'settle','has_confirmed_rolling':False,'rolling_eligible':False,
+            'rolling_applied_usdt':usdt(0),'settle_credited_usdt':Decimal(snapshot.financial_context['merchant_payable_usdt'])}
+            if is_tj else _settle_result(merchant_payable_rub))
 
     if allocation.status == RollingAllocationStatus.paid.value:
         return _allocation_financing_result(allocation)
@@ -780,7 +922,7 @@ async def apply_merchant_financing(
         raise RollingError(
             f'Rolling allocation status {allocation.status} cannot be paid'
         )
-    if money(allocation.merchant_payable_rub) != merchant_payable_rub:
+    if money(_local(allocation, 'merchant_payable_rub')) != merchant_payable_rub:
         raise RollingError(
             'Rolling allocation merchant payable does not match fee snapshot'
         )
@@ -792,30 +934,30 @@ async def apply_merchant_financing(
             allocation.eligible_transfer_sequence is not None
             or allocation.rolling_eligible_at is not None
             or usdt(allocation.rolling_applied_usdt) != 0
-            or money(allocation.rolling_applied_rub) != 0
+            or money(_local(allocation, 'rolling_applied_rub')) != 0
         ):
             raise RollingError('invalid ineligible Rolling allocation state')
         if merchant_payable_rub > 0:
             await credit(
                 db,
                 deposit.merchant_id,
-                merchant_payable_rub,
+                Decimal(snapshot.financial_context['merchant_payable_usdt']) if is_tj else merchant_payable_rub,
                 deposit.id,
                 f'deposit-confirm:{deposit.id}:payable',
-                description,
+                description, currency='USDT' if is_tj else 'RUB',
             )
-        allocation.settle_credited_rub = merchant_payable_rub
+        _set_local(allocation, 'settle_credited_rub', merchant_payable_rub)
         allocation.status = RollingAllocationStatus.paid.value
         allocation.finalized_at = datetime.now(timezone.utc)
         db.add(
-            MerchantRollingLedgerEntry(
+            _currency_entry(MerchantRollingLedgerEntry, allocation,
                 rolling_account_id=allocation.rolling_account_id,
                 merchant_id=deposit.merchant_id,
                 deposit_id=deposit.id,
                 entry_type=RollingLedgerType.pending_released.value,
                 amount_usdt=allocation.merchant_payable_usdt,
                 amount_rub=merchant_payable_rub,
-                rate_rub=allocation.rapira_rate_rub,
+                rate_rub=_local(allocation, 'rapira_rate_rub'),
                 reason='Legacy ineligible Rolling exposure finalized to settle',
                 idempotency_key=(
                     f'rolling:{deposit.id}:pending-released-paid'
@@ -824,14 +966,14 @@ async def apply_merchant_financing(
         )
         if merchant_payable_rub > 0:
             db.add(
-                MerchantRollingLedgerEntry(
+                _currency_entry(MerchantRollingLedgerEntry, allocation,
                     rolling_account_id=allocation.rolling_account_id,
                     merchant_id=deposit.merchant_id,
                     deposit_id=deposit.id,
                     entry_type=RollingLedgerType.settle_overflow.value,
                     amount_usdt=allocation.merchant_payable_usdt,
                     amount_rub=merchant_payable_rub,
-                    rate_rub=allocation.rapira_rate_rub,
+                    rate_rub=_local(allocation, 'rapira_rate_rub'),
                     reason='Legacy ineligible Rolling payable credited to settle',
                     idempotency_key=f'rolling:{deposit.id}:settle-overflow',
                 )
@@ -891,7 +1033,7 @@ async def apply_merchant_financing(
     else:
         applied_rub = min(
             merchant_payable_rub,
-            money(applied_usdt * rolling_rate(allocation.rapira_rate_rub)),
+            money(applied_usdt * _rate_value(allocation)),
         )
     settle_credit = money(merchant_payable_rub - applied_rub)
     if money(applied_rub + settle_credit) != merchant_payable_rub:
@@ -913,7 +1055,7 @@ async def apply_merchant_financing(
                 rub_left,
                 money(
                     consumed_usdt
-                    * rolling_rate(allocation.rapira_rate_rub)
+                    * _rate_value(allocation)
                 ),
             )
         transfer.recovered_usdt = usdt(
@@ -936,7 +1078,7 @@ async def apply_merchant_financing(
 
     for transfer, consumed_usdt, consumed_rub in consumed:
         db.add(
-            MerchantRollingTransferConsumption(
+            _currency_entry(MerchantRollingTransferConsumption, allocation,
                 merchant_id=deposit.merchant_id,
                 rolling_account_id=account.id,
                 rolling_transfer_id=transfer.id,
@@ -945,7 +1087,7 @@ async def apply_merchant_financing(
                 entry_type=RollingConsumptionType.recovery.value,
                 amount_usdt=consumed_usdt,
                 amount_rub=consumed_rub,
-                rate_rub=allocation.rapira_rate_rub,
+                rate_rub=_local(allocation, 'rapira_rate_rub'),
                 idempotency_key=(
                     f'rolling-consumption:{transfer.id}:{deposit.id}:recovery'
                 ),
@@ -964,27 +1106,29 @@ async def apply_merchant_financing(
     elif account.status != RollingAccountStatus.suspended.value:
         account.status = RollingAccountStatus.active.value
 
+    if is_tj:
+        allocation.settle_credited_usdt = usdt(merchant_payable_usdt - applied_usdt)
     allocation.rolling_applied_usdt = applied_usdt
-    allocation.rolling_applied_rub = applied_rub
-    allocation.settle_credited_rub = settle_credit
+    _set_local(allocation, 'rolling_applied_rub', applied_rub)
+    _set_local(allocation, 'settle_credited_rub', settle_credit)
     allocation.status = RollingAllocationStatus.paid.value
     allocation.finalized_at = datetime.now(timezone.utc)
     db.add(
-        MerchantRollingLedgerEntry(
+        _currency_entry(MerchantRollingLedgerEntry, allocation,
             rolling_account_id=account.id,
             merchant_id=deposit.merchant_id,
             deposit_id=deposit.id,
             entry_type=RollingLedgerType.pending_released.value,
             amount_usdt=merchant_payable_usdt,
             amount_rub=merchant_payable_rub,
-            rate_rub=allocation.rapira_rate_rub,
+            rate_rub=_local(allocation, 'rapira_rate_rub'),
             reason='Rolling pending exposure finalized as paid',
             idempotency_key=f'rolling:{deposit.id}:pending-released-paid',
         )
     )
     if applied_usdt > 0:
         db.add(
-            MerchantRollingLedgerEntry(
+            _currency_entry(MerchantRollingLedgerEntry, allocation,
                 rolling_account_id=account.id,
                 merchant_id=deposit.merchant_id,
                 deposit_id=deposit.id,
@@ -994,7 +1138,7 @@ async def apply_merchant_financing(
                 entry_type=RollingLedgerType.recovery.value,
                 amount_usdt=applied_usdt,
                 amount_rub=applied_rub,
-                rate_rub=allocation.rapira_rate_rub,
+                rate_rub=_local(allocation, 'rapira_rate_rub'),
                 reason='successful deposit Rolling recovery',
                 idempotency_key=f'rolling:{deposit.id}:recovery',
                 metadata_json={
@@ -1004,27 +1148,28 @@ async def apply_merchant_financing(
                 },
             )
         )
-    if settle_credit > 0:
+    overflow_usdt = usdt(merchant_payable_usdt - applied_usdt)
+    if (overflow_usdt if is_tj else settle_credit) > 0:
         await credit(
             db,
             deposit.merchant_id,
-            settle_credit,
+            overflow_usdt if is_tj else settle_credit,
             deposit.id,
             f'deposit-confirm:{deposit.id}:payable',
-            f'{description} (Rolling overflow)',
+            f'{description} (Rolling overflow)', currency='USDT' if is_tj else 'RUB',
         )
         db.add(
-            MerchantRollingLedgerEntry(
+            _currency_entry(MerchantRollingLedgerEntry, allocation,
                 rolling_account_id=account.id,
                 merchant_id=deposit.merchant_id,
                 deposit_id=deposit.id,
                 entry_type=RollingLedgerType.settle_overflow.value,
-                amount_usdt=usdt(
+                amount_usdt=overflow_usdt if is_tj else usdt(
                     settle_credit
-                    / rolling_rate(allocation.rapira_rate_rub)
+                    / _rate_value(allocation)
                 ),
                 amount_rub=settle_credit,
-                rate_rub=allocation.rapira_rate_rub,
+                rate_rub=_local(allocation, 'rapira_rate_rub'),
                 reason='successful deposit settle overflow',
                 idempotency_key=f'rolling:{deposit.id}:settle-overflow',
             )
@@ -1035,6 +1180,14 @@ async def apply_merchant_financing(
 def _allocation_financing_result(
     allocation: MerchantRollingAllocation,
 ) -> dict:
+    if allocation.local_currency == 'TJS':
+        return {'financing_route': 'rolling_and_settle' if allocation.settle_credited_usdt else 'rolling',
+            'has_confirmed_rolling': True, 'rolling_eligible': True,
+            'rolling_applied_usdt': allocation.rolling_applied_usdt,
+            'settle_credited_usdt': allocation.settle_credited_usdt,
+            'rolling_applied_tjs': allocation.rolling_applied_local,
+            'settle_credited_tjs': allocation.settle_credited_local,
+            'quote': allocation.quote_snapshot}
     is_eligible = (
         allocation.eligibility_status
         == RollingEligibilityStatus.eligible.value
@@ -1043,7 +1196,7 @@ def _allocation_financing_result(
         'financing_route': (
             (
                 'rolling'
-                if money(allocation.settle_credited_rub) == 0
+                if money(_local(allocation, 'settle_credited_rub')) == 0
                 else 'rolling_and_settle'
             )
             if is_eligible
@@ -1052,9 +1205,9 @@ def _allocation_financing_result(
         'has_confirmed_rolling': is_eligible,
         'rolling_eligible': is_eligible,
         'rolling_applied_usdt': usdt(allocation.rolling_applied_usdt),
-        'rolling_applied_rub': money(allocation.rolling_applied_rub),
-        'settle_credited_rub': money(allocation.settle_credited_rub),
-        'rapira_rate_rub': rolling_rate(allocation.rapira_rate_rub),
+        'rolling_applied_rub': money(_local(allocation, 'rolling_applied_rub')),
+        'settle_credited_rub': money(_local(allocation, 'settle_credited_rub')),
+        'rapira_rate_rub': _rate_value(allocation),
         'rapira_rate_symbol': allocation.rapira_rate_symbol,
         'rapira_rate_side': allocation.rapira_rate_side,
         'rapira_rate_source': allocation.rapira_rate_source,
@@ -1101,14 +1254,14 @@ async def release_pending_allocation(
     allocation.release_reason = (reason or 'failed')[:64]
     allocation.finalized_at = datetime.now(timezone.utc)
     db.add(
-        MerchantRollingLedgerEntry(
+        _currency_entry(MerchantRollingLedgerEntry, allocation,
             rolling_account_id=account.id,
             merchant_id=deposit.merchant_id,
             deposit_id=deposit.id,
             entry_type=RollingLedgerType.pending_released.value,
             amount_usdt=allocation.merchant_payable_usdt,
-            amount_rub=allocation.merchant_payable_rub,
-            rate_rub=allocation.rapira_rate_rub,
+            amount_rub=_local(allocation, 'merchant_payable_rub'),
+            rate_rub=_local(allocation, 'rapira_rate_rub'),
             reason=(
                 'Rolling pending exposure released: '
                 f'{allocation.release_reason}'
@@ -1157,14 +1310,14 @@ async def reopen_released_allocation(
     allocation.release_reason = None
     allocation.finalized_at = None
     db.add(
-        MerchantRollingLedgerEntry(
+        _currency_entry(MerchantRollingLedgerEntry, allocation,
             rolling_account_id=account.id,
             merchant_id=deposit.merchant_id,
             deposit_id=deposit.id,
             entry_type=RollingLedgerType.pending_added.value,
             amount_usdt=allocation.merchant_payable_usdt,
-            amount_rub=allocation.merchant_payable_rub,
-            rate_rub=allocation.rapira_rate_rub,
+            amount_rub=_local(allocation, 'merchant_payable_rub'),
+            rate_rub=_local(allocation, 'rapira_rate_rub'),
             reason=f'Rolling pending exposure reopened: {reason}'[:500],
             idempotency_key=(
                 f'rolling:{deposit.id}:pending-reopened:{idempotency_suffix}'
@@ -1182,6 +1335,8 @@ async def set_rolling_suspension(
     actor_id: UUID,
     reason: str,
 ) -> MerchantRollingAccount:
+    usdt = await _usdt_precision(db, merchant_id)
+    await _tj_funding_guard(db, merchant_id, actor_id=actor_id, staff=True)
     normalized_reason = (reason or '').strip()
     if not normalized_reason:
         raise RollingError('reason is required')
@@ -1225,6 +1380,7 @@ async def reverse_paid_allocation(
     actor_id: UUID | None,
     reason: str,
 ) -> MerchantRollingAllocation | None:
+    usdt = await _usdt_precision(db, deposit.merchant_id)
     normalized_reason = (reason or '').strip()
     if not normalized_reason:
         raise RollingError('reversal reason is required')
@@ -1292,7 +1448,8 @@ async def reverse_paid_allocation(
     ) != applied_usdt:
         raise RollingError('Rolling consumption evidence is incomplete')
 
-    settle_credit = money(allocation.settle_credited_rub)
+    is_tj = allocation.local_currency == 'TJS'
+    settle_credit = allocation.settle_credited_usdt if is_tj else money(allocation.settle_credited_rub)
     if settle_credit > 0:
         try:
             await debit_available(
@@ -1301,7 +1458,8 @@ async def reverse_paid_allocation(
                 settle_credit,
                 deposit.id,
                 f'rolling:{deposit.id}:settle-reversal',
-                f'Rolling reversal: {normalized_reason}',
+                f'Rolling reversal: {normalized_reason}', currency='USDT' if is_tj else 'RUB',
+                entry_type='local_refund' if is_tj else 'debit',
             )
         except LedgerError as exc:
             raise RollingError(
@@ -1318,7 +1476,7 @@ async def reverse_paid_allocation(
         transfer.recovered_usdt = usdt(transfer.recovered_usdt - amount)
         transfer.remaining_usdt = usdt(transfer.remaining_usdt + amount)
         db.add(
-            MerchantRollingTransferConsumption(
+            _currency_entry(MerchantRollingTransferConsumption, allocation,
                 merchant_id=recovery.merchant_id,
                 rolling_account_id=recovery.rolling_account_id,
                 rolling_transfer_id=recovery.rolling_transfer_id,
@@ -1326,8 +1484,8 @@ async def reverse_paid_allocation(
                 deposit_id=recovery.deposit_id,
                 entry_type=RollingConsumptionType.reversal.value,
                 amount_usdt=amount,
-                amount_rub=money(recovery.amount_rub),
-                rate_rub=recovery.rate_rub,
+                amount_rub=money(_local(recovery, 'amount_rub')),
+                rate_rub=_local(recovery, 'rate_rub'),
                 idempotency_key=(
                     f'rolling-consumption:{recovery.rolling_transfer_id}:'
                     f'{deposit.id}:reversal'
@@ -1349,7 +1507,7 @@ async def reverse_paid_allocation(
     allocation.status = RollingAllocationStatus.reversed.value
     allocation.finalized_at = datetime.now(timezone.utc)
     db.add(
-        MerchantRollingLedgerEntry(
+        _currency_entry(MerchantRollingLedgerEntry, allocation,
             rolling_account_id=account.id,
             merchant_id=deposit.merchant_id,
             deposit_id=deposit.id,
@@ -1357,16 +1515,18 @@ async def reverse_paid_allocation(
             entry_type=RollingLedgerType.reversal.value,
             amount_usdt=applied_usdt,
             amount_rub=money(
-                allocation.rolling_applied_rub + settle_credit
+                _local(allocation, 'rolling_applied_rub') + (allocation.settle_credited_local if is_tj else settle_credit)
             ),
-            rate_rub=allocation.rapira_rate_rub,
+            rate_rub=_local(allocation, 'rapira_rate_rub'),
             reason=normalized_reason[:500],
             idempotency_key=f'rolling:{deposit.id}:reversal',
             metadata_json={
                 'rolling_applied_rub': str(
-                    money(allocation.rolling_applied_rub)
+                    money(_local(allocation, 'rolling_applied_rub'))
                 ),
-                'settle_reversed_rub': str(settle_credit),
+                'settle_reversed_rub': str(0 if is_tj else settle_credit),
+                'settle_reversed_local': str(allocation.settle_credited_local if is_tj else 0),
+                'settle_reversed_usdt': str(settle_credit if is_tj else 0),
             },
         )
     )
@@ -1379,9 +1539,11 @@ async def reverse_paid_allocation(
         details={
             'rolling_applied_usdt': str(applied_usdt),
             'rolling_applied_rub': str(
-                money(allocation.rolling_applied_rub)
+                money(_local(allocation, 'rolling_applied_rub'))
             ),
-            'settle_reversed_rub': str(settle_credit),
+            'settle_reversed_rub': str(0 if is_tj else settle_credit),
+                'settle_reversed_local': str(allocation.settle_credited_local if is_tj else 0),
+                'settle_reversed_usdt': str(settle_credit if is_tj else 0),
             'reason': normalized_reason,
         },
     )
@@ -1389,6 +1551,7 @@ async def reverse_paid_allocation(
 
 
 async def rolling_overview(db: AsyncSession, merchant_id: UUID) -> dict:
+    usdt = await _usdt_precision(db, merchant_id)
     account = await get_rolling_account(db, merchant_id)
     status_counts = dict(
         (
@@ -1478,12 +1641,20 @@ class RollingReconciliationReport:
     disputed_transfer_count: int
     transfer_consumption_mismatches: tuple[str, ...]
     paid_split_mismatches: tuple[str, ...]
+    local_currency: str = 'RUB'
+    settle_overflow_local: Decimal = Decimal('0')
+    ledger_settle_overflow_local: Decimal = Decimal('0')
+    settle_overflow_usdt: Decimal = Decimal('0')
+    ledger_settle_overflow_usdt: Decimal = Decimal('0')
 
 
 async def reconcile_rolling_account(
     db: AsyncSession,
     merchant_id: UUID,
 ) -> RollingReconciliationReport | None:
+    usdt = await _usdt_precision(db, merchant_id)
+    merchant = await db.get(Merchant, merchant_id)
+    local_currency = 'TJS' if merchant and merchant.working_country == 'TJ' else 'RUB'
     account = await get_rolling_account(db, merchant_id)
     transfers = list(
         (
@@ -1615,7 +1786,7 @@ async def reconcile_rolling_account(
     )
     settle_overflow = money(
         sum(
-            (money(row.settle_credited_rub) for row in paid_allocations),
+            (money(_local(row, 'settle_credited_rub')) for row in paid_allocations),
             Decimal('0.00'),
         )
     )
@@ -1633,7 +1804,7 @@ async def reconcile_rolling_account(
     ledger_settle_overflow = money(
         sum(
             (
-                money(row.amount_rub)
+                money(_local(row, 'amount_rub'))
                 for row in ledger
                 if row.entry_type == RollingLedgerType.settle_overflow.value
             ),
@@ -1641,7 +1812,7 @@ async def reconcile_rolling_account(
         )
         - sum(
             (
-                money((row.metadata_json or {}).get('settle_reversed_rub', 0))
+                money((row.metadata_json or {}).get('settle_reversed_local' if row.local_currency == 'TJS' else 'settle_reversed_rub', 0))
                 for row in ledger
                 if row.entry_type == RollingLedgerType.reversal.value
             ),
@@ -1651,9 +1822,16 @@ async def reconcile_rolling_account(
     split_mismatches = tuple(
         str(row.deposit_id)
         for row in paid_allocations
-        if money(row.rolling_applied_rub + row.settle_credited_rub)
-        != money(row.merchant_payable_rub)
+        if (money(_local(row, 'rolling_applied_rub') + _local(row, 'settle_credited_rub'))
+        != money(_local(row, 'merchant_payable_rub')) or (row.local_currency == 'TJS'
+            and row.rolling_applied_usdt + row.settle_credited_usdt != row.merchant_payable_usdt))
     )
+    overflow_usdt = usdt(sum((row.settle_credited_usdt for row in paid_allocations
+        if row.local_currency == 'TJS'), Decimal(0)))
+    ledger_overflow_usdt = usdt(sum((row.amount_usdt for row in ledger
+        if row.local_currency == 'TJS' and row.entry_type == RollingLedgerType.settle_overflow.value), Decimal(0))
+        - sum((Decimal((row.metadata_json or {}).get('settle_reversed_usdt', 0)) for row in ledger
+        if row.local_currency == 'TJS' and row.entry_type == RollingLedgerType.reversal.value), Decimal(0)))
     actual_principal = usdt(account.principal_usdt)
     actual_recovered = usdt(account.recovered_usdt)
     actual_outstanding = usdt(account.outstanding_usdt)
@@ -1664,6 +1842,7 @@ async def reconcile_rolling_account(
         and expected_principal
         == usdt(expected_recovered + expected_outstanding)
         and ledger_settle_overflow == settle_overflow
+        and ledger_overflow_usdt == overflow_usdt
         and not consumption_mismatches
         and not split_mismatches
     )
@@ -1697,8 +1876,13 @@ async def reconcile_rolling_account(
         expected_outstanding_usdt=expected_outstanding,
         actual_outstanding_usdt=actual_outstanding,
         pending_exposure_usdt=pending_exposure,
-        settle_overflow_rub=settle_overflow,
-        ledger_settle_overflow_rub=ledger_settle_overflow,
+        settle_overflow_rub=settle_overflow if local_currency == 'RUB' else money(0),
+        ledger_settle_overflow_rub=ledger_settle_overflow if local_currency == 'RUB' else money(0),
+        local_currency=local_currency,
+        settle_overflow_local=settle_overflow,
+        ledger_settle_overflow_local=ledger_settle_overflow,
+        settle_overflow_usdt=overflow_usdt,
+        ledger_settle_overflow_usdt=ledger_overflow_usdt,
         pending_transfer_count=pending_count,
         disputed_transfer_count=disputed_count,
         transfer_consumption_mismatches=consumption_mismatches,
