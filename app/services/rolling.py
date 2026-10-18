@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -226,7 +227,7 @@ async def get_rolling_account(
         MerchantRollingAccount.merchant_id == merchant_id
     )
     if lock:
-        query = query.with_for_update()
+        query = query.with_for_update().execution_options(populate_existing=True)
     return (await db.execute(query)).scalar_one_or_none()
 
 
@@ -298,11 +299,18 @@ def _validate_transfer_evidence(
     tx_hash: str,
     sent_at: datetime,
     idempotency_key: str,
+    amount_quantizer=usdt,
 ) -> tuple[Decimal, str, str, str, datetime, str]:
-    amount = usdt(amount_usdt)
+    try:
+        amount = amount_quantizer(amount_usdt)
+    except ValueError as exc:
+        raise RollingError('invalid USDT amount') from exc
     normalized_network = (network or '').strip().upper()
     destination = (destination_address or '').strip()
     normalized_hash = (tx_hash or '').strip()
+    # A TRON TXID is a hexadecimal identity; letter case is not a new transfer.
+    if normalized_network == 'TRC20' and re.fullmatch(r'[0-9a-fA-F]{64}', normalized_hash):
+        normalized_hash = normalized_hash.lower()
     normalized_key = (idempotency_key or '').strip()
     if amount <= 0:
         raise RollingError('transfer amount must be positive')
@@ -335,13 +343,15 @@ def _transfer_request_matches(
     destination_address: str,
     tx_hash: str,
     sent_at: datetime,
+    amount_quantizer=usdt,
 ) -> bool:
     return (
         transfer.merchant_id == merchant_id
-        and usdt(transfer.amount_usdt) == amount_usdt
+        and amount_quantizer(transfer.amount_usdt) == amount_usdt
         and transfer.network == network
         and transfer.destination_address == destination_address
-        and transfer.tx_hash == tx_hash
+        and (transfer.tx_hash.lower() if network == 'TRC20' and re.fullmatch(r'[0-9a-f]{64}', tx_hash)
+             else transfer.tx_hash) == tx_hash
         and aware_utc(transfer.sent_at) == sent_at
     )
 
@@ -360,6 +370,7 @@ async def register_rolling_transfer(
     idempotency_key: str,
 ) -> MerchantRollingTransfer:
     await _tj_funding_guard(db, merchant_id, actor_id=actor_id, staff=True)
+    amount_quantizer = await _usdt_precision(db, merchant_id)
     (
         amount,
         normalized_network,
@@ -374,6 +385,7 @@ async def register_rolling_transfer(
         tx_hash=tx_hash,
         sent_at=sent_at,
         idempotency_key=idempotency_key,
+        amount_quantizer=amount_quantizer,
     )
     existing = (
         await db.execute(
@@ -391,6 +403,7 @@ async def register_rolling_transfer(
             destination_address=destination,
             tx_hash=normalized_hash,
             sent_at=sent_at_utc,
+            amount_quantizer=amount_quantizer,
         ):
             raise RollingStateConflict('transfer idempotency conflict')
         return existing
@@ -423,6 +436,7 @@ async def register_rolling_transfer(
             destination_address=destination,
             tx_hash=normalized_hash,
             sent_at=sent_at_utc,
+            amount_quantizer=amount_quantizer,
         ):
             raise RollingStateConflict('transfer idempotency conflict')
         return existing
@@ -430,7 +444,9 @@ async def register_rolling_transfer(
         await db.execute(
             select(MerchantRollingTransfer.id).where(
                 MerchantRollingTransfer.network == normalized_network,
-                MerchantRollingTransfer.tx_hash == normalized_hash,
+                (func.lower(MerchantRollingTransfer.tx_hash) == normalized_hash
+                 if normalized_network == 'TRC20' and re.fullmatch(r'[0-9a-f]{64}', normalized_hash)
+                 else MerchantRollingTransfer.tx_hash == normalized_hash),
             )
         )
     ).scalar_one_or_none()
@@ -500,6 +516,7 @@ async def confirm_rolling_transfer(
             select(MerchantRollingTransfer)
             .where(MerchantRollingTransfer.id == transfer_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if not transfer:
@@ -588,6 +605,7 @@ async def dispute_rolling_transfer(
             select(MerchantRollingTransfer)
             .where(MerchantRollingTransfer.id == transfer_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if not transfer:
@@ -629,17 +647,24 @@ async def cancel_rolling_transfer(
     normalized_reason = (reason or '').strip()
     if not normalized_reason:
         raise RollingError('cancel reason is required')
+    # Confirmation takes the TJ Merchant mutex before the transfer row. Resolve
+    # the immutable owner first so cancellation cannot invert those locks.
+    merchant_id = await db.scalar(select(MerchantRollingTransfer.merchant_id).where(
+        MerchantRollingTransfer.id == transfer_id))
+    if merchant_id is None:
+        raise RollingError('rolling transfer is missing')
+    await _tj_funding_guard(db, merchant_id, actor_id=actor_id, staff=True)
     transfer = (
         await db.execute(
             select(MerchantRollingTransfer)
             .where(MerchantRollingTransfer.id == transfer_id)
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if not transfer:
         raise RollingError('rolling transfer is missing')
     if transfer.status == RollingTransferStatus.cancelled.value:
-        await _tj_funding_guard(db, transfer.merchant_id, actor_id=actor_id, staff=True)
         return transfer
     if transfer.status not in {
         RollingTransferStatus.pending_confirmation.value,
@@ -648,7 +673,6 @@ async def cancel_rolling_transfer(
         raise RollingStateConflict(
             'confirmed Rolling transfer requires a compensating financial operation'
         )
-    await _tj_funding_guard(db, transfer.merchant_id, actor_id=actor_id, staff=True)
     transfer.status = RollingTransferStatus.cancelled.value
     transfer.cancelled_at = datetime.now(timezone.utc)
     transfer.cancelled_by = actor_id
