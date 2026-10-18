@@ -10,8 +10,8 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     pids_limit: 96
-    mem_limit: 256m
-    cpus: "0.50"
+    mem_limit: 384m
+    cpus: "1.00"
     tmpfs: ["/tmp:rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0700"]
     volumes:
       - type: bind
@@ -25,9 +25,10 @@ services:
     healthcheck:
       test: [CMD, python, -B, -m, scripts.bybit_parser_health]
       interval: 30s
-      timeout: 10s
-      start_period: 60s
-      retries: 2
+      timeout: 30s
+      start_period: 90s
+      start_interval: 30s
+      retries: 3
     logging:
       driver: local
       options: {max-size: 1m, max-file: "2"}
