@@ -16,8 +16,8 @@ from app.models import User
 from app.services import bybit_p2p, rate_registry
 
 
-async def run(*, activate):
-    pair = json.loads(sys.stdin.readline())
+async def run(*, activate, credentials=None):
+    pair = credentials if credentials is not None else json.loads(sys.stdin.readline())
     settings.BYBIT_P2P_API_KEY = SecretStr(pair.pop('api_key'))
     settings.BYBIT_P2P_API_SECRET = SecretStr(pair.pop('api_secret'))
     settings.BYBIT_P2P_FETCH_IN_PROCESS = True

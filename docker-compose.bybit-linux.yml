@@ -1,0 +1,39 @@
+# Preparation only. Review the Wave 5 plan before using on an existing server.
+services:
+  bybit-parser:
+    profiles: [bybit-readonly]
+    image: ${OZARK_RELEASE_IMAGE:?Pin the audited image digest}
+    env_file: ${BYBIT_RUNTIME_ENV_FILE:?Protected non-Bybit application runtime env}
+    command: [python, -B, -m, scripts.bybit_quote_worker_linux]
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 96
+    mem_limit: 256m
+    cpus: "0.50"
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16m,uid=1000,gid=1000,mode=0700"]
+    volumes:
+      - type: bind
+        source: ${BYBIT_SECRET_DIR:?Owner 1000, directory 0700, files 0400}
+        target: /run/ozark-bybit
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: "on-failure:3"
+    stop_grace_period: 30s
+    healthcheck:
+      test: [CMD, python, -B, -m, scripts.bybit_parser_health]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 2
+    logging:
+      driver: local
+      options: {max-size: 1m, max-file: "2"}
+    networks: [backend]
+
+networks:
+  backend:
+    external: true
+    name: ${OZARK_BACKEND_NETWORK:?Existing OzarkPay backend network}
