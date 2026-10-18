@@ -103,7 +103,10 @@ async def create_deposit_appeal(db, *, user, deposit_id, trader_id, amount, requ
     elif dep.currency != 'RUB':
         raise ValueError('Для валютной операции требуется ручное разбирательство без автоматического расчёта RUB')
     req = await db.get(Requisite, dep.requisites_id) if dep.requisites_id else None
-    if not req or not req.trader_id or str(req.trader_id) != str(trader_id):
+    external = getattr(dep, 'financial_executor_type', None) == 'aggregator'
+    if external and str(dep.financial_executor_id) != str(trader_id):
+        raise ValueError('Агрегатор должен совпадать с финансовым исполнителем')
+    if not external and (not req or not req.trader_id or str(req.trader_id) != str(trader_id)):
         raise ValueError('Трейдер должен совпадать с назначенным исполнителем сделки')
     if dep.currency == 'TJS':
         await require_tj_receipt_match(db,dep,amount=amount,requisite=requisite,
@@ -120,14 +123,17 @@ async def create_deposit_appeal(db, *, user, deposit_id, trader_id, amount, requ
         dep.status = 'appeal_opened'
     appeal = Appeal(operation_type='deposit', operation_id=dep.id, created_by=user.id, status='opened',
         evidence_validated=True, metadata_json={**fields, 'merchant_id': str(merchant.id),
-        'trader_id': str(req.trader_id), 'deadline_at': default_deadline().isoformat(),
+        'trader_id': str(req.trader_id) if req else None,
+        'aggregator_id': str(dep.financial_executor_id) if external else None,
+        'deadline_at': default_deadline().isoformat(),
         'previous_deposit_status': previous, 'source': 'merchant_validated'})
     db.add(appeal)
     await db.flush()
     db.add(AppealMessage(appeal_id=appeal.id, author_id=user.id,
                         message=message.strip()[:2000] or 'Мерчант создал апелляцию с чеком.'))
     await audit(db, 'merchant_appeal_created', 'appeal', user.id, appeal.id,
-                details={'deposit_id': str(dep.id), 'trader_id': str(req.trader_id), 'validation_version': 1})
+                details={'deposit_id': str(dep.id), 'trader_id': str(req.trader_id) if req else None,
+                         'aggregator_id': str(dep.financial_executor_id) if external else None, 'validation_version': 1})
     return appeal
 
 
@@ -139,7 +145,10 @@ async def require_approval_evidence(db, appeal, dep):
         recipient_bank=meta.get('recipient_bank'), operation_date=meta.get('operation_date'), receipt=meta.get('receipt_file'),
         country='TJ' if dep.currency == 'TJS' else 'RU')
     req = await db.get(Requisite, dep.requisites_id) if dep.requisites_id else None
-    if not req or not req.trader_id or str(req.trader_id) != meta.get('trader_id'):
+    external = getattr(dep, 'financial_executor_type', None) == 'aggregator'
+    if external and (meta.get('aggregator_id') != str(dep.financial_executor_id) or meta.get('trader_id')):
+        raise ValueError('Финансовый исполнитель апелляции изменился')
+    if not external and (not req or not req.trader_id or str(req.trader_id) != meta.get('trader_id')):
         raise ValueError('Исполнитель апелляции не совпадает с исполнителем сделки')
     if dep.currency == 'TJS':
         from app.services.local_deposit_policy import require_execution
@@ -151,7 +160,15 @@ async def require_approval_evidence(db, appeal, dep):
 async def require_tj_receipt_match(db,dep,*,amount,requisite,recipient_bank,operation_date):
     from app.core.security import reveal_text
     from app.services.local_deposit_policy import snapshot
-    fixed=(await snapshot(db,dep)).financial_context['requisite']
+    row = await snapshot(db,dep)
+    if row.executor_type == 'aggregator':
+        from app.services.aggregator_execution import public_requisites
+        details = (await public_requisites(db, dep)).get('requisites') or {}
+        from app.core.security import encrypt_secret
+        fixed = {'bank_id': details.get('bank_id'), 'value_encrypted': encrypt_secret(
+            details.get('card_number') or details.get('bank_account') or '')}
+    else:
+        fixed = row.financial_context['requisite']
     paid_at=datetime.fromisoformat(operation_date)
     created_at=dep.created_at if dep.created_at.tzinfo else dep.created_at.replace(tzinfo=timezone.utc)
     if (not paid_at.tzinfo or not created_at <= paid_at <= datetime.now(timezone.utc)

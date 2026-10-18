@@ -277,6 +277,9 @@ async def _existing_payout_or_conflict(db: AsyncSession, merchant: Merchant, dat
     return existing
 
 async def _payment_details_for_deposit(db: AsyncSession, dep: Deposit) -> dict | None:
+    if getattr(dep, 'financial_executor_type', None) == 'aggregator':
+        from app.services.aggregator_execution import public_requisites
+        return await public_requisites(db, dep)
     if dep.currency == 'TJS':
         from app.models import OperationFeeSnapshot
         row = await db.scalar(select(OperationFeeSnapshot).where(OperationFeeSnapshot.deposit_id == dep.id))
@@ -384,7 +387,7 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
             raise merchant_error(403, 'hmac_v2_required')
         _require_local_method(merchant, data, local_authorized=True)
         reserved = ('trader_', 'local_', 'financial_', 'fee_', 'executor_', 'platform_', 'quote_', 'rate_')
-        if any(str(key).startswith(reserved) for key in (data.metadata or {})):
+        if any(str(key).startswith(reserved+('external_',)) and key != 'external_aggregator_id' for key in (data.metadata or {})):
             raise merchant_error(422, 'reserved_financial_metadata')
         from app.services.country_tariffs import scope_lock
         await scope_lock(db, f'local-deposit-merchant:{merchant.id}')
@@ -485,6 +488,24 @@ async def create_deposit(data: PaymentCreate, request: Request, db: AsyncSession
         await log_req(db, merchant, request, 409)
         await db.commit()
         raise merchant_error(409, getattr(exc, 'code', 'rolling_error'), str(exc)) from exc
+    if local and (data.metadata or {}).get('external_aggregator_id'):
+        from app.services.aggregator_execution import prepare
+        try:
+            dep = await prepare(db, merchant=merchant, data=data,
+                aggregator_id=data.metadata['external_aggregator_id'], operation_id=local_context['operation_id'],
+                idem=idem, fingerprint=request_fingerprint, merchant_rule=merchant_rate_rule,
+                merchant_plan=merchant_plan, fixed_quote=local_context['quote'], created_at=deposit_created_at,
+                expires_at=new_deposit_expires_at(), client_ip=ip)
+            await record_risk_event(db, merchant_id=merchant.id, operation_type='deposit', operation_id=dep.id, result=risk)
+            await log_req(db, merchant, request)
+            await db.commit()
+            await db.refresh(dep)
+        except ValueError as exc:
+            await db.rollback()
+            raise merchant_error(409, 'external_aggregator_not_ready') from exc
+        return {'id':dep.id, 'external_id':dep.external_id, 'status':dep.status, 'amount':dep.amount,
+            'method':dep.method, **deposit_ttl_fields(dep), 'risk_decision':risk.decision.value,
+            'payment_details':await _payment_details_for_deposit(db, dep)}
     try:
         selected_requisite = await select_deposit_requisite(
             db,

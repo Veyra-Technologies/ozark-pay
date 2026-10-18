@@ -188,6 +188,19 @@ def refresh_rapira_rate_task():
             return {'available': state['available'], 'status': state['status']}
     return _run_async_task(run)
 
+@celery_app.task(name='recover_external_aggregator_outbox')
+def recover_external_aggregator_outbox_task():
+    async def run():
+        if settings.ENV != 'test':
+            return {'status': 'production_blocked'}
+        from app.services.aggregator_execution import recover_outbox
+        try:
+            return await recover_outbox(AsyncSessionLocal)
+        except ValueError:
+            return {'status': 'isolated_adapter_dependency_required'}
+    return _run_async_task(run)
+
+
 celery_app.conf.timezone = 'UTC'
 celery_app.conf.beat_schedule = {
     'refresh-xe-rates': {'task': 'refresh_xe_rates', 'schedule': 60.0},
@@ -221,3 +234,7 @@ celery_app.conf.beat_schedule = {
         'schedule': 60.0,
     },
 }
+if settings.ENV == 'test':
+    celery_app.conf.beat_schedule['recover-external-aggregator-outbox'] = {
+        'task': 'recover_external_aggregator_outbox', 'schedule': 30.0,
+    }

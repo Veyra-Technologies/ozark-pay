@@ -85,6 +85,11 @@ async def cabinet_context(db, *, merchant=None, trader=None):
     for fixed in snapshots:
         context = fixed.financial_context or {}
         bank = context.get('requisite') or {}
+        external_details = None
+        if fixed.executor_type == 'aggregator':
+            from app.services.aggregator_execution import public_requisites
+            deposit = next(op for op in recent if op.id == fixed.deposit_id)
+            external_details = (await public_requisites(db, deposit)).get('requisites') or {}
         own_finance[str(fixed.deposit_id)] = {
             'base_usdt':context.get('base_usdt'),
             'net_usdt':context.get('merchant_payable_usdt' if merchant else 'debit_usdt'),
@@ -93,6 +98,9 @@ async def cabinet_context(db, *, merchant=None, trader=None):
             'reserve_usdt':context.get('reserve_usdt') if trader else None,
             'trader_id':str(fixed.executor_id),'bank_id':bank.get('bank_id'),
             'bank_name':bank.get('bank_name'),'requisite':reveal_text(bank['value_encrypted']) if bank.get('value_encrypted') else ''}
+        if external_details:
+            own_finance[str(fixed.deposit_id)].update(bank_id=external_details.get('bank_id'),
+                bank_name=external_details.get('bank_name'),requisite=external_details.get('card_number') or external_details.get('bank_account'))
     qa_enabled = False
     owner = await db.get(User,merchant.owner_id) if merchant else trader
     if owner and owner.role in ('merchant','trader'):

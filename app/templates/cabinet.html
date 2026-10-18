@@ -80,7 +80,9 @@
   {{ render_ui_message([ui_scope, s]) }}
 
   {% if is_tj_cabinet and s in ['Обзор','Кошелёк','Кошелек','Баланс','Статистика','Тарифы','Журнал баланса','API-интеграция','Пополнение','Пополнения','Апелляции'] or (is_tj_cabinet and role == 'aggregator' and s == 'Операции') %}
-  {% include '_tj_summary.html' %}
+  {% if role == 'aggregator' and external_aggregator and external_aggregator.integration %}
+  {% set external=external_aggregator %}{% include '_external_aggregator_summary.html' %}
+  {% else %}{% include '_tj_summary.html' %}{% endif %}
   {% if s == 'Апелляции' %}{% include '_appeals.html' %}{% endif %}
   {% elif s == 'Обзор' %}
   {% if role == 'merchant' and merchant %}{% include '_merchant_summary.html' %}{% endif %}
@@ -725,7 +727,7 @@
   <div class="table-wrap aggregator-account-table"><table><tr><th>Name</th><th>API key</th><th>Status</th><th>Limits</th><th>Balance</th><th>Callback</th><th>Actions</th></tr>
   {% for agg in aggregator_accounts %}
   <tr>
-    <td><b class="cell-ellipsis" title="{{ agg.name }}">{{ agg.name }}</b><div class="cell-mono cell-ellipsis" title="{{ agg.id }}">{{ agg.id }}</div></td>
+    <td><b class="cell-ellipsis" title="{{ agg.name }}">{{ agg.name }}</b><div class="cell-mono cell-ellipsis" title="{{ agg.id }}">{{ agg.id }}</div>{% if agg.working_country=='TJ' and role in ['admin','superadmin'] %}<a href="{{ cabinet_base }}/aggregators/{{ agg.id }}/integration">Профиль / API-интеграция</a>{% endif %}</td>
     <td><span class="cell-mono cell-ellipsis" title="{{ agg.api_key }}">{{ agg.api_key }}</span></td>
     <td>{% if agg.status == 'active' %}<span class="status-pill status-ok">Активен</span>{% elif agg.status == 'blocked' %}<span class="status-pill status-bad">blocked</span>{% else %}<span class="status-pill status-neutral">{{ agg.status|status_label }}</span>{% endif %}</td>
     <td>{{ (agg.min_payment_amount)|decimal_display }}-{{ (agg.max_payment_amount)|decimal_display }} {{ agg.working_currency or 'RUB' }}<div class="compact-note">day {{ (agg.daily_limit or 'none')|decimal_display }} · month {{ (agg.monthly_limit or 'none')|decimal_display }}</div></td>

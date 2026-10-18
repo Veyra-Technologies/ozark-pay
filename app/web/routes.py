@@ -77,6 +77,7 @@ from app.services.antiscam import (
     reinstate_trader,
 )
 from app.services.aggregator_enqueue import enqueue_aggregator_callback_delivery
+from app.web.external_aggregators import router as external_aggregator_router
 from app.services.aggregators import create_aggregator_account, money, percent, regenerate_aggregator_secret, sync_payment_from_deposit
 from app.services.external_processors import (
     ExternalProcessorError,
@@ -6418,6 +6419,8 @@ async def role_cabinet(
         context['sections'] = ['Обзор', 'Операции', 'Кошелёк', 'Статистика', 'Тарифы', 'API-интеграция', 'Безопасность']
         account = await db.scalar(select(AggregatorAccount).where(AggregatorAccount.platform_merchant_id == tj_merchant.id))
         context['tj_aggregator'] = account
+        from app.services.aggregator_execution import own_context
+        context['external_aggregator'] = await own_context(db, account) if account else None
     if context['is_tj_cabinet'] and role in ('merchant','trader','operator'):
         context['sections'] = [s for s in sections if s not in ('Трансгран','Rolling','Settle — Россия','Settle — Казахстан','Выплаты','Вывод средств')]
         if 'Тарифы' not in context['sections']:
@@ -6438,3 +6441,4 @@ from app.web.settlements import router as settlement_router
 router.include_router(settlement_router)
 from app.web.tj import router as tj_router
 router.include_router(tj_router)
+router.include_router(external_aggregator_router)

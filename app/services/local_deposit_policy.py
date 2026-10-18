@@ -139,6 +139,9 @@ async def snapshot(db, deposit):
 
 async def trader_movement(db, deposit, kind, *, available=False):
     row = await snapshot(db, deposit)
+    if row.executor_type == 'aggregator':
+        from app.services.aggregator_execution import executor_movement
+        return await executor_movement(db, deposit, row, kind, available=available)
     req = await db.get(Requisite, deposit.requisites_id)
     trader = await db.get(User, row.executor_id)
     if (not req or not trader or row.executor_type != 'trader' or req.trader_id != trader.id
@@ -157,6 +160,11 @@ async def trader_movement(db, deposit, kind, *, available=False):
 
 async def validate_confirmation(db, deposit, actor_id, evidence):
     row = await snapshot(db, deposit)
+    if row.executor_type == 'aggregator':
+        from app.services.aggregator_execution import verified_event_for
+        if actor_id is not None or not await verified_event_for(db, deposit, 'paid'):
+            raise CrossBorderError('verified provider payment evidence is required')
+        return
     actor = await db.get(User, actor_id) if actor_id else None
     if (not actor or not actor.is_active or actor.is_locked or actor.is_archived
             or not (actor.role in ('admin', 'superadmin') or (actor.role == 'trader' and actor.id == row.executor_id))):
@@ -232,14 +240,26 @@ async def reverse_credit(db, deposit, *, actor, reason, reference):
     context = row.financial_context
     from app.services.trader_finance import get_usdt_wallet
     # Same order as confirmation: Deposit -> trader wallet -> merchant balance.
-    await get_usdt_wallet(db, row.executor_id, for_update=True)
+    if row.executor_type == 'aggregator':
+        from app.services.aggregator_execution import wallet
+        await wallet(db, row.executor_id, lock=True)
+    else:
+        await get_usdt_wallet(db, row.executor_id, for_update=True)
     try:
         await debit_available(db, deposit.merchant_id, Decimal(context['merchant_payable_usdt']),
             deposit.id, f'local-deposit:{deposit.id}:merchant-refund', reason, currency='USDT', entry_type='local_refund')
     except LedgerError as exc:
         raise CrossBorderError('Merchant USDT assets are unavailable for an accounting refund') from exc
-    await move_usdt_wallet(db, row.executor_id, kind='credit', amount=Decimal(context['debit_usdt']),
+    movement = move_usdt_wallet
+    if row.executor_type == 'aggregator':
+        from app.services.aggregator_execution import move_wallet
+        movement = move_wallet
+    await movement(db, row.executor_id, kind='credit', amount=Decimal(context['debit_usdt']),
         operation_id=deposit.id, key=f'local-deposit:{deposit.id}:trader-refund', description=reason)
+    if row.executor_type == 'aggregator':
+        from app.models import AggregatorExecution
+        execution = await db.scalar(select(AggregatorExecution).where(AggregatorExecution.deposit_id == deposit.id))
+        execution.state = 'refunded'
     db.add(PlatformLedgerEntry(merchant_id=deposit.merchant_id, operation_id=deposit.id,
         entry_type='local_refund', amount=-Decimal(context['platform_margin_usdt']), currency='USDT',
         idempotency_key=f'local-deposit:{deposit.id}:margin-refund', description=reason[:500]))

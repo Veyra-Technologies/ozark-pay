@@ -148,6 +148,8 @@ class LedgerEntry(Base, TimestampMixin):
 
 class Deposit(Base, TimestampMixin):
     __tablename__='deposits'
+    financial_executor_type: Mapped[str|None]=mapped_column(String(32), nullable=True)
+    financial_executor_id: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('aggregator_accounts.id', ondelete='RESTRICT'), nullable=True)
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     merchant_id: Mapped[uuid.UUID]=mapped_column(ForeignKey('merchants.id', ondelete='CASCADE'), index=True)
     external_id: Mapped[str]=mapped_column(String(128), index=True)
@@ -167,6 +169,7 @@ class Deposit(Base, TimestampMixin):
         server_default=text("now() + interval '15 minutes'"),
     )
     __table_args__=(
+        CheckConstraint("(financial_executor_type IS NULL AND financial_executor_id IS NULL) OR COALESCE(financial_executor_type='aggregator' AND financial_executor_id IS NOT NULL AND currency='TJS' AND requisites_id IS NULL,false)", name='ck_deposit_external_executor'),
         UniqueConstraint('merchant_id','external_id', name='uq_deposit_merchant_external'),
         UniqueConstraint('merchant_id','idempotency_key', name='uq_deposit_merchant_idempotency'),
         Index('ix_deposits_status_expires_at', 'status', 'expires_at'),

@@ -49,9 +49,9 @@ class TariffPlan(Base, TimestampMixin):
     __tablename__ = 'country_tariff_plans'
     __table_args__ = (
         UniqueConstraint('scope_key', 'version', name='uq_country_tariff_version'),
-        CheckConstraint("party IN ('merchant','trader')", name='ck_country_tariff_party'),
+        CheckConstraint("party IN ('merchant','trader','aggregator')", name='ck_country_tariff_party'),
         CheckConstraint("direction IN ('kz-ge','ru','tj-tj')", name='ck_country_tariff_direction'),
-        CheckConstraint("(direction='kz-ge' AND ((basis='base_usdt' AND currency='USDT' AND ((party='merchant' AND country='KZ') OR (party='trader' AND country='GE'))) OR (basis='local_amount' AND ((party='merchant' AND country='KZ' AND currency='KZT') OR (party='trader' AND country='GE' AND currency='GEL'))))) OR (direction='ru' AND party='merchant' AND country='RU' AND currency='RUB' AND basis='local_amount') OR (direction='tj-tj' AND country='TJ' AND currency='TJS' AND basis='local_amount' AND party IN ('merchant','trader'))", name='ck_country_tariff_dimensions'),
+        CheckConstraint("(direction='kz-ge' AND ((basis='base_usdt' AND currency='USDT' AND ((party='merchant' AND country='KZ') OR (party='trader' AND country='GE'))) OR (basis='local_amount' AND ((party='merchant' AND country='KZ' AND currency='KZT') OR (party='trader' AND country='GE' AND currency='GEL'))))) OR (direction='ru' AND party='merchant' AND country='RU' AND currency='RUB' AND basis='local_amount') OR (direction='tj-tj' AND country='TJ' AND currency='TJS' AND basis='local_amount' AND party IN ('merchant','trader','aggregator'))", name='ck_country_tariff_dimensions'),
     )
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     scope_key: Mapped[str] = mapped_column(String(160), index=True)

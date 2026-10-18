@@ -84,17 +84,8 @@ async def move_usdt_wallet(db, trader_id, *, kind, amount, operation_id, key, de
         raise TraderFinanceError('insufficient available USDT collateral')
     if kind in ('release', 'debit') and wallet.hold < amount:
         raise TraderFinanceError('insufficient USDT reserve')
-    if kind == 'hold':
-        wallet.hold += amount
-    elif kind == 'release':
-        wallet.hold -= amount
-    elif kind == 'debit':
-        wallet.hold -= amount
-        wallet.balance -= amount
-    elif kind == 'debit_available':
-        wallet.balance -= amount
-    else:
-        wallet.balance += amount
+    from app.services.wallet_movements import collateral_delta
+    wallet.balance, wallet.hold = collateral_delta(wallet.balance, wallet.hold, kind, amount)
     entry = TraderWalletLedgerEntry(wallet_id=wallet.id, trader_id=trader_id,
         operation_id=operation_id, entry_type=kind, amount=amount, currency='USDT',
         balance_after=wallet.balance, hold_after=wallet.hold,

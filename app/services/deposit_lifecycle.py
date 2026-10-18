@@ -583,6 +583,10 @@ async def _finalize_unsuccessful_deposit(
             and proof.get('actor_id') == str(actor.id) and proof.get('confirmed') is True
             and len(str(proof.get('reference') or '').strip()) >= 4
             and not (deposit.metadata_json or {}).get('local_confirmation'))
+        if fixed.executor_type == 'aggregator':
+            from app.services.aggregator_execution import verified_event_for
+            provider_event = await verified_event_for(db, deposit, 'cancelled')
+            negative_review = negative_review or bool(provider_event and provider_event.no_credit_confirmed)
         if negative_review and await db.scalar(select(Appeal.id).where(
                 Appeal.operation_id == deposit.id, Appeal.status.in_(('opened', 'in_review'))).limit(1)):
             raise ValueError('Сначала завершите активную апелляцию')
