@@ -7,7 +7,7 @@ DIRECTION = 'tj-tj'
 PARSER_ID = 'bybit_p2p_tjs_green_avg3'
 MIN_AMOUNT = Decimal('10.00')
 PAYMENT_SYSTEMS = {'korti_milli': 'Корти Милли'}
-BLOCK_REASON = 'Приём TJ → TJ закрыт: источник Bybit P2P Green 1–3 и финансовая приёмка не подтверждены.'
+BLOCK_REASON = 'Приём TJ → TJ закрыт до отдельной финансовой приёмки и разрешения владельца.'
 QR_BLOCK_REASON = 'QR для TJ недоступен до утверждения формата и процедуры обработки.'
 
 

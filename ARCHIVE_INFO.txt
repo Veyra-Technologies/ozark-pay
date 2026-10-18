@@ -1,6 +1,10 @@
-OzarkPay source archive
-Generated (UTC): 2026-10-11T16:04:38+00:00
-Git branch: codex/tradespace-external-aggregator
-Base commit: d0470ad
-Includes current working-tree source changes.
-Excludes Git metadata, local secrets, databases, backups, uploads, logs, caches, virtual environments, runtime artifacts, and older archives.
+OzarkPay — TJ Wave 3.2 source release
+Release date: 2026-10-18
+Git branch: feature/tj-local-payments
+Wave 3.1 base: 74600f4d0f896f4f6599f7ec78da389ddd58f102
+Schema: 0043_generic_processor_protocol
+The exact archive revision is recorded in SOURCE_REVISION.txt in the delivered ZIP.
+The source excludes Git metadata, credentials/2FA, private environment files,
+Bybit vaults, databases, backups, uploads, logs, caches, test suites, QA harnesses,
+synthetic datasets, virtual environments, runtime artifacts and older archives.
+Timeweb/main are unchanged. Real TJ payments and Settlement remain disabled.

@@ -18,10 +18,56 @@ from app.core.config import settings
 from app.core.tajikistan import PARSER_ID
 
 ENDPOINT = 'https://api.bybit.com/v5/p2p/item/online'
+OFFICIAL_API_HOSTS = frozenset(('api.bybit.com', 'api.bytick.com', 'api.bybit.nl', 'api.bybit.tr',
+    'api.bybit.kz', 'api.bybitgeorgia.ge', 'api.bybit.ae', 'api.bybit.eu', 'api.bybit.id', 'api.manepa.jp'))
+PARSER_VERSION = 'green-avg3-v1'
 
 
 class BybitUnavailable(ValueError):
     pass
+
+
+def api_base_url():
+    from urllib.parse import urlsplit
+    value = settings.BYBIT_P2P_API_BASE_URL.rstrip('/')
+    parsed = urlsplit(value)
+    if (parsed.scheme != 'https' or parsed.hostname not in OFFICIAL_API_HOSTS or parsed.port not in (None, 443)
+            or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path):
+        raise BybitUnavailable('bybit_official_host_required')
+    return value
+
+
+async def readonly_request(key, secret, *, side=None):
+    """Only API-key information or listing advertisements; never order endpoints."""
+    path = '/v5/user/query-api' if side is None else '/v5/p2p/item/online'
+    if side is not None and side not in ('0', '1'):
+        raise BybitUnavailable('bybit_invalid_side')
+    body = '' if side is None else json.dumps({'tokenId': 'USDT', 'currencyId': 'TJS',
+        'side': side, 'page': '1', 'size': '10'}, separators=(',', ':'))
+    timestamp, window = str(int(time.time() * 1000)), '5000'
+    signature = hmac.new(secret.encode(), (timestamp + key + window + body).encode(), hashlib.sha256).hexdigest()
+    headers = {'Content-Type': 'application/json', 'X-BAPI-API-KEY': key,
+        'X-BAPI-TIMESTAMP': timestamp, 'X-BAPI-RECV-WINDOW': window, 'X-BAPI-SIGN': signature}
+    try:
+        async with httpx.AsyncClient(timeout=settings.BYBIT_P2P_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
+            response = await client.request('GET' if side is None else 'POST', api_base_url() + path,
+                content=body.encode() if side is not None else None, headers=headers)
+            if response.status_code != 200:
+                raise BybitUnavailable(f'bybit_http_{response.status_code}')
+            if len(response.content) > 2_000_000:
+                raise BybitUnavailable('bybit_response_too_large')
+            payload = response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        if isinstance(exc, BybitUnavailable):
+            raise
+        raise BybitUnavailable('bybit_request_failed') from None
+    if not isinstance(payload, dict):
+        raise BybitUnavailable('bybit_provider_error')
+    code = payload.get('ret_code', payload.get('retCode'))
+    if type(code) is not int or code != 0:
+        # Numeric provider errors are safe. Raw provider text and headers are not reflected.
+        raise BybitUnavailable(f'bybit_provider_code_{code}' if type(code) is int else 'bybit_provider_error')
+    return payload
 
 
 def verified_contract():
@@ -77,7 +123,8 @@ def normalize_ads(payload, *, request_side, ad_side, contract_reference,
         'request_side': request_side, 'side': ad_side, 'contract_reference': contract_reference,
         'positions': [1, 2, 3], 'ad_ids': ids, 'raw_values': [str(p) for p in prices],
         'rate': str(rate), 'observation_id': str(uuid4()), 'fetched_at': fetched_at.isoformat(),
-        'expires_at': expires.isoformat(), 'validation_status': 'verified'}
+        'expires_at': expires.isoformat(), 'validation_status': 'verified',
+        'ttl_seconds': ttl_seconds, 'parser_version': PARSER_VERSION}
 
 
 async def fetch_quote(*, ttl_seconds=60):
@@ -89,23 +136,8 @@ async def fetch_quote(*, ttl_seconds=60):
     secret = settings.BYBIT_P2P_API_SECRET.get_secret_value()
     if not key or not secret:
         raise BybitUnavailable('bybit_p2p_credentials_missing')
-    body = json.dumps({'tokenId': 'USDT', 'currencyId': 'TJS',
-        'side': settings.BYBIT_P2P_GREEN_REQUEST_SIDE, 'page': '1', 'size': '10'}, separators=(',', ':'))
-    timestamp, window = str(int(time.time() * 1000)), '5000'
-    sign = hmac.new(secret.encode(), (timestamp + key + window + body).encode(), hashlib.sha256).hexdigest()
-    headers = {'Content-Type': 'application/json', 'X-BAPI-API-KEY': key,
-        'X-BAPI-TIMESTAMP': timestamp, 'X-BAPI-RECV-WINDOW': window, 'X-BAPI-SIGN': sign}
     started = datetime.now(timezone.utc)
-    try:
-        async with httpx.AsyncClient(timeout=settings.BYBIT_P2P_TIMEOUT_SECONDS, follow_redirects=False) as client:
-            response = await client.post(ENDPOINT, content=body, headers=headers)
-            response.raise_for_status()
-            if len(response.content) > 2_000_000:
-                raise BybitUnavailable('bybit_response_too_large')
-            payload = response.json()
-    except (httpx.HTTPError, ValueError) as exc:
-        # Never persist or reflect request headers, API keys, signature or provider text.
-        raise BybitUnavailable('bybit_request_failed') from exc
+    payload = await readonly_request(key, secret, side=settings.BYBIT_P2P_GREEN_REQUEST_SIDE)
     return normalize_ads(payload, request_side=settings.BYBIT_P2P_GREEN_REQUEST_SIDE,
         ad_side=settings.BYBIT_P2P_GREEN_AD_SIDE,
         contract_reference=settings.BYBIT_P2P_GREEN_CONTRACT_REFERENCE,
@@ -133,10 +165,12 @@ async def cached_state(config, *, refresh):
                         error = None
                     except BybitUnavailable as exc:
                         error = str(exc)
+                        quote = None
+                        await redis.delete(prefix + ':quote')
                         await redis.set(prefix + ':error', error, ex=120)
             finally:
                 await redis.eval("if redis.call('GET',KEYS[1])==ARGV[1] then return redis.call('DEL',KEYS[1]) end return 0", 1, prefix + ':lock', token)
-        return {'quote': quote, 'last_error': error}
+        return {'quote': None if error else quote, 'last_error': error}
     except (RedisError, ValueError, TypeError):
         return {'quote': None, 'last_error': 'bybit_cache_unavailable'}
     finally:

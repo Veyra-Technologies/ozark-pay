@@ -3,7 +3,7 @@
 <div class="grid">
 {% for currency, label in [('TJS','Локальный баланс'),('USDT','Обеспечение / расчётные обязательства')] %}
 {% set wallet = tj_cabinet.wallets.get(currency,{}) %}
-<div class="metric"><b>{{ 'Расчётные обязательства' if role == 'aggregator' and currency == 'USDT' else label }}</b><p data-raw-value>{{ wallet.get('available',0)|usdt_display if currency == 'USDT' else wallet.get('available',0)|decimal_display }} {{ currency }}</p><small data-raw-value>В резерве: {{ wallet.get('hold',0)|usdt_display if currency == 'USDT' else wallet.get('hold',0)|decimal_display }} {{ currency }}</small></div>
+<div class="metric"><b>{{ 'Расчётные обязательства' if role == 'aggregator' and currency == 'USDT' else label }}</b><p data-raw-value>{{ wallet.get('available',0)|tj_money if currency == 'USDT' else wallet.get('available',0)|decimal_display }} {{ currency }}</p><small data-raw-value>В резерве: {{ wallet.get('hold',0)|tj_money if currency == 'USDT' else wallet.get('hold',0)|decimal_display }} {{ currency }}</small></div>
 {% endfor %}
 <div class="metric"><b>Успешных платежей</b><p>{{ tj_cabinet.successful_count }}</p><small>Оборот: {{ tj_cabinet.turnover_tjs|decimal_display }} TJS</small></div>
 </div>

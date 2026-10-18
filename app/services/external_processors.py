@@ -53,8 +53,8 @@ from app.services.webhook_enqueue import enqueue_webhook_delivery
 
 
 logger = logging.getLogger('app.external_processors')
-TRADESPACE_METHODS = {'sbp', 'c2c', 'mobile_commerce', 'sbp_qr'}
-TRADESPACE_CURRENCIES = {'RUB'}
+PROCESSOR_METHODS = {'sbp', 'c2c', 'mobile_commerce', 'sbp_qr'}
+PROCESSOR_CURRENCIES = {'RUB'}
 COUNTED_PAYMENT_STATUSES = {'prepared', 'sending', 'unknown', 'created', 'paid'}
 TERMINAL_EXTERNAL_STATUSES = {'paid', 'failed', 'expired', 'cancelled'}
 FINAL_REQUEST_STATUSES = TERMINAL_EXTERNAL_STATUSES | {'refused'}
@@ -84,7 +84,7 @@ def _clean_methods(values) -> list[str]:
         value = str(raw).strip().lower()
         if value == 'mobile':
             value = 'mobile_commerce'
-        if value in TRADESPACE_METHODS and value not in result:
+        if value in PROCESSOR_METHODS and value not in result:
             result.append(value)
     if not result:
         raise ExternalProcessorError('methods_required', 'Выберите хотя бы один совместимый метод')
@@ -95,10 +95,10 @@ def _clean_currencies(values) -> list[str]:
     result = []
     for raw in values or []:
         value = str(raw).strip().upper()
-        if value in TRADESPACE_CURRENCIES and value not in result:
+        if value in PROCESSOR_CURRENCIES and value not in result:
             result.append(value)
     if not result:
-        raise ExternalProcessorError('currencies_required', 'TradeSpace принимает платежные заявки только в RUB')
+        raise ExternalProcessorError('currencies_required', 'Внешняя площадка принимает платежные заявки только в RUB')
     return result
 
 
@@ -151,8 +151,8 @@ def _connection_values(*, name, adapter_type, environment, api_base_url, api_key
                        webhook_key_id, webhook_secret, supported_methods, supported_currencies,
                        min_amount, max_amount, daily_limit, monthly_limit, executor_fee_percent,
                        priority, routing_enabled) -> dict:
-    if (adapter_type or '').strip().lower() != 'tradespace':
-        raise ExternalProcessorError('adapter_unsupported', 'Поддерживается только адаптер TradeSpace')
+    if (adapter_type or '').strip().lower() != 'merchant_hmac_v2':
+        raise ExternalProcessorError('adapter_unsupported', 'Поддерживается только адаптер внешней площадки')
     clean_name = (name or '').strip()
     if not clean_name or len(clean_name) > 160:
         raise ExternalProcessorError('name_invalid', 'Название обязательно и должно быть короче 160 символов')
@@ -165,12 +165,12 @@ def _connection_values(*, name, adapter_type, environment, api_base_url, api_key
     monthly = money(monthly_limit) if monthly_limit not in (None, '') else None
     fee = rate(executor_fee_percent)
     if not (api_key or '').strip() or not (api_secret or '').strip():
-        raise ExternalProcessorError('api_credentials_required', 'Нужны API key и API secret TradeSpace')
+        raise ExternalProcessorError('api_credentials_required', 'Нужны API key и API secret внешней площадки')
     if not (webhook_key_id or '').strip() or not (webhook_secret or '').strip():
-        raise ExternalProcessorError('webhook_credentials_required', 'Нужны Key-ID и secret отдельного webhook-ключа TradeSpace')
+        raise ExternalProcessorError('webhook_credentials_required', 'Нужны Key-ID и secret отдельного webhook-ключа внешней площадки')
     return {
         'name': clean_name,
-        'adapter_type': 'tradespace',
+        'adapter_type': 'merchant_hmac_v2',
         'environment': environment,
         'api_base_url': normalize_processor_base_url(api_base_url, environment),
         'api_key': (api_key or '').strip(),
@@ -228,6 +228,7 @@ async def _snapshot_connection(db: AsyncSession, connection: ExternalProcessorCo
         adapter_type=connection.adapter_type,
         environment=connection.environment,
         api_base_url=connection.api_base_url,
+        webhook_header_prefix=connection.webhook_header_prefix,
         api_key_encrypted=connection.api_key_encrypted,
         api_secret_encrypted=connection.api_secret_encrypted,
         webhook_key_id=connection.webhook_key_id,
@@ -356,13 +357,13 @@ async def _request(version: ExternalProcessorVersion | ExternalProcessorConnecti
     parsed_url = urlsplit(url)
     if version.environment == 'sandbox' and parsed_url.hostname == 'host.docker.internal':
         # Docker Desktop reaches the Windows host through this DNS alias, while
-        # the independently configured local TradeSpace accepts loopback Host.
+        # the independently configured local processor accepts loopback Host.
         headers['Host'] = f'127.0.0.1:{parsed_url.port or 80}'
     try:
         async with httpx.AsyncClient(timeout=settings.EXTERNAL_PROCESSOR_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False) as client:
             response = await client.request(method, url, content=body if body else None, headers=headers)
     except httpx.TransportError as exc:
-        raise ExternalProcessorError('external_processor_result_unknown', 'Ответ TradeSpace не получен; состояние будет сверено автоматически', status_code=503, unknown=True) from exc
+        raise ExternalProcessorError('external_processor_result_unknown', 'Ответ внешней площадки не получен; состояние будет сверено автоматически', status_code=503, unknown=True) from exc
     try:
         data = response.json()
     except ValueError:
@@ -387,7 +388,7 @@ async def check_connection(db: AsyncSession, connection: ExternalProcessorConnec
         elif response.status_code in {401, 403}:
             ok, message = False, f'Авторизация отклонена: {_response_error(response)}'
         else:
-            ok, message = False, f'Неожиданный ответ TradeSpace: HTTP {response.status_code} ({_response_error(response)})'
+            ok, message = False, f'Неожиданный ответ внешней площадки: HTTP {response.status_code} ({_response_error(response)})'
     except ExternalProcessorError as exc:
         ok, message = False, str(exc)
     connection.last_checked_at = datetime.now(timezone.utc)
@@ -495,16 +496,16 @@ def _parse_iso(value) -> datetime | None:
 
 def _validate_operation_payload(payment: ExternalProcessorPayment, payload: dict) -> None:
     if str(payload.get('external_id') or '') != payment.external_order_id:
-        raise ExternalProcessorError('external_response_mismatch', 'TradeSpace вернул другой external_id', status_code=502)
+        raise ExternalProcessorError('external_response_mismatch', 'Внешняя площадка вернула другой external_id', status_code=502)
     if payload.get('amount') is not None and money(payload['amount']) != money(payment.amount):
-        raise ExternalProcessorError('external_response_mismatch', 'TradeSpace вернул другую сумму', status_code=502)
+        raise ExternalProcessorError('external_response_mismatch', 'Внешняя площадка вернула другую сумму', status_code=502)
     if str(payload.get('currency') or payment.currency).upper() != payment.currency:
-        raise ExternalProcessorError('external_response_mismatch', 'TradeSpace вернул другую валюту', status_code=502)
+        raise ExternalProcessorError('external_response_mismatch', 'Внешняя площадка вернула другую валюту', status_code=502)
     returned_method = str(payload.get('method') or payload.get('payment_method') or payment.payment_method)
     if returned_method == 'mobile':
         returned_method = 'mobile_commerce'
     if returned_method != payment.payment_method:
-        raise ExternalProcessorError('external_response_mismatch', 'TradeSpace вернул другой метод', status_code=502)
+        raise ExternalProcessorError('external_response_mismatch', 'Внешняя площадка вернула другой метод', status_code=502)
 
 
 def _preserve_terminal_state(payment: ExternalProcessorPayment, deposit: Deposit) -> bool:
@@ -538,7 +539,7 @@ async def _apply_created_response(db: AsyncSession, payment: ExternalProcessorPa
     _validate_operation_payload(payment, payload)
     details = payload.get('payment_details')
     if not isinstance(details, dict) or not details:
-        raise ExternalProcessorError('external_requisites_missing', 'TradeSpace не вернул платёжные реквизиты', status_code=502)
+        raise ExternalProcessorError('external_requisites_missing', 'Внешняя площадка не вернула платёжные реквизиты', status_code=502)
     deposit = (await db.execute(select(Deposit).where(Deposit.id == payment.deposit_id).with_for_update().execution_options(populate_existing=True))).scalar_one()
     _preserve_terminal_state(payment, deposit)
     _record_created_response(payment, payload, details, response.status_code)
@@ -598,10 +599,10 @@ async def dispatch_payment(db: AsyncSession, payment_id: uuid.UUID) -> Deposit:
     if response.status_code >= 500:
         payment.request_status = 'unknown'
         await db.commit()
-        raise ExternalProcessorError('external_processor_result_unknown', 'TradeSpace вернул временную ошибку; состояние будет сверено автоматически', status_code=503, unknown=True)
+        raise ExternalProcessorError('external_processor_result_unknown', 'Внешняя площадка вернула временную ошибку; состояние будет сверено автоматически', status_code=503, unknown=True)
     payment.request_status = 'refused'
     await db.commit()
-    raise ExternalProcessorError('external_processor_refused', f'TradeSpace отклонил заявку: {error}', status_code=409)
+    raise ExternalProcessorError('external_processor_refused', f'Внешняя площадка отклонила заявку: {error}', status_code=409)
 
 
 async def reconcile_payment(db: AsyncSession, payment_id: uuid.UUID, *, retry_create_if_missing: bool = True) -> Deposit | None:
@@ -623,7 +624,7 @@ async def reconcile_payment(db: AsyncSession, payment_id: uuid.UUID, *, retry_cr
                 confirmation = await confirm_deposit_payment(
                     db, deposit.id, actor_id=None, actor_ip='',
                     audit_action='external_processor_deposit_reconciled_paid',
-                    description='TradeSpace external processor reconciliation', commit=False,
+                    description='External processor reconciliation', commit=False,
                 )
             except DepositConfirmationConflict:
                 await db.rollback()
@@ -720,13 +721,19 @@ def _verify_webhook_signature(secret: str, timestamp: str, body: bytes, signatur
     return hmac.compare_digest(expected, (signature or '').strip().lower())
 
 
-async def handle_tradespace_webhook(db: AsyncSession, connection_id: uuid.UUID, *, headers, body: bytes, source_ip: str | None) -> tuple[int, tuple[uuid.UUID, ...]]:
-    event_id = (headers.get('X-TradeSpace-Event-ID') or '').strip()
-    event_type = (headers.get('X-TradeSpace-Event-Type') or '').strip()
-    timestamp = (headers.get('X-TradeSpace-Timestamp') or '').strip()
-    key_id = (headers.get('X-TradeSpace-Key-ID') or '').strip()
-    signature_version = (headers.get('X-TradeSpace-Signature-Version') or '').strip()
-    signature = (headers.get('X-TradeSpace-Signature') or '').strip()
+async def handle_processor_webhook(db: AsyncSession, connection_id: uuid.UUID, *, headers, body: bytes, source_ip: str | None) -> tuple[int, tuple[uuid.UUID, ...]]:
+    connection = await db.get(ExternalProcessorConnection, connection_id)
+    if not connection:
+        raise ExternalProcessorError('connection_not_found', 'Подключение не найдено', status_code=404)
+    prefix = connection.webhook_header_prefix
+    from starlette.datastructures import Headers
+    headers = Headers(headers)
+    event_id = (headers.get(prefix + '-Event-ID') or '').strip()
+    event_type = (headers.get(prefix + '-Event-Type') or '').strip()
+    timestamp = (headers.get(prefix + '-Timestamp') or '').strip()
+    key_id = (headers.get(prefix + '-Key-ID') or '').strip()
+    signature_version = (headers.get(prefix + '-Signature-Version') or '').strip()
+    signature = (headers.get(prefix + '-Signature') or '').strip()
     correlation_id = (headers.get('X-Correlation-ID') or '').strip() or None
     if not all((event_id, event_type, timestamp, key_id, signature)) or signature_version != '1':
         raise ExternalProcessorError('webhook_headers_invalid', 'Обязательные заголовки webhook отсутствуют', status_code=401)
@@ -811,7 +818,7 @@ async def handle_tradespace_webhook(db: AsyncSession, connection_id: uuid.UUID, 
                 result = await confirm_deposit_payment(
                     db, deposit.id, actor_id=None, actor_ip=source_ip or '',
                     audit_action='external_processor_deposit_paid',
-                    description='TradeSpace external processor confirmation', commit=False,
+                    description='External processor confirmation', commit=False,
                 )
             except DepositConfirmationConflict as exc:
                 payment_id = payment.id

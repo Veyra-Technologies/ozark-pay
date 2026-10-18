@@ -86,6 +86,8 @@ class Settings(BaseSettings):
     XE_MAX_AGE_SECONDS: int = Field(default=120, ge=30, le=3600)
     # Read-only documented P2P ads endpoint. No anonymous/private endpoint fallback.
     BYBIT_P2P_ENABLED: bool = False
+    BYBIT_P2P_API_BASE_URL: str = 'https://api.bybit.com'
+    BYBIT_P2P_FETCH_IN_PROCESS: bool = False
     BYBIT_P2P_API_KEY: SecretStr = SecretStr('')
     BYBIT_P2P_API_SECRET: SecretStr = SecretStr('')
     BYBIT_P2P_GREEN_REQUEST_SIDE: str = ''
@@ -111,7 +113,7 @@ class Settings(BaseSettings):
     CABINET_POLL_INTERVAL_SECONDS: int = 10
     EXTERNAL_PROCESSOR_TIMEOUT_SECONDS: float = Field(default=8, ge=1, le=30)
     EXTERNAL_PROCESSOR_WEBHOOK_TOLERANCE_SECONDS: int = Field(default=300, ge=30, le=3600)
-    EXTERNAL_PROCESSOR_SANDBOX_HOSTS: str = 'host.docker.internal,localhost,127.0.0.1,tradespace'
+    EXTERNAL_PROCESSOR_SANDBOX_HOSTS: str = 'host.docker.internal,localhost,127.0.0.1'
 
     @property
     def cors_list(self) -> list[str]:

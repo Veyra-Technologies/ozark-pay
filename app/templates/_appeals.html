@@ -29,7 +29,7 @@
     <td><span class="cell-mono cell-ellipsis" title="{{ dep.external_id if dep and dep.external_id else a.operation_id }}">{{ dep.external_id if dep and dep.external_id else a.operation_id }}</span></td>
     <td>{{ ad.get('merchant_name','—') }}</td>
     <td>{{ ad.get('trader_email','—') }}</td>
-    <td><b>{{ ad.get('amount_claimed','0.00') }}</b> {{ dep.currency if dep else 'RUB' }}{% if ad.get('corrected_amount') %}<div class="compact-note">верная сумма: {{ (ad.get('corrected_amount'))|decimal_display }} {{ dep.currency if dep else 'RUB' }}</div>{% endif %}</td>
+    <td><b>{{ ad.get('amount_claimed','0.00')|tj_money if is_tj_cabinet else ad.get('amount_claimed','0.00') }}</b> {{ dep.currency if dep else 'RUB' }}{% if ad.get('corrected_amount') %}<div class="compact-note">верная сумма: {{ (ad.get('corrected_amount'))|decimal_display }} {{ dep.currency if dep else 'RUB' }}</div>{% endif %}</td>
     <td>{% if ad.get('is_timer_active') %}<span class="timer" data-countdown="{{ ad.get('remaining_seconds',0) }}">90:00</span>{% else %}<span class="small muted">{{ ad.get('deadline_iso','—') }}</span>{% endif %}</td>
     <td>{% if a.status == 'approved' %}<span class="status-pill status-ok">approved</span>{% elif a.status in ['opened','in_review','returned_to_processing'] %}<span class="status-pill status-wait">{{ 'waiting' if a.status == 'in_review' else a.status }}</span>{% elif a.status in ['rejected','closed'] %}<span class="status-pill status-bad">{{ a.status|status_label }}</span>{% else %}<span class="status-pill status-neutral">{{ a.status|status_label }}</span>{% endif %}</td>
     <td><button class="secondary appeal-open" type="button" data-modal-open="appealModal{{ loop.index }}">Открыть</button></td>

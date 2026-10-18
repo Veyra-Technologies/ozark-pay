@@ -312,15 +312,61 @@ async def save_executor_tariff(db, *, actor, account, tiers, effective_from, otp
     return plan
 
 
-async def own_context(db, account):
+async def own_context(db, account, *, request=None):
     """The provider sees only its obligation, never Merchant rates or margin."""
     integration = await db.scalar(select(AggregatorIntegration).where(AggregatorIntegration.aggregator_id == account.id))
     version = await integration_version(db, integration) if integration else None
     wallets = list(await db.scalars(select(AggregatorWallet).where(AggregatorWallet.aggregator_id == account.id)))
-    operations = (await db.execute(select(Deposit, AggregatorExecution, OperationFeeSnapshot).join(
+    operation_query = select(Deposit, AggregatorExecution, OperationFeeSnapshot).join(
         AggregatorExecution, AggregatorExecution.deposit_id == Deposit.id).join(
         OperationFeeSnapshot, OperationFeeSnapshot.deposit_id == Deposit.id).where(
-        AggregatorExecution.aggregator_id == account.id).order_by(Deposit.created_at.desc()).limit(100))).all()
+        AggregatorExecution.aggregator_id == account.id, Deposit.currency == 'TJS')
+    filters = request.query_params if request else {}
+    from datetime import timedelta, time as day_time
+    from sqlalchemy import Numeric, String, cast, or_
+    from urllib.parse import urlencode
+    if filters.get('tj_period') in ('1', '7', '30', '90'):
+        operation_query = operation_query.where(Deposit.created_at >= now() - timedelta(days=int(filters['tj_period'])))
+    for field, end in [('tj_from', False), ('tj_to', True)]:
+        if filters.get(field):
+            try:
+                value = datetime.combine(datetime.strptime(filters[field], '%Y-%m-%d').date(), day_time.min, timezone.utc)
+            except ValueError as exc:
+                from fastapi import HTTPException
+                raise HTTPException(422, 'Дата должна иметь формат ГГГГ-ММ-ДД') from exc
+            operation_query = operation_query.where(Deposit.created_at < value + timedelta(days=1)) if end else operation_query.where(Deposit.created_at >= value)
+    scoped = operation_query.with_only_columns(Deposit.id, Deposit.status).subquery()
+    counts = dict((await db.execute(select(scoped.c.status, func.count()).group_by(scoped.c.status))).all())
+    total = sum(counts.values())
+    success = counts.get('paid', 0)
+    failed = sum(counts.get(s, 0) for s in ('failed', 'cancelled', 'expired', 'refunded'))
+    completed = success + failed
+    finance = OperationFeeSnapshot.financial_context
+    paid = (await db.execute(select(func.coalesce(func.sum(Deposit.amount), 0),
+        func.coalesce(func.sum(cast(finance['debit_usdt'].as_string(), Numeric(38, 12))), 0),
+        func.coalesce(func.sum(cast(finance['executor_fee_usdt'].as_string(), Numeric(38, 12))), 0))
+        .join(OperationFeeSnapshot, OperationFeeSnapshot.deposit_id == Deposit.id)
+        .where(Deposit.id.in_(select(scoped.c.id)), Deposit.status == 'paid'))).one()
+    statistics = {'total': total, 'successful': success, 'failed': failed, 'active': total - completed,
+        'conversion': Decimal(success) * 100 / Decimal(completed) if completed else Decimal(0),
+        'turnover_tjs': paid[0], 'settled_usdt': paid[1], 'fee_usdt': paid[2]}
+    if filters.get('tj_status') in ('created', 'pending', 'paid', 'failed', 'cancelled', 'expired', 'refunded', 'appeal_opened'):
+        operation_query = operation_query.where(Deposit.status == filters['tj_status'])
+    search = filters.get('tj_query', '').strip()[:120]
+    if search:
+        operation_query = operation_query.where(or_(cast(Deposit.id, String).contains(search, autoescape=True),
+            Deposit.external_id.contains(search, autoescape=True), AggregatorExecution.provider_order_id.contains(search, autoescape=True)))
+    filtered_count = await db.scalar(select(func.count()).select_from(operation_query.subquery()))
+    try:
+        page = max(1, min(int(filters.get('tj_page', '1')), 1000000))
+    except (TypeError, ValueError):
+        page = 1
+    pages = max(1, (filtered_count + 24) // 25)
+    page = min(page, pages)
+    operations = (await db.execute(operation_query.order_by(Deposit.created_at.desc(), Deposit.id.desc()).offset((page - 1) * 25).limit(25))).all()
+    def page_url(number):
+        values = {k: v for k, v in filters.items() if k.startswith('tj_') or k == 'section'}
+        return '?' + urlencode({**values, 'tj_page': number})
     own_operations = [{'id': str(dep.id), 'amount_tjs':dep.amount, 'status':dep.status,
         'provider_order_id':exe.provider_order_id, 'external_state':exe.state,
         'debit_usdt':snap.financial_context['debit_usdt'], 'reserve_usdt':snap.financial_context['reserve_usdt'],
@@ -334,7 +380,9 @@ async def own_context(db, account):
     return {'account':account, 'integration':integration, 'version':version,
         'wallets': {w.currency:{'balance':w.balance,'hold':w.hold,'available':w.balance-w.hold} for w in wallets},
         'operations':own_operations, 'journal':entries, 'plan':public_plan(plan) if plan else None,
-        'successful_count':count,'turnover_tjs':turnover}
+        'successful_count':count,'turnover_tjs':turnover, 'statistics': statistics,
+        'pagination': {'page': page, 'pages': pages, 'count': filtered_count,
+            'previous': page_url(page - 1) if page > 1 else None, 'next': page_url(page + 1) if page < pages else None}}
 
 
 def payment_request(deposit, execution):

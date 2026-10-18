@@ -340,6 +340,7 @@ templates.env.filters['dt_compact'] = dt_compact
 templates.env.filters['dt_full'] = dt_full
 templates.env.filters['money_rub'] = money_rub
 templates.env.filters['decimal_display'] = decimal_display
+templates.env.filters['tj_money'] = decimal_display
 templates.env.filters['usdt_display'] = usdt_display
 templates.env.filters['status_label'] = status_label
 templates.env.filters['short_identifier'] = short_identifier
@@ -1818,7 +1819,7 @@ async def _require_external_processor_editor(request: Request, db: AsyncSession)
 def _external_processor_form_values(form) -> dict:
     return {
         'name': form.get('name', ''),
-        'adapter_type': form.get('adapter_type', 'tradespace'),
+        'adapter_type': form.get('adapter_type', 'merchant_hmac_v2'),
         'environment': form.get('environment', 'sandbox'),
         'api_base_url': form.get('api_base_url', ''),
         'api_key': form.get('api_key', ''),
@@ -5592,7 +5593,7 @@ async def role_cabinet(
             str(connection.id): connection.name for connection in external_processor_connections
         }
         external_processor_callback_urls = {
-            str(connection.id): str(request.url_for('tradespace_webhook', connection_id=str(connection.id)))
+            str(connection.id): str(request.url_for('external_processor_webhook', protocol='merchant-v2', connection_id=str(connection.id)))
             for connection in external_processor_connections
         }
         external_processor_ids = [connection.id for connection in external_processor_connections]
@@ -6408,23 +6409,29 @@ async def role_cabinet(
     tj_trader = context.get('profile_working_account') or trader_subject
     if role == 'aggregator':
         tj_merchant = await db.scalar(select(Merchant).where(Merchant.owner_id == user.id, Merchant.working_country == 'TJ'))
-    context['tj_cabinet'] = await tj_context(db, merchant=tj_merchant) if tj_merchant and tj_merchant.working_country == 'TJ' else await tj_context(db, trader=tj_trader)
+    context['tj_cabinet'] = await tj_context(db, merchant=tj_merchant, request=request) if tj_merchant and tj_merchant.working_country == 'TJ' else await tj_context(db, trader=tj_trader, request=request)
     context['is_tj_cabinet'] = bool(context['tj_cabinet'])
+    if context['is_tj_cabinet']:
+        from app.services.rate_registry import parser_state
+        context['tj_rate_state'] = await parser_state(db, 'bybit_p2p_tjs_green_avg3', refresh=False, persist=False)
     if context['is_tj_cabinet'] and role == 'merchant':
         context['merchant_local_docker_api_base_url'] = (
             f'http://host.docker.internal:{request.url.port or 80}/api/v1/merchant'
             if request.url.hostname in ('127.0.0.1', 'localhost') and request.url.scheme == 'http'
             else context['merchant_api_base_url'])
     if context['is_tj_cabinet'] and role == 'aggregator':
-        context['sections'] = ['Обзор', 'Операции', 'Кошелёк', 'Статистика', 'Тарифы', 'API-интеграция', 'Безопасность']
+        context['sections'] = ['Обзор', 'Операции', 'Кошелёк', 'Статистика', 'API-интеграция', 'Безопасность']
         account = await db.scalar(select(AggregatorAccount).where(AggregatorAccount.platform_merchant_id == tj_merchant.id))
         context['tj_aggregator'] = account
         from app.services.aggregator_execution import own_context
-        context['external_aggregator'] = await own_context(db, account) if account else None
+        context['external_aggregator'] = await own_context(db, account, request=request) if account else None
     if context['is_tj_cabinet'] and role in ('merchant','trader','operator'):
-        context['sections'] = [s for s in sections if s not in ('Трансгран','Rolling','Settle — Россия','Settle — Казахстан','Выплаты','Вывод средств')]
-        if 'Тарифы' not in context['sections']:
-            context['sections'].append('Тарифы')
+        context['sections'] = [s for s in sections if s not in ('Трансгран','Тарифы','Rolling','Settle — Россия','Settle — Казахстан','Выплаты','Вывод средств')]
+        if role == 'merchant':
+            context['sections'].extend(['Settlement', 'Rolling'])
+        # Obsolete customer tariff bookmarks cannot expose staff tariff editors.
+        if request.query_params.get('section', '').casefold() in ('tariffs', 'тарифы'):
+            return RedirectResponse(cabinet_base, status_code=303)
     if role in ('admin', 'superadmin'):
         context['aggregator_tj_tariffs'] = {}
         for account in aggregator_accounts:

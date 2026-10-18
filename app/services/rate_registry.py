@@ -44,9 +44,13 @@ async def configuration(db, parser_id):
 
 
 def public_config(row):
+    policy = dict(PARSER_POLICY.get(row.parser_id, {'deprecated': True}))
+    parameters = {**policy, **row.parameters}
+    if row.parser_id == 'bybit_p2p_tjs_green_avg3':
+        parameters['contract_confirmed'] = bybit_p2p.verified_contract()
     return {'id': str(row.id), 'parser_id': row.parser_id, 'version': row.version,
             'country': row.country, 'direction': row.direction, 'active': row.is_active,
-            'parameters': {**PARSER_POLICY.get(row.parser_id, {'deprecated': True}), **row.parameters},
+            'parameters': parameters,
             'created_by': str(row.created_by) if row.created_by else None,
             'created_at': row.created_at.isoformat() if row.created_at else None}
 
@@ -134,7 +138,7 @@ async def parser_state(db, parser_id, *, refresh=False, persist=True):
     if not config.is_active:
         return {**state, 'last_error': 'parser_disabled'}
     if parser_id == 'bybit_p2p_tjs_green_avg3':
-        provider = await bybit_p2p.cached_state(config, refresh=refresh)
+        provider = await bybit_p2p.cached_state(config, refresh=refresh and settings.BYBIT_P2P_FETCH_IN_PROCESS)
     elif parser_id in binance_p2p.PROFILES:
         provider = await binance_p2p.get_state(refresh=refresh, profile=binance_p2p.PROFILES[parser_id],
             refresh_seconds=config.parameters['refresh_seconds'], max_age=config.parameters['ttl_seconds'])
@@ -144,6 +148,8 @@ async def parser_state(db, parser_id, *, refresh=False, persist=True):
         return {**state, 'last_error': 'local_display_parser_only'}
     quote = provider.get('quote')
     state['last_error'] = provider.get('last_error') or provider.get('code')
+    if parser_id == 'bybit_p2p_tjs_green_avg3' and state['last_error']:
+        return {**state, 'quote': None}
     if not quote:
         return state
     try:
@@ -174,6 +180,8 @@ async def parser_state(db, parser_id, *, refresh=False, persist=True):
         snapshot = {**quote, **PARSER_POLICY[parser_id], 'configuration_id': str(config.id),
                     'configuration_version': config.version, 'country': config.country, 'direction': config.direction,
                     'expires_at': expires.isoformat(), 'fetched_at': fetched.isoformat(), 'validation_status': 'verified'}
+        if parser_id == 'bybit_p2p_tjs_green_avg3':
+            snapshot['contract_confirmed'] = bybit_p2p.verified_contract()
         state.update(available=bool(fresh), status='current' if fresh else 'stale',
                      quote=snapshot, age_seconds=int((now - fetched).total_seconds()))
         if fresh and persist:

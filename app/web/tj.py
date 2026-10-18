@@ -2,13 +2,17 @@
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from datetime import datetime, time, timedelta, timezone
+from decimal import Decimal
+from urllib.parse import urlencode
+
+from sqlalchemy import Numeric, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.v1.tj import TariffIn
 from app.core.tajikistan import admission_status
 from app.db.session import get_db
-from app.models import Balance, Deposit, OperationFeeSnapshot, Requisite, TariffPlan, TraderWallet, User
+from app.models import Balance, Deposit, LedgerEntry, MerchantSettlement, OperationFeeSnapshot, Requisite, TariffPlan, TraderWallet, TraderWalletLedgerEntry, User
 from app.services.country_tariffs import public_plan
 from app.services.crossborder_money import CrossBorderError
 from app.services.tj_cabinets import personal_plan, save_personal_plan
@@ -54,7 +58,7 @@ async def save_tariff(request: Request, db: AsyncSession=Depends(get_db)):
         return JSONResponse({'detail': str(exc) if isinstance(exc, CrossBorderError) else 'Проверьте диапазоны, дату и процент комиссии.'}, status_code=422)
 
 
-async def cabinet_context(db, *, merchant=None, trader=None):
+async def cabinet_context(db, *, merchant=None, trader=None, request=None):
     subject = merchant or trader
     if not subject or subject.working_country != 'TJ':
         return {}
@@ -70,14 +74,61 @@ async def cabinet_context(db, *, merchant=None, trader=None):
     query = select(func.count(),func.coalesce(func.sum(Deposit.amount),0)).where(Deposit.currency == 'TJS', Deposit.status == 'paid')
     query = query.where(Deposit.merchant_id == subject.id) if merchant else query.join(Requisite,Requisite.id == Deposit.requisites_id).where(Requisite.trader_id == subject.id,Requisite.country == 'TJ')
     count,turnover = (await db.execute(query)).one()
-    recent = []
-    if merchant:
-        recent = (await db.execute(select(Deposit).where(Deposit.merchant_id == subject.id,
-            Deposit.currency == 'TJS').order_by(Deposit.created_at.desc()).limit(50))).scalars().all()
-    else:
-        recent = (await db.execute(select(Deposit).join(Requisite,Requisite.id == Deposit.requisites_id)
-            .where(Requisite.trader_id == subject.id,Requisite.country == 'TJ',Deposit.currency == 'TJS')
-            .order_by(Deposit.created_at.desc()).limit(50))).scalars().all()
+    base = select(Deposit).where(Deposit.currency == 'TJS')
+    base = base.where(Deposit.merchant_id == subject.id) if merchant else base.join(
+        Requisite, Requisite.id == Deposit.requisites_id).where(Requisite.trader_id == subject.id, Requisite.country == 'TJ')
+    filters = request.query_params if request else {}
+    period = filters.get('tj_period', 'all')
+    if period in ('1', '7', '30', '90'):
+        base = base.where(Deposit.created_at >= datetime.now(timezone.utc) - timedelta(days=int(period)))
+    for field, end in [('tj_from', False), ('tj_to', True)]:
+        if filters.get(field):
+            try:
+                value = datetime.combine(datetime.strptime(filters[field], '%Y-%m-%d').date(), time.min, timezone.utc)
+            except ValueError as exc:
+                raise HTTPException(422, 'Дата должна иметь формат ГГГГ-ММ-ДД') from exc
+            base = base.where(Deposit.created_at < value + timedelta(days=1)) if end else base.where(Deposit.created_at >= value)
+    scoped = base.subquery()
+    counts = dict((await db.execute(select(scoped.c.status, func.count()).group_by(scoped.c.status))).all())
+    total = sum(counts.values())
+    success = counts.get('paid', 0)
+    failed = sum(counts.get(s, 0) for s in ('failed', 'cancelled', 'expired', 'refunded'))
+    completed = success + failed
+    financial = OperationFeeSnapshot.financial_context
+    net_key = 'merchant_payable_usdt' if merchant else 'debit_usdt'
+    fee_key = 'merchant_fee_usdt' if merchant else 'trader_fee_usdt'
+    paid_totals = (await db.execute(select(func.coalesce(func.sum(Deposit.amount), 0),
+        func.coalesce(func.sum(cast(financial[net_key].as_string(), Numeric(38, 12))), 0),
+        func.coalesce(func.sum(cast(financial[fee_key].as_string(), Numeric(38, 12))), 0))
+        .join(OperationFeeSnapshot, OperationFeeSnapshot.deposit_id == Deposit.id)
+        .where(Deposit.id.in_(select(scoped.c.id)), Deposit.status == 'paid'))).one()
+    statistics = {'total': total, 'successful': success, 'failed': failed,
+        'active': total - completed, 'completed': completed,
+        'conversion': Decimal(success) * 100 / Decimal(completed) if completed else Decimal(0),
+        'turnover_tjs': paid_totals[0], 'settled_usdt': paid_totals[1], 'fee_usdt': paid_totals[2]}
+    status = filters.get('tj_status', '')
+    if status in ('created', 'pending', 'paid', 'failed', 'cancelled', 'expired', 'refunded', 'appeal_opened'):
+        base = base.where(Deposit.status == status)
+    search = filters.get('tj_query', '').strip()[:120]
+    if search:
+        from sqlalchemy import String, or_
+        base = base.where(or_(cast(Deposit.id, String).contains(search, autoescape=True),
+            Deposit.external_id.contains(search, autoescape=True)))
+    filtered_count = await db.scalar(select(func.count()).select_from(base.subquery()))
+    try:
+        page = max(1, min(int(filters.get('tj_page', '1')), 1000000))
+    except (ValueError, TypeError):
+        page = 1
+    pages = max(1, (filtered_count + 24) // 25)
+    page = min(page, pages)
+    recent = list(await db.scalars(base.order_by(Deposit.created_at.desc(), Deposit.id.desc()).offset((page - 1) * 25).limit(25)))
+    def page_url(number):
+        query = {k: v for k, v in filters.items() if k.startswith('tj_') or k == 'section'}
+        query['tj_page'] = str(number)
+        return '?' + urlencode(query)
+    pagination = {'page': page, 'pages': pages, 'count': filtered_count,
+        'previous': page_url(page - 1) if page > 1 else None,
+        'next': page_url(page + 1) if page < pages else None}
     own_finance = {}
     snapshots = (await db.execute(select(OperationFeeSnapshot).where(
         OperationFeeSnapshot.deposit_id.in_([op.id for op in recent])))).scalars().all() if recent else []
@@ -115,7 +166,27 @@ async def cabinet_context(db, *, merchant=None, trader=None):
     admission = admission_status()
     if qa_enabled:
         admission = {**admission,'reason':'Изолированная QA: синтетические котировки и платежи. Реальный приём TJ закрыт.'}
+    if merchant:
+        journal = list(await db.scalars(select(LedgerEntry).where(LedgerEntry.merchant_id == subject.id,
+            LedgerEntry.currency.in_(('TJS', 'USDT'))).order_by(LedgerEntry.created_at.desc(), LedgerEntry.id.desc()).limit(100)))
+        settlements = list(await db.scalars(select(MerchantSettlement).where(MerchantSettlement.merchant_id == subject.id,
+            MerchantSettlement.country == 'TJ').order_by(MerchantSettlement.created_at.desc()).limit(100)))
+        from app.services.rolling import rolling_overview, list_rolling_transfers
+        rolling = await rolling_overview(db, subject.id)
+        rolling['transfers'] = await list_rolling_transfers(db, subject.id)
+    else:
+        journal = list(await db.scalars(select(TraderWalletLedgerEntry).where(TraderWalletLedgerEntry.trader_id == subject.id,
+            TraderWalletLedgerEntry.currency.in_(('TJS', 'USDT'))).order_by(TraderWalletLedgerEntry.created_at.desc(), TraderWalletLedgerEntry.id.desc()).limit(100)))
+        settlements, rolling = [], {}
+    grouped_settlements = dict((await db.execute(select(MerchantSettlement.status,
+        func.coalesce(func.sum(MerchantSettlement.reserve_amount), 0)).where(
+        MerchantSettlement.merchant_id == subject.id, MerchantSettlement.country == 'TJ',
+        MerchantSettlement.balance_currency == 'USDT').group_by(MerchantSettlement.status))).all()) if merchant else {}
+    settlement_totals = {state: grouped_settlements.get(state, Decimal(0))
+        for state in ('pending', 'approved', 'sent', 'reconciliation', 'completed')}
     return {'admission':admission,'wallets':values,'party':party,'cabinet_id':str(subject.id),
             'tariffs':[public_plan(p) for p in plans], 'current_tiers':current_tiers, 'tariff_ready':bool(assigned),
             'successful_count':count,'turnover_tjs':turnover, 'operations':recent,
-            'qa_financial':qa_enabled,'operation_finance':own_finance}
+            'qa_financial':qa_enabled,'operation_finance':own_finance, 'statistics': statistics,
+            'filters': filters, 'pagination': pagination, 'journal': journal,
+            'settlements': settlements, 'settlement_totals': settlement_totals, 'rolling': rolling}

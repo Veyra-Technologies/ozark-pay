@@ -1691,9 +1691,10 @@ class ExternalProcessorConnection(Base, TimestampMixin):
     __tablename__='external_processor_connections'
     id: Mapped[uuid.UUID]=mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str]=mapped_column(String(160), unique=True, index=True)
-    adapter_type: Mapped[str]=mapped_column(String(32), default='tradespace', index=True)
+    adapter_type: Mapped[str]=mapped_column(String(32), default='merchant_hmac_v2', index=True)
     environment: Mapped[str]=mapped_column(String(16), default='sandbox', index=True)
     api_base_url: Mapped[str]=mapped_column(String(500))
+    webhook_header_prefix: Mapped[str]=mapped_column(String(64), default='X-Processor', server_default='X-Processor')
     api_key_encrypted: Mapped[str]=mapped_column(Text)
     api_secret_encrypted: Mapped[str]=mapped_column(Text)
     webhook_key_id: Mapped[str]=mapped_column(String(160))
@@ -1715,7 +1716,7 @@ class ExternalProcessorConnection(Base, TimestampMixin):
     updated_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     is_archived: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
     __table_args__=(
-        CheckConstraint("adapter_type IN ('tradespace')", name='ck_external_processor_adapter'),
+        CheckConstraint("adapter_type IN ('merchant_hmac_v2')", name='ck_external_processor_adapter'),
         CheckConstraint("environment IN ('sandbox','production')", name='ck_external_processor_environment'),
         CheckConstraint('min_amount >= 0', name='ck_external_processor_min_amount'),
         CheckConstraint('max_amount > min_amount', name='ck_external_processor_amount_range'),
@@ -1733,6 +1734,7 @@ class ExternalProcessorVersion(Base, TimestampMixin):
     adapter_type: Mapped[str]=mapped_column(String(32))
     environment: Mapped[str]=mapped_column(String(16))
     api_base_url: Mapped[str]=mapped_column(String(500))
+    webhook_header_prefix: Mapped[str]=mapped_column(String(64), default='X-Processor', server_default='X-Processor')
     api_key_encrypted: Mapped[str]=mapped_column(Text)
     api_secret_encrypted: Mapped[str]=mapped_column(Text)
     webhook_key_id: Mapped[str]=mapped_column(String(160), index=True)
@@ -1749,7 +1751,7 @@ class ExternalProcessorVersion(Base, TimestampMixin):
     created_by: Mapped[uuid.UUID|None]=mapped_column(UUID(as_uuid=True), ForeignKey('users.id', ondelete='SET NULL'), nullable=True)
     __table_args__=(
         UniqueConstraint('connection_id','version', name='uq_external_processor_version'),
-        CheckConstraint("adapter_type IN ('tradespace')", name='ck_external_processor_version_adapter'),
+        CheckConstraint("adapter_type IN ('merchant_hmac_v2')", name='ck_external_processor_version_adapter'),
         CheckConstraint("environment IN ('sandbox','production')", name='ck_external_processor_version_environment'),
     )
 

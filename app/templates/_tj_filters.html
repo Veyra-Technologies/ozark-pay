@@ -1,0 +1,7 @@
+<form method="get" class="filters" data-tj-filters>
+<input type="hidden" name="section" value="{{ section_id }}">
+<label>Период<select name="tj_period">{% for value,label in [('all','За всё время'),('1','Сутки'),('7','7 дней'),('30','30 дней'),('90','90 дней')] %}<option value="{{ value }}" {% if tj_cabinet.filters.get('tj_period','all') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+<label>С даты<input type="date" name="tj_from" value="{{ tj_cabinet.filters.get('tj_from','') }}"></label>
+<label>По дату<input type="date" name="tj_to" value="{{ tj_cabinet.filters.get('tj_to','') }}"></label>
+{% if s != 'Статистика' %}<label>ID / номер заявки<input name="tj_query" maxlength="120" value="{{ tj_cabinet.filters.get('tj_query','') }}"></label><label>Статус<select name="tj_status"><option value="">Все</option>{% for status in ['created','pending','appeal_opened','paid','cancelled','failed','expired','refunded'] %}<option value="{{ status }}" {% if tj_cabinet.filters.get('tj_status') == status %}selected{% endif %}>{{ status|status_label }}</option>{% endfor %}</select></label>{% endif %}
+<button type="submit">Применить</button></form>
